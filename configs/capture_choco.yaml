@@ -82,3 +82,6 @@ control:
   k_thr: 0.8
   goal_success_dist_norm: 0.01   # normalized dist threshold (0.01 * diag)
   speed_scale_mps: 10.0
+
+env:
+  clear_on_done: true

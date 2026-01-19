@@ -37,6 +37,7 @@ class ChocolateEnv:
         physics_dt: float,
         action_repeat: int = 4,
         max_steps: int = 600,
+        clear_on_done: bool = True,
         goal_success_dist_norm: float = 0.01,
         reward_scale: float = 1.0,
         success_bonus: float = 1.0,
@@ -58,6 +59,7 @@ class ChocolateEnv:
         self.action_repeat = max(1, int(action_repeat))
         self.max_steps = int(max_steps)
 
+        self.clear_on_done = bool(clear_on_done)
         self.goal_success_dist_norm = float(goal_success_dist_norm)
         self.reward_scale = float(reward_scale)
         self.success_bonus = float(success_bonus)
@@ -75,6 +77,7 @@ class ChocolateEnv:
         self._mask: np.ndarray = np.zeros((0,), dtype=bool)
         self._prev_dist_n: np.ndarray = np.zeros((0,), dtype=np.float32)
         self._done: np.ndarray = np.zeros((0,), dtype=bool)
+        self._success_latched: np.ndarray = np.zeros((0,), dtype=bool)
 
     # -------------------------
     # Core API
@@ -141,6 +144,7 @@ class ChocolateEnv:
         self._mask = mask.copy()
         self._prev_dist_n = obs[:, 4].astype(np.float32).copy() if obs.shape[0] > 0 else np.zeros((0,), np.float32)
         self._done = np.zeros((len(keys),), dtype=bool)
+        self._success_latched = np.zeros((len(keys),), dtype=bool)
 
         if self.verbose:
             print(f"[env.reset] done. N={len(keys)} active={int(mask.sum())}")
@@ -186,15 +190,73 @@ class ChocolateEnv:
             self._keys = keys
             self._mask = mask.copy()
             self._prev_dist_n = obs[:, 4].astype(np.float32).copy()
+
+            print("[env.step] better add done memory: re-init _done due to key change")
             self._done = np.zeros((len(keys),), dtype=bool)
+            self._success_latched = np.zeros((len(keys),), dtype=bool)
             N = len(keys)
 
+        # Safety: ensure _done exists and matches N
+        if self._done is None or len(self._done) != N:
+            print("[env.step] better add done memory: init _done (len mismatch or None)")
+            self._done = np.zeros((N,), dtype=bool)
+        else:
+            print("[env.step] done memory found")
+        if self._success_latched is None or len(self._success_latched) != N:
+            print("[env.step] init _success_latched (len mismatch or None)")
+            self._success_latched = np.zeros((N,), dtype=bool)
+
+        # dist_n is obs[:,4]
         dist_n = obs[:, 4].astype(np.float32)
+
+        # SUCCESS LOGIC
+        success_now = (dist_n < self.goal_success_dist_norm) & mask
+        newly_success = success_now & (~self._success_latched)
+
+        if mask.any():
+            print("[dbg] dist_n:", dist_n)
+            print("[dbg] success_now:", success_now, "thresh=", self.goal_success_dist_norm)
+            print("[dbg] newly_success:", newly_success)
+
+        # Latch SUCCESS permanently (separate from done)
+        if newly_success.any():
+            print(f"[env.step] success achieved by {int(newly_success.sum())} agents (latching success=True)")
+            self._success_latched[newly_success] = True
+        else:
+            print("[env.step] no newly_success this step")
+
+        # persistent success flag for info/logging
+        success_latched = self._success_latched.copy()
+
+
+        # Freeze/hide newly successful agents
+        if newly_success.any():
+            self._done[newly_success] = True
+            print("[env.step] trying _freeze_agents(...)")
+            self._freeze_agents(keys, newly_success)
+            print("[env.step] _freeze_agents done")
+            if self.clear_on_done:
+                print("[env.step] trying _hide_agents(...) because clear_on_done=True")
+                self._hide_agents(keys, newly_success)
+                print("[env.step] _hide_agents done")
+            else:
+                print("[env.step] clear_on_done=False, skip hiding")
+        else:
+            print("[env.step] no newly_success -> skip freeze/hide")
 
         # Reward: progress
         progress = (self._prev_dist_n - dist_n) * self.reward_scale
         reward = np.zeros((N,), dtype=np.float32)
         reward[mask] = progress[mask]
+
+        # Add success bonus ONLY for newly_success (latched)
+        if newly_success.any():
+            if self.verbose:
+                print(f"[env.step] adding success bonus={self.success_bonus} to newly_success")
+            reward[newly_success] += self.success_bonus
+        else:
+            if self.verbose:
+                print("[env.step] no newly_success -> no bonus")
 
         # Optional action penalty
         if self.action_l2_penalty > 0.0:
@@ -203,24 +265,17 @@ class ChocolateEnv:
             a2 = (U[:, 0] ** 2 + U[:, 1] ** 2 + U[:, 2] ** 2).astype(np.float32)
             reward[mask] -= self.action_l2_penalty * a2[mask]
 
-        # Done conditions
-        success = (dist_n < self.goal_success_dist_norm) & mask
+        # Done conditions:
+        # - latched successes stay done
+        # - invalid mask are done
+        # - timeout ends all active agents
         timeout = (self.t + 1) >= self.max_steps
-        if mask.any():
-            print("[dbg] dist_n:", dist_n)
-            print("[dbg] success:", success, "thresh=", self.goal_success_dist_norm)
 
         done = self._done.copy()
         done |= ~mask
-        done |= success
         if timeout:
+            print("[env.step] timeout=True -> done |= mask")
             done |= mask
-
-        newly_success = success & (~self._done)
-        if newly_success.any():
-            if self.verbose:
-                print(f"[env.step] success achieved by {int(newly_success.sum())} agents, adding bonus={self.success_bonus}")
-            reward[newly_success] += self.success_bonus
 
         # Update state
         self._prev_dist_n = dist_n.copy()
@@ -232,7 +287,7 @@ class ChocolateEnv:
             keys=keys,
             mask=mask,
             dist_n=dist_n,
-            success=success,
+            success=success_latched,           # latched success (persistent)
             timeout=bool(timeout),
             t_env=int(self.t),
         )
@@ -244,6 +299,7 @@ class ChocolateEnv:
                 print(f"[env.step] t={self.t} active=0 (no valid agents)")
 
         return obs, reward, done, info
+
     
     def _freeze_agents(self, keys, freeze_mask: np.ndarray) -> None:
         """Brake+zero controls for agents in freeze_mask."""
@@ -267,7 +323,6 @@ class ChocolateEnv:
         if not hide_mask.any():
             print("[env] _hide_agents: none to hide")
             return
-
         from pxr import UsdGeom
         idx = np.where(hide_mask)[0]
         print(f"[env] _hide_agents: hiding {len(idx)} agents")

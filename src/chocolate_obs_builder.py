@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from pxr import Usd, UsdGeom, Gf
+from pxr import UsdPhysics
+
 
 # ----------------------------
 # Small math helpers
@@ -35,6 +37,36 @@ def _world_to_ego_xy(dx: float, dy: float, yaw: float) -> Tuple[float, float]:
     x_ego =  cy * dx + sy * dy
     y_ego = -sy * dx + cy * dy
     return x_ego, y_ego
+
+def _get_rb_linear_velocity_world(rb_prim: Usd.Prim, tc: Usd.TimeCode) -> Tuple[float, float, float]:
+    """
+    Returns linear velocity in WORLD frame (stage units/sec), (vx, vy, vz).
+    """
+    rb = UsdPhysics.RigidBodyAPI(rb_prim)
+    v_attr = rb.GetVelocityAttr()
+    if not v_attr or not v_attr.IsValid():
+        return 0.0, 0.0, 0.0
+    v = v_attr.Get(tc)
+    if v is None:
+        return 0.0, 0.0, 0.0
+    return float(v[0]), float(v[1]), float(v[2])
+
+def _find_rigid_body_prim(start_prim: Usd.Prim) -> Optional[Usd.Prim]:
+    """
+    Walk up parents to find a prim with UsdPhysics.RigidBodyAPI applied.
+    (Commonly the chassis prim for a PhysX vehicle.)
+    """
+    p = start_prim
+    while p and p.IsValid():
+        try:
+            rb = UsdPhysics.RigidBodyAPI(p)
+            # The API object always "constructs", but we need to confirm it has velocity attrs
+            if rb.GetVelocityAttr().IsValid():
+                return p
+        except Exception:
+            pass
+        p = p.GetParent()
+    return None
 
 # ----------------------------
 # Goal lookup (from your builder’s customData)
@@ -93,10 +125,10 @@ def _build_goal_map_for_world(stage: Usd.Stage, goals_root_path: str) -> Dict[in
 # ----------------------------
 # Observation builder
 # ----------------------------
-@dataclass
-class ObsState:
-    # store last position per AgentKey to estimate velocity
-    prev_pos_xy_m: Dict[object, Tuple[float, float]]
+# @dataclass
+# class ObsState:
+#     # store last position per AgentKey to estimate velocity
+#     prev_pos_xy_m: Dict[object, Tuple[float, float]]
 
 class ChocolateObsBuilder:
     """
@@ -112,7 +144,8 @@ class ChocolateObsBuilder:
       ]
     """
     def __init__(self):
-        self.state = ObsState(prev_pos_xy_m={})
+        pass
+        #self.state = ObsState(prev_pos_xy_m={})
 
     def build_obs_all_controlled(
         self,
@@ -127,7 +160,7 @@ class ChocolateObsBuilder:
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         """
         Returns:
-          obs:  (N,6) float32
+          obs:  (N,7) float32
           mask: (N,) bool  (True if goal + pose valid)
           keys: length N (AgentKey list aligned with obs rows)
         """
@@ -181,15 +214,34 @@ class ChocolateObsBuilder:
             he_c = math.cos(he)
 
             # Finite-diff velocity in ego frame
-            prev = self.state.prev_pos_xy_m.get(k, None)
-            if prev is None or dt <= 1e-9:
-                vx_ego, vy_ego = 0.0, 0.0
-            else:
-                vx_w = (px - prev[0]) / dt
-                vy_w = (py - prev[1]) / dt
-                vx_ego, vy_ego = _world_to_ego_xy(vx_w, vy_w, yaw)
+            # prev = self.state.prev_pos_xy_m.get(k, None)
+            # if prev is None or dt <= 1e-9:
+            #     vx_ego, vy_ego = 0.0, 0.0
+            # else:
+            #     vx_w = (px - prev[0]) / dt
+            #     vy_w = (py - prev[1]) / dt
+            #     vx_ego, vy_ego = _world_to_ego_xy(vx_w, vy_w, yaw)
 
-            self.state.prev_pos_xy_m[k] = (px, py)
+            # self.state.prev_pos_xy_m[k] = (px, py)
+            # PhysX rigid-body velocity -> ego frame
+            tc = Usd.TimeCode.Default()
+
+            vx_ego, vy_ego = 0.0, 0.0
+            try:
+                # Start from something you have: h.xform is an Xform prim wrapper, so use its prim
+                start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+                if start_prim is None:
+                    start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+
+                if start_prim is not None:
+                    rb_prim = _find_rigid_body_prim(start_prim)
+                    if rb_prim is not None:
+                        vx_w, vy_w, _vz_w = _get_rb_linear_velocity_world(rb_prim, tc)
+                        vx_ego, vy_ego = _world_to_ego_xy(vx_w, vy_w, yaw)
+            except Exception:
+                # keep zeros if anything fails
+                vx_ego, vy_ego = 0.0, 0.0
+
 
             # normalization
             L = float(bounds_size_m)              # e.g. 200.0

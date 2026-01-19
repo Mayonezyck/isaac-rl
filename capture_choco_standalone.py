@@ -754,7 +754,8 @@ def main() -> None:
             verbose=True,
         )
         ctrl.refresh()
-        
+        env_cfg = cfg.get("env", {}) or {}
+        print(env_cfg)
         from policy import heuristic_policy
         #print('where could it be?')
         env = ChocolateEnv(
@@ -766,6 +767,7 @@ def main() -> None:
             physics_dt=physics_dt,
             action_repeat=int(cfg["control"].get("action_repeat", 4)),
             max_steps=300,
+            clear_on_done=bool(env_cfg["clear_on_done"]),
             goal_success_dist_norm=float(cfg["control"].get("goal_success_dist_norm", 0.01)),
             reward_scale=1.0,
             success_bonus=1.0,
