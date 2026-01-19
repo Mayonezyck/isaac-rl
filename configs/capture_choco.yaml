@@ -49,7 +49,7 @@ agents:
 
 physics:
   warmup_frames: 30
-  capture_frames: 600
+  capture_frames: 6000
   physics_substeps_per_frame: 1
 
 ground:
@@ -74,4 +74,11 @@ camera:
   vert_aperture: 15.2908
 
 control:
-  action_repeat: 4
+  enable: true
+  action_repeat: 4          # apply new action every 4 physics steps
+  thr_clip: [0.0, 0.6]
+  steer_clip: [-1.0, 1.0]
+  k_steer: 2.0
+  k_thr: 0.8
+  goal_success_dist_norm: 0.01   # normalized dist threshold (0.01 * diag)
+  speed_scale_mps: 10.0

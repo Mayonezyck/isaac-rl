@@ -115,6 +115,15 @@ class ChocolateWorldVehicleController:
                 if not vehicle_root_prim.IsValid():
                     continue
 
+                # ✅ Pose prim is the moving child:
+                pose_path = vehicle_root_path + "/Vehicle"
+                pose_prim = self.stage.GetPrimAtPath(pose_path)
+                if not pose_prim.IsValid():
+                    # fallback to old behavior if needed
+                    pose_path = vehicle_root_path
+                    pose_prim = vehicle_root_prim
+
+
                 found_agents += 1
 
                 # Controller prim path is fixed by ctrl_suffix (no scanning)
@@ -135,10 +144,10 @@ class ChocolateWorldVehicleController:
                     key=key,
                     vehicle_root_path=vehicle_root_path,
                     ctrl_path=ctrl_path,
-                    pose_path=vehicle_root_path,  # stable pose prim
+                    pose_path=pose_path,  # stable pose prim
                     ctrl_prim=ctrl_prim,
-                    pose_prim=vehicle_root_prim,
-                    xform=UsdGeom.Xformable(vehicle_root_prim),
+                    pose_prim=pose_prim,
+                    xform=UsdGeom.Xformable(pose_prim),
                     accel=accel,
                     steer=steer if steer.IsValid() else None,
                     brake=brake if brake.IsValid() else None,
