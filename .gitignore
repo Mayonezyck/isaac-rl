@@ -1,5 +1,8 @@
 # Repo dignore
 data/
+out/
+_captures_300/
+.conda/
 
 
 

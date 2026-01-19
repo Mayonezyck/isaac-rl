@@ -4,7 +4,7 @@
 #
 # Usage examples:
 #   # UI mode (recommended first):
-#   ./python.sh main_chocolate_isaac.py --json_dir /path/to/jsons --worlds 16 --cols 4
+#   ./python.sh chocolate_main.py --json_dir /path/to/jsons --worlds 16 --cols 4
 #
 #   # Headless:
 #   ./python.sh main_chocolate_isaac.py --headless --json_dir /path/to/jsons --worlds 64 --cols 8
@@ -21,6 +21,21 @@ from pathlib import Path
 # Isaac Sim app
 from isaacsim import SimulationApp
 
+def enable_exts(ext_names):
+    import omni.kit.app
+    app = omni.kit.app.get_app()
+    em = app.get_extension_manager()
+
+    for name in ext_names:
+        try:
+            em.set_extension_enabled_immediate(name, True)
+            print(f"[ext] enabled: {name}")
+        except Exception as e:
+            print(f"[ext] failed to enable {name}: {e}")
+
+    # IMPORTANT: let Kit load them
+    for _ in range(5):
+        app.update()
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -52,11 +67,35 @@ def main():
         }
     )
 
+    import omni.kit.app
+
+    app = omni.kit.app.get_app()
+    em = app.get_extension_manager()
+
+    # List all extension IDs that contain "vehicle" or "physx"
+    all_exts = em.get_extensions()  # list of dicts
+    hits = []
+    for e in all_exts:
+        ext_id = e.get("id") or ""
+        name = e.get("name") or ""
+        if ("vehicle" in ext_id.lower()) or ("vehicle" in name.lower()) or ("physx" in ext_id.lower()):
+            hits.append((ext_id, name, e.get("version")))
+
+    hits = sorted(hits, key=lambda x: x[0])
+    print("\n".join([f"{a} | {b} | {c}" for a,b,c in hits[:200]]))
+    print(f"\n[dbg] total hits: {len(hits)}")
+
     # 2) Now safe to import omni/pxr things
     import omni.usd
     import omni.kit.app
     import omni.timeline
     from pxr import UsdGeom, UsdPhysics, PhysxSchema
+
+    # ✅ enable extensions BEFORE importing your builder module
+    enable_exts([
+        "omni.physxvehicle",          # the one your working code uses
+        "omni.physx.vehicle",         # sometimes present in other installs
+    ])
 
     # Your builder module
     from chocolateBuilder import ChocolateBarConstructor, GridLayout
