@@ -11,7 +11,7 @@ io:
 
 world:
   root_container: "/World/MiniWorlds"
-  world_count: 5
+  world_count: 1
   grid_cols: 1            # W=2
   rows: 1                 # L=5 (informational; derived from world_count/grid_cols)
   world_size_m: [200.0, 200.0]
@@ -49,7 +49,7 @@ agents:
 
 physics:
   warmup_frames: 30
-  capture_frames: 1800
+  capture_frames: 600
   physics_substeps_per_frame: 1
 
 ground:
@@ -63,12 +63,15 @@ camera:
   prim_path: "/World/CaptureCam"
   mode: pose
   pose:
-    pos_units: [81.273,-48.969,106.020]
-    rot_axis: [0.304,0.360,-0.882]
-    rot_deg: 75.395
+    pos_units: [26.428,-1.383,319.049]
+    rot_axis: [0.021,-0.027,1]
+    rot_deg: 269.109
   print_every_n: 10
   height_m: 120.0
   look_at_z_m: 0.0
   focal_length: 24.0
   horiz_aperture: 20.955
   vert_aperture: 15.2908
+
+control:
+  action_repeat: 4

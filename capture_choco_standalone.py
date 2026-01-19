@@ -5,6 +5,7 @@ import math
 import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
+import numpy as np
 
 # ----------------------------
 # Config loader
@@ -74,7 +75,7 @@ simulation_app.update()
 
 # Import your builder AFTER enabling extensions
 from src.chocolate_waymo_builder import ChocolateBarConstructor, GridLayout  # noqa: E402
-
+from src.chocolate_vehicle_controller import ChocolateWorldVehicleController
 
 # ----------------------------
 # Helpers
@@ -691,6 +692,34 @@ def main() -> None:
             rendering_dt=render_dt,
         )
         sim.initialize_physics()
+        # ---- vehicle controller registry (after physics init) ----
+        # one small step helps ensure any late-bound controller prims are present
+        sim.step(render=False)
+        ctrl_cfg = cfg.get("control", {})
+        ACTION_REPEAT = int(ctrl_cfg.get("action_repeat", 1))
+        ACTION_REPEAT = max(1, ACTION_REPEAT)
+        print(f"[control] action_repeat={ACTION_REPEAT}")
+        ctrl_suffix_candidates = ["", "/Vehicle", "/VehicleController"]
+        ctrl = None
+        for suf in ctrl_suffix_candidates:
+            _ctrl = ChocolateWorldVehicleController(
+                stage=stage,
+                root_container=str(wcfg["root_container"]),
+                world_count=int(wcfg["world_count"]),
+                ctrl_suffix=suf,
+                verbose=True,
+            )
+            _ctrl.refresh()
+            if len(_ctrl.keys()) > 0:
+                print(f"[ChocoCtrl] using ctrl_suffix='{suf}'")
+                ctrl = _ctrl
+                break
+
+        if ctrl is None:
+            print("[ChocoCtrl] ERROR: found 0 controllable vehicles with any ctrl_suffix candidate.")
+            # you can raise here if you want:
+            # raise RuntimeError("No controllable vehicles found; controller attrs not located.")
+
 
         warmup_frames = int(phys_cfg.get("warmup_frames", 30))
         capture_frames = int(phys_cfg.get("capture_frames", 300))
@@ -703,7 +732,28 @@ def main() -> None:
         print(f"[run] warmup={warmup_frames} frames, capture={capture_frames} frames, out={out_dir}")
 
         total = warmup_frames + capture_frames
+
+
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================  
         for t in range(total):
+            if ctrl is not None and ctrl.keys():
+                if (t % ACTION_REPEAT) == 0 or U_last is None:
+                    # compute / sample a new action here
+                    Ks = ctrl.keys()
+                    U_last = np.zeros((len(Ks), 3), np.float32)
+                    U_last[:, 0] = 0.25  # throttle example
+                    U_last[:, 1] = 0.0
+                    U_last[:, 2] = 0.0
+                    print(f"[ctrl] apply new action at t={t}")
+                    ctrl.apply_all(U_last)
+                else:
+                    # optional: re-apply held action (usually not necessary; attrs persist)
+                    pass
             # Step physics + render a frame
             sim.step(render=True)
 
@@ -713,18 +763,23 @@ def main() -> None:
                 print_cam_pose(stage, cam_path, tag=f"t={t}")
             cap_idx = t - warmup_frames
             out_path = out_dir / f"{prefix}{cap_idx:06d}.{ext}"
-            ok = capture_active_viewport_png(str(out_path))
-            if not ok:
-                raise RuntimeError(
-                    "Viewport capture failed. "
-                    "Make sure app.headless=false and a viewport window exists."
-                )
+            # ok = capture_active_viewport_png(str(out_path))
+            # if not ok:
+            #     raise RuntimeError(
+            #         "Viewport capture failed. "
+            #         "Make sure app.headless=false and a viewport window exists."
+            #     )
 
             # Optional tiny sleep so UI stays responsive
             # time.sleep(0.001)
 
         print(f"[done] saved {capture_frames} frames to {out_dir}")
-
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP===================================
+        #==================================MAIN LOOP=================================== 
     finally:
         simulation_app.close()
 
