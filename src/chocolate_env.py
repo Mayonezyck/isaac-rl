@@ -206,6 +206,9 @@ class ChocolateEnv:
         # Done conditions
         success = (dist_n < self.goal_success_dist_norm) & mask
         timeout = (self.t + 1) >= self.max_steps
+        if mask.any():
+            print("[dbg] dist_n:", dist_n)
+            print("[dbg] success:", success, "thresh=", self.goal_success_dist_norm)
 
         done = self._done.copy()
         done |= ~mask
@@ -241,6 +244,43 @@ class ChocolateEnv:
                 print(f"[env.step] t={self.t} active=0 (no valid agents)")
 
         return obs, reward, done, info
+    
+    def _freeze_agents(self, keys, freeze_mask: np.ndarray) -> None:
+        """Brake+zero controls for agents in freeze_mask."""
+        if not freeze_mask.any():
+            print("[env] _freeze_agents: none to freeze")
+            return
+
+        K = len(keys)
+        U_freeze = np.zeros((K, 3), dtype=np.float32)
+        U_freeze[:, 0] = 0.0   # thr
+        U_freeze[:, 1] = 0.0   # steer
+        U_freeze[:, 2] = 1.0   # brake hard
+        idx = np.where(freeze_mask)[0]
+        print(f"[env] _freeze_agents: freezing {len(idx)} agents -> brake=1")
+        # apply only to those indices
+        self.ctrl.apply_batch([keys[i] for i in idx], U_freeze[idx])
+
+
+    def _hide_agents(self, keys, hide_mask: np.ndarray) -> None:
+        """Hide vehicle prims for agents in hide_mask (visual clear)."""
+        if not hide_mask.any():
+            print("[env] _hide_agents: none to hide")
+            return
+
+        from pxr import UsdGeom
+        idx = np.where(hide_mask)[0]
+        print(f"[env] _hide_agents: hiding {len(idx)} agents")
+        for i in idx:
+            h = self.ctrl.get(keys[i].world_idx, keys[i].agent_id)
+            if h is None:
+                continue
+            try:
+                # hide the moving pose prim
+                UsdGeom.Imageable(h.pose_prim).MakeInvisible()
+            except Exception as e:
+                print("[env] _hide_agents: failed:", e)
+
 
     # -------------------------
     # Utilities
