@@ -77,7 +77,7 @@ simulation_app.update()
 from src.chocolate_waymo_builder import ChocolateBarConstructor, GridLayout  # noqa: E402
 from src.chocolate_vehicle_controller import ChocolateWorldVehicleController
 from src.chocolate_obs_builder import ChocolateObsBuilder
-from src.chocolate_env import ChocolateEnv
+
 
 # ----------------------------
 # Helpers
@@ -720,7 +720,7 @@ def main() -> None:
         if ctrl is None:
             print("[ChocoCtrl] ERROR: found 0 controllable vehicles with any ctrl_suffix candidate.")
             # you can raise here if you want:
-            # raise RuntimeError("No controllable vehicles found; controller attrs not located.")
+            raise RuntimeError("No controllable vehicles found; controller attrs not located.")
         obs_builder = ChocolateObsBuilder()
 
         warmup_frames = int(phys_cfg.get("warmup_frames", 30))
@@ -734,173 +734,225 @@ def main() -> None:
         print(f"[run] warmup={warmup_frames} frames, capture={capture_frames} frames, out={out_dir}")
 
         total = warmup_frames + capture_frames
-        #print('reached here')
-        # ----------------------------
-        # Control + Observation (Heuristic test)
-        # ----------------------------
-        ctrl_cfg = cfg.get("control", {}) or {}
-        control_enable = bool(ctrl_cfg.get("enable", True))
-        ACTION_REPEAT = int(ctrl_cfg.get("action_repeat", 4))
 
-        # world scale (for obs normalization)
-        bounds_size_m = float(wcfg["bounds_size_m"])
-        speed_scale_mps = float(ctrl_cfg.get("speed_scale_mps", 10.0))
+        import traceback
 
-        ctrl = ChocolateWorldVehicleController(
-            stage=stage,
-            root_container=str(wcfg["root_container"]),
-            world_count=int(wcfg["world_count"]),
-            ctrl_suffix="/Vehicle",  # your confirmed working controller location
-            verbose=True,
-        )
-        ctrl.refresh()
-        env_cfg = cfg.get("env", {}) or {}
-        print(env_cfg)
-        from policy import heuristic_policy
-        #print('where could it be?')
-        env = ChocolateEnv(
-            sim=sim,
-            stage=stage,
-            ctrl=ctrl,
-            obs_builder=obs_builder,
-            bounds_size_m=float(wcfg["bounds_size_m"]),
-            physics_dt=physics_dt,
-            action_repeat=int(cfg["control"].get("action_repeat", 4)),
-            max_steps=300,
-            clear_on_done=bool(env_cfg["clear_on_done"]),
-            goal_success_dist_norm=float(cfg["control"].get("goal_success_dist_norm", 0.01)),
-            reward_scale=1.0,
-            success_bonus=1.0,
-            action_l2_penalty=0.0,
-            render=True,  # set False for training runs
-            verbose=True,
-        )
+        print("[dbg] about to import ChocolateEnv")
+        try:
+            from src.chocolate_env import ChocolateEnv
+            print("[dbg] imported ChocolateEnv OK")
+        except Exception as e:
+            print("[dbg] FAILED importing ChocolateEnv:", repr(e))
+            traceback.print_exc()
+            raise
 
-        obs, mask, keys = env.reset()
-        total = warmup_frames + capture_frames
-        U_cached = None
-        print('not even in the loop yet?')
-        for t in range(total):
+        print("[dbg] about to import train_choco_ppo")
+        try:
+            from train_choco_ppo import train_shared_policy
+            print("[dbg] imported train_choco_ppo OK")
+        except Exception as e:
+            print("[dbg] FAILED importing train_choco_ppo:", repr(e))
+            traceback.print_exc()
+            raise
 
-            U = np.zeros((len(keys), 3), np.float32)
-            if mask.any():
-                U[mask] = heuristic_policy.heuristic_policy(obs[mask])  # your working heuristic
-            print(U)
-            obs, r, done, info = env.step(U)
+        print("[dbg] about to construct env")
+        try:
+            env = ChocolateEnv(
+                sim=sim,
+                stage=stage,
+                ctrl=ctrl,
+                obs_builder=obs_builder,
+                bounds_size_m=float(wcfg["bounds_size_m"]),
+                physics_dt=physics_dt,
+                action_repeat=int(cfg["control"].get("action_repeat", 4)),
+                max_steps=64,
+                clear_on_done=False,
+                goal_success_dist_m=2.0,
+                reward_scale=1.0,
+                success_bonus=10.0,
+                action_l2_penalty=1e-3,
+                render=True,
+                verbose=True,
+            )
+            print("[dbg] constructed env OK")
+        except Exception as e:
+            print("[dbg] FAILED constructing env:", repr(e))
+            traceback.print_exc()
+            raise
 
-            if (t % 10) == 0:
-                print("[dbg] step", t, "min dist_n", float(info.dist_n[info.mask].min()) if info.mask.any() else None)
+        print("[dbg] about to train")
+        model = train_shared_policy(env, total_updates=2000, rollout_T=610)
+        print("[dbg] training finished")
 
-            if done.all():
-                print("[dbg] episode done at step", t, "timeout=", info.timeout, "success=", int(info.success.sum()))
-                break
-            # # Apply new action every ACTION_REPEAT physics steps (after warmup)
-            # if control_enable and (t >= warmup_frames) and ((t - warmup_frames) % ACTION_REPEAT == 0):
-            #     #print('so the obs build died?')
-            #     #obs, mask, keys = obs_builder.build_obs_all_controlled(stage=stage, ctrl=ctrl, dt=physics_dt)
-            #     obs, mask, keys = obs_builder.build_obs_all_controlled(
-            #         stage=stage,
-            #         bounds_size_m=float(wcfg["bounds_size_m"]),
-            #         ctrl=ctrl,
-            #         dt=physics_dt,  # use your SimulationContext physics_dt
-            #         root_container="/World/MiniWorlds",
-            #         world_prefix="world_",
-            #     )
-            #     print(obs)
-            #     print(mask)
-            #     print(keys)
-            #     print('0---0')
-            #     print(obs[mask])
-            #     # Only act on valid rows
-            #     U = np.zeros((len(keys), 3), dtype=np.float32)
-            #     if mask.any():
-            #         U[mask] = heuristic_policy.heuristic_policy(obs[mask])
-            #     ctrl.apply_all(U)
 
-            #     print('U', U)
-            #     U_cached = U
-            #     print(f"[ctrl] apply new action at t={t}  active={int(mask.sum())}")
+        # print('reached here')
+        # from src.chocolate_env_legacy import ChocolateEnv
+        # # ----------------------------
+        # # Control + Observation (Heuristic test)
+        # # ----------------------------
+        # ctrl_cfg = cfg.get("control", {}) or {}
+        # control_enable = bool(ctrl_cfg.get("enable", True))
+        # ACTION_REPEAT = int(ctrl_cfg.get("action_repeat", 4))
 
-            #     # quick success check (normalized dist is obs[:,4])
-            #     if mask.any():
-            #         min_dn = float(obs[mask, 4].min())
-            #         print(f"[obs] min dist_norm={min_dn:.4f}")
-            #         # optional early stop when everyone is close
-            #         # if min_dn < success_dist_norm: break
+        # # world scale (for obs normalization)
+        # bounds_size_m = float(wcfg["bounds_size_m"])
+        # speed_scale_mps = float(ctrl_cfg.get("speed_scale_mps", 10.0))
 
-            # # Step physics + render
-            # sim.step(render=True)
+        # ctrl = ChocolateWorldVehicleController(
+        #     stage=stage,
+        #     root_container=str(wcfg["root_container"]),
+        #     world_count=int(wcfg["world_count"]),
+        #     ctrl_suffix="/Vehicle",  # your confirmed working controller location
+        #     verbose=True,
+        # )
+        # ctrl.refresh()
+        # env_cfg = cfg.get("env", {}) or {}
+        # print(env_cfg)
+        # from policy import heuristic_policy
+        # #print('where could it be?')
+        # env = ChocolateEnv(
+        #     sim=sim,
+        #     stage=stage,
+        #     ctrl=ctrl,
+        #     obs_builder=obs_builder,
+        #     bounds_size_m=float(wcfg["bounds_size_m"]),
+        #     physics_dt=physics_dt,
+        #     action_repeat=int(cfg["control"].get("action_repeat", 4)),
+        #     max_steps=300,
+        #     clear_on_done=bool(env_cfg["clear_on_done"]),
+        #     goal_success_dist_norm=float(cfg["control"].get("goal_success_dist_norm", 0.01)),
+        #     reward_scale=1.0,
+        #     success_bonus=1.0,
+        #     action_l2_penalty=0.0,
+        #     render=True,  # set False for training runs
+        #     verbose=True,
+        # )
 
-            # # Capture after warmup
-            # if t < warmup_frames:
-            #     continue
-
-            # if (t % 10) == 0:
-            #     print_cam_pose(stage, cam_path, tag=f"t={t}")
-
-            # cap_idx = t - warmup_frames
-            # out_path = out_dir / f"{prefix}{cap_idx:06d}.{ext}"
-            # ok = capture_active_viewport_png(str(out_path))
-            # if not ok:
-            #     raise RuntimeError("Viewport capture failed. Make sure headless=false.")
-
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================  
+        # obs, mask, keys = env.reset()
+        # total = warmup_frames + capture_frames
+        # U_cached = None
+        # print('not even in the loop yet?')
         # for t in range(total):
-        #     if ctrl is not None and ctrl.keys():
-        #         if (t % ACTION_REPEAT) == 0 or U_last is None:
-        #             # compute / sample a new action here
-        #             Ks = ctrl.keys()
-        #             U_last = np.zeros((len(Ks), 3), np.float32)
-        #             U_last[:, 0] = 0.25  # throttle example
-        #             U_last[:, 1] = 0.0
-        #             U_last[:, 2] = 0.0
-        #             print(f"[ctrl] apply new action at t={t}")
-        #             ctrl.apply_all(U_last)
-        #         else:
-        #             # optional: re-apply held action (usually not necessary; attrs persist)
-        #             pass
-        #     # Step physics + render a frame
-        #     sim.step(render=True)
-        #     obs, mask, keys = obs_builder.build_obs_all_controlled(
-        #         stage=stage,
-        #         bounds_size_m=float(wcfg["bounds_size_m"]),
-        #         ctrl=ctrl,
-        #         dt=physics_dt,  # use your SimulationContext physics_dt
-        #         root_container="/World/MiniWorlds",
-        #         world_prefix="world_",
-        #     )
 
-        #     if t < warmup_frames:
-        #         continue
+        #     U = np.zeros((len(keys), 3), np.float32)
+        #     if mask.any():
+        #         U[mask] = heuristic_policy.heuristic_policy(obs[mask])  # your working heuristic
+        #     print(U)
+        #     obs, r, done, info = env.step(U)
+
         #     if (t % 10) == 0:
-        #         print_cam_pose(stage, cam_path, tag=f"t={t}")
-        #         print(obs)
-        #         print(mask)
-        #         print(keys)
-        #     cap_idx = t - warmup_frames
-        #     out_path = out_dir / f"{prefix}{cap_idx:06d}.{ext}"
+        #         print("[dbg] step", t, "min dist_n", float(info.dist_n[info.mask].min()) if info.mask.any() else None)
+
+        #     if done.all():
+        #         print("[dbg] episode done at step", t, "timeout=", info.timeout, "success=", int(info.success.sum()))
+        #         break
+        #     # # Apply new action every ACTION_REPEAT physics steps (after warmup)
+        #     # if control_enable and (t >= warmup_frames) and ((t - warmup_frames) % ACTION_REPEAT == 0):
+        #     #     #print('so the obs build died?')
+        #     #     #obs, mask, keys = obs_builder.build_obs_all_controlled(stage=stage, ctrl=ctrl, dt=physics_dt)
+        #     #     obs, mask, keys = obs_builder.build_obs_all_controlled(
+        #     #         stage=stage,
+        #     #         bounds_size_m=float(wcfg["bounds_size_m"]),
+        #     #         ctrl=ctrl,
+        #     #         dt=physics_dt,  # use your SimulationContext physics_dt
+        #     #         root_container="/World/MiniWorlds",
+        #     #         world_prefix="world_",
+        #     #     )
+        #     #     print(obs)
+        #     #     print(mask)
+        #     #     print(keys)
+        #     #     print('0---0')
+        #     #     print(obs[mask])
+        #     #     # Only act on valid rows
+        #     #     U = np.zeros((len(keys), 3), dtype=np.float32)
+        #     #     if mask.any():
+        #     #         U[mask] = heuristic_policy.heuristic_policy(obs[mask])
+        #     #     ctrl.apply_all(U)
+
+        #     #     print('U', U)
+        #     #     U_cached = U
+        #     #     print(f"[ctrl] apply new action at t={t}  active={int(mask.sum())}")
+
+        #     #     # quick success check (normalized dist is obs[:,4])
+        #     #     if mask.any():
+        #     #         min_dn = float(obs[mask, 4].min())
+        #     #         print(f"[obs] min dist_norm={min_dn:.4f}")
+        #     #         # optional early stop when everyone is close
+        #     #         # if min_dn < success_dist_norm: break
+
+        #     # # Step physics + render
+        #     # sim.step(render=True)
+
+        #     # # Capture after warmup
+        #     # if t < warmup_frames:
+        #     #     continue
+
+        #     # if (t % 10) == 0:
+        #     #     print_cam_pose(stage, cam_path, tag=f"t={t}")
+
+        #     # cap_idx = t - warmup_frames
+        #     # out_path = out_dir / f"{prefix}{cap_idx:06d}.{ext}"
         #     # ok = capture_active_viewport_png(str(out_path))
         #     # if not ok:
-        #     #     raise RuntimeError(
-        #     #         "Viewport capture failed. "
-        #     #         "Make sure app.headless=false and a viewport window exists."
-        #     #     )
+        #     #     raise RuntimeError("Viewport capture failed. Make sure headless=false.")
 
-        #     # Optional tiny sleep so UI stays responsive
-        #     # time.sleep(0.001)
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================  
+        # # for t in range(total):
+        # #     if ctrl is not None and ctrl.keys():
+        # #         if (t % ACTION_REPEAT) == 0 or U_last is None:
+        # #             # compute / sample a new action here
+        # #             Ks = ctrl.keys()
+        # #             U_last = np.zeros((len(Ks), 3), np.float32)
+        # #             U_last[:, 0] = 0.25  # throttle example
+        # #             U_last[:, 1] = 0.0
+        # #             U_last[:, 2] = 0.0
+        # #             print(f"[ctrl] apply new action at t={t}")
+        # #             ctrl.apply_all(U_last)
+        # #         else:
+        # #             # optional: re-apply held action (usually not necessary; attrs persist)
+        # #             pass
+        # #     # Step physics + render a frame
+        # #     sim.step(render=True)
+        # #     obs, mask, keys = obs_builder.build_obs_all_controlled(
+        # #         stage=stage,
+        # #         bounds_size_m=float(wcfg["bounds_size_m"]),
+        # #         ctrl=ctrl,
+        # #         dt=physics_dt,  # use your SimulationContext physics_dt
+        # #         root_container="/World/MiniWorlds",
+        # #         world_prefix="world_",
+        # #     )
 
-        # print(f"[done] saved {capture_frames} frames to {out_dir}")
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP===================================
-        #==================================MAIN LOOP=================================== 
+        # #     if t < warmup_frames:
+        # #         continue
+        # #     if (t % 10) == 0:
+        # #         print_cam_pose(stage, cam_path, tag=f"t={t}")
+        # #         print(obs)
+        # #         print(mask)
+        # #         print(keys)
+        # #     cap_idx = t - warmup_frames
+        # #     out_path = out_dir / f"{prefix}{cap_idx:06d}.{ext}"
+        # #     # ok = capture_active_viewport_png(str(out_path))
+        # #     # if not ok:
+        # #     #     raise RuntimeError(
+        # #     #         "Viewport capture failed. "
+        # #     #         "Make sure app.headless=false and a viewport window exists."
+        # #     #     )
+
+        # #     # Optional tiny sleep so UI stays responsive
+        # #     # time.sleep(0.001)
+
+        # # print(f"[done] saved {capture_frames} frames to {out_dir}")
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP===================================
+        # #==================================MAIN LOOP=================================== 
     finally:
         simulation_app.close()
 

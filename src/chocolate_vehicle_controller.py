@@ -116,6 +116,7 @@ class ChocolateWorldVehicleController:
                     continue
 
                 # ✅ Pose prim is the moving child:
+                #pose_path = f"{agent_prim.GetPath().pathString}/Vehicle_Parent"
                 pose_path = vehicle_root_path + "/Vehicle"
                 pose_prim = self.stage.GetPrimAtPath(pose_path)
                 if not pose_prim.IsValid():

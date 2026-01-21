@@ -75,7 +75,7 @@ camera:
 
 control:
   enable: true
-  action_repeat: 4          # apply new action every 4 physics steps
+  action_repeat: 10          # apply new action every 4 physics steps
   thr_clip: [0.0, 0.6]
   steer_clip: [-1.0, 1.0]
   k_steer: 2.0

@@ -197,8 +197,9 @@ class _GoalPollingManager:
     - each frame: check distance(car, goal_center) <= radius
     - if yes: remove both car and goal prims
     """
-    def __init__(self, stage: Usd.Stage):
+    def __init__(self, stage: Usd.Stage, *, remove_prims_on_reach: bool = False):
         self.stage = stage
+        self.remove_prims_on_reach = bool(remove_prims_on_reach)
         self._sub = None
         # key: goal_root_path
         # val: dict(center=(x,y,z) meters, radius, car_path, agent_id)
@@ -247,15 +248,19 @@ class _GoalPollingManager:
 
             if d2 <= r2:
                 # correct car reached its own goal
+                # TRAINING-SAFE: do NOT delete the car or the goal.
+                # Just mark the goal as reached and stop polling this pair.
                 try:
-                    stage.RemovePrim(Sdf.Path(car_path))
+                    gp = stage.GetPrimAtPath(goal_path)
+                    if gp.IsValid():
+                        gp.SetCustomDataByKey("reached", True)
+                        gp.SetCustomDataByKey("reached_by_agent_id", int(info.get("agent_id", -1)))
                 except Exception:
                     pass
-                try:
-                    stage.RemovePrim(Sdf.Path(goal_path))
-                except Exception:
-                    pass
+
+                # Stop checking this goal to save overhead (but keep prims in stage)
                 to_remove.append(goal_path)
+
 
         for gp in to_remove:
             self.goals.pop(gp, None)

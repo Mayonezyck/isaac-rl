@@ -1,0 +1,26 @@
+choco_config_path: "configs/capture_choco.yaml"
+
+device: "cuda"
+
+reward_type: "weighted_combination"
+collision_weight: -0.5
+goal_achieved_weight: 1.0
+off_road_weight: -0.5
+log_distance_weight: 0.01
+
+seed: 42
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+vf_coef: 0.5
+n_steps: 128
+num_minibatches: 4
+verbose: 1
+total_timesteps: 5_000_000
+ent_coef: 0.0001
+lr: 0.0003
+n_epochs: 5
+
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: "runs/capture"
