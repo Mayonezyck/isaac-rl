@@ -24,3 +24,4 @@ n_epochs: 5
 render_every_updates: 1000
 render_rollout_steps: 0
 render_dir: "runs/capture"
+render_during_training: true

@@ -4,6 +4,7 @@ import yaml
 from box import Box
 from datetime import datetime
 
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.utils import get_schedule_fn
 
@@ -21,6 +22,11 @@ def load_config(config_path):
 
 
 def train(exp_config: Box):
+    if isinstance(exp_config.device, str) and exp_config.device.startswith("cuda") and ":" not in exp_config.device:
+        exp_config.device = "cuda:0"
+    if isinstance(exp_config.device, str) and exp_config.device.startswith("cuda"):
+        torch.cuda.set_device(exp_config.device)
+
     env = ChocolateSB3MultiAgentEnv(
         choco_config_path=exp_config.choco_config_path,
         exp_config=exp_config,
@@ -66,6 +72,7 @@ def train(exp_config: Box):
         render_every_updates=exp_config.render_every_updates,
         render_rollout_steps=exp_config.render_rollout_steps,
         render_dir=exp_config.render_dir,
+        always_render=bool(getattr(exp_config, "render_during_training", False)),
     )
 
     model.learn(total_timesteps=exp_config.total_timesteps, callback=capture_callback)

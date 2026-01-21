@@ -746,6 +746,13 @@ class WaymoJsonMiniWorldBuilder:
             agent_id = _safe_int(a.get("agent_id", idx), idx)
             agent_path = f"{self.agents_root}/Agent_{kept:04d}_id{agent_id}"
             UsdGeom.Xform.Define(self.stage, agent_path)
+            agent_prim = self.stage.GetPrimAtPath(agent_path)
+            agent_prim.SetCustomDataByKey("agent_id", int(agent_id))
+            agent_prim.SetCustomDataByKey("kept_idx", int(kept))
+            agent_prim.SetCustomDataByKey("start_local_m", (float(sx), float(sy), float(sz)))
+            agent_prim.SetCustomDataByKey("start_yaw_deg", float(np.degrees(float(syaw))))
+            agent_prim.SetCustomDataByKey("goal_local_m", (float(ex), float(ey), float(ez)))
+            agent_prim.SetCustomDataByKey("start_in_goal", bool(start_in_goal))
 
             yaw_deg = float(np.degrees(float(syaw)))
 
@@ -814,6 +821,97 @@ class WaymoJsonMiniWorldBuilder:
             kept += 1
 
         print(f"[MiniWorldBuilder] Agents kept={kept} skipped={skipped}")
+
+    def respawn_agent_with_goal(
+        self,
+        *,
+        kept_idx: int,
+        agent_id: int,
+        start_local_m: Tuple[float, float, float],
+        start_yaw_deg: float,
+        goal_local_m: Tuple[float, float, float],
+        start_in_goal: bool,
+        # parked-car knobs:
+        parked_ground_z_m: float = 0.0,
+        parked_chassis_size_m: Tuple[float, float, float] = (4.0, 2.0, 1.0),
+        parked_wheel_radius_m: float = 0.35,
+        parked_wheel_thickness_m: float = 0.15,
+        parked_wheel_inset_x_m: float = 0.35,
+        parked_wheel_inset_y_m: float = 0.25,
+        parked_ground_clearance_m: float = 0.25,
+        # goal ring knobs:
+        goal_radius_m: float = 3.0,
+        goal_ring_z_m: float = 0.0,
+        goal_ring_tube_radius_m: float = 0.12,
+        goal_trigger_height_m: float = 0.6,
+    ) -> None:
+        agent_path = f"{self.agents_root}/Agent_{int(kept_idx):04d}_id{int(agent_id)}"
+        UsdGeom.Xform.Define(self.stage, agent_path)
+        agent_prim = self.stage.GetPrimAtPath(agent_path)
+        agent_prim.SetCustomDataByKey("agent_id", int(agent_id))
+        agent_prim.SetCustomDataByKey("kept_idx", int(kept_idx))
+        agent_prim.SetCustomDataByKey(
+            "start_local_m",
+            (float(start_local_m[0]), float(start_local_m[1]), float(start_local_m[2])),
+        )
+        agent_prim.SetCustomDataByKey("start_yaw_deg", float(start_yaw_deg))
+        agent_prim.SetCustomDataByKey(
+            "goal_local_m",
+            (float(goal_local_m[0]), float(goal_local_m[1]), float(goal_local_m[2])),
+        )
+        agent_prim.SetCustomDataByKey("start_in_goal", bool(start_in_goal))
+
+        if bool(start_in_goal):
+            parked_path = f"{agent_path}/ParkedCar"
+            self._spawn_parked_car_visual(
+                parked_path,
+                position_m=(float(start_local_m[0]), float(start_local_m[1]), float(parked_ground_z_m)),
+                yaw_deg=float(start_yaw_deg),
+                chassis_size_m=parked_chassis_size_m,
+                wheel_radius_m=parked_wheel_radius_m,
+                wheel_thickness_m=parked_wheel_thickness_m,
+                wheel_inset_x_m=parked_wheel_inset_x_m,
+                wheel_inset_y_m=parked_wheel_inset_y_m,
+                ground_clearance_m=parked_ground_clearance_m,
+            )
+            prim_outer = self.stage.GetPrimAtPath(parked_path)
+            prim_outer.SetCustomDataByKey("agent_id", int(agent_id))
+            prim_outer.SetCustomDataByKey("start_in_goal", True)
+            prim_outer.SetCustomDataByKey("controllable", False)
+            return
+
+        veh_parent = f"{agent_path}/Vehicle_Parent"
+        veh_outer = self._spawn_vehicle_wizard_under(
+            veh_parent,
+            position_m=(float(start_local_m[0]), float(start_local_m[1]), float(start_local_m[2])),
+            yaw_deg=float(start_yaw_deg),
+        )
+        if veh_outer is None:
+            return
+
+        prim_outer = self.stage.GetPrimAtPath(veh_outer)
+        prim_outer.SetCustomDataByKey("agent_id", int(agent_id))
+        prim_outer.SetCustomDataByKey("start_in_goal", False)
+        prim_outer.SetCustomDataByKey("controllable", True)
+
+        goal_path = f"{self.goals_root}/Goal_{int(kept_idx):04d}_id{int(agent_id)}"
+        self._spawn_goal_ring_with_trigger(
+            goal_path,
+            center_m=(float(goal_local_m[0]), float(goal_local_m[1]), float(goal_local_m[2])),
+            radius_m=float(goal_radius_m),
+            ring_tube_radius_m=float(goal_ring_tube_radius_m),
+            trigger_height_m=float(goal_trigger_height_m),
+            z_on_ground=float(goal_ring_z_m),
+        )
+
+        mgr = _goal_mgr(self.stage)
+        mgr.add_goal(
+            goal_path,
+            center_m=(float(goal_local_m[0]), float(goal_local_m[1]), float(goal_ring_z_m)),
+            radius_m=float(goal_radius_m),
+            car_root_path=str(veh_outer),
+            agent_id=int(agent_id),
+        )
 
     # -------- entry point --------
 

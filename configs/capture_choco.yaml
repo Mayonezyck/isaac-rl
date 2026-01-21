@@ -59,6 +59,14 @@ ground:
   z_m: 0.0
   invisible: true
 
+light:
+  enable: true
+  path: "/World/__DomeLight"
+  intensity: 3000.0
+  exposure: 0.0
+  texture_file: null
+  rotation_deg_y: 0.0
+
 camera:
   prim_path: "/World/CaptureCam"
   mode: pose
@@ -85,3 +93,5 @@ control:
 
 env:
   clear_on_done: true
+  respawn_on_reset: true
+  render: true

@@ -86,6 +86,8 @@ class ChocolateEnv:
         root_container: str = "/World/MiniWorlds",
         world_prefix: str = "world_",
         warmup_on_reset_steps: int = 1,
+        respawn_on_reset: bool = False,
+        respawn_params: Optional[Dict[str, Any]] = None,
         verbose: bool = False,
     ):
         self.sim = sim
@@ -109,6 +111,8 @@ class ChocolateEnv:
         self.root_container = str(root_container)
         self.world_prefix = str(world_prefix)
         self.warmup_on_reset_steps = max(0, int(warmup_on_reset_steps))
+        self.respawn_on_reset = bool(respawn_on_reset)
+        self.respawn_params = respawn_params or {}
         self.verbose = bool(verbose)
 
         # --- episode state (per "row" = per AgentKey) ---
@@ -313,11 +317,106 @@ class ChocolateEnv:
             except Exception:
                 pass
 
+    def _find_agent_prim_path(self, world_idx: int, agent_id: int) -> Optional[str]:
+        world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
+        agents_root = f"{world_root}/Agents"
+        agents_prim = self.stage.GetPrimAtPath(agents_root)
+        if not agents_prim.IsValid():
+            return None
+        for agent_prim in agents_prim.GetAllChildren():
+            try:
+                cd = agent_prim.GetCustomData()
+            except Exception:
+                cd = {}
+            if isinstance(cd, dict) and int(cd.get("agent_id", -1)) == int(agent_id):
+                return agent_prim.GetPath().pathString
+        return None
+
+    def _respawn_agent_from_metadata(self, world_idx: int, agent_id: int) -> bool:
+        from src.chocolate_waymo_builder import WaymoJsonMiniWorldBuilder, LocalBounds
+
+        agent_path = self._find_agent_prim_path(world_idx, agent_id)
+        if agent_path is None:
+            return False
+        agent_prim = self.stage.GetPrimAtPath(agent_path)
+        if not agent_prim.IsValid():
+            return False
+        try:
+            cd = agent_prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return False
+
+        kept_idx = int(cd.get("kept_idx", -1))
+        start_local = cd.get("start_local_m", None)
+        goal_local = cd.get("goal_local_m", None)
+        start_yaw_deg = float(cd.get("start_yaw_deg", 0.0))
+        start_in_goal = bool(cd.get("start_in_goal", False))
+
+        if kept_idx < 0 or start_local is None or goal_local is None:
+            return False
+
+        world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
+        bounds = LocalBounds(
+            width_m=float(self.bounds_size_m),
+            length_m=float(self.bounds_size_m),
+            origin_xy=(0.0, 0.0),
+        )
+        builder = WaymoJsonMiniWorldBuilder(
+            stage=self.stage,
+            world_root=world_root,
+            bounds=bounds,
+            origin_mode="center",
+        )
+
+        goal_path = f"{world_root}/Goals/Goal_{kept_idx:04d}_id{int(agent_id)}"
+        self.stage.RemovePrim(goal_path)
+        self.stage.RemovePrim(agent_path)
+
+        builder.respawn_agent_with_goal(
+            kept_idx=int(kept_idx),
+            agent_id=int(agent_id),
+            start_local_m=(float(start_local[0]), float(start_local[1]), float(start_local[2])),
+            start_yaw_deg=float(start_yaw_deg),
+            goal_local_m=(float(goal_local[0]), float(goal_local[1]), float(goal_local[2])),
+            start_in_goal=bool(start_in_goal),
+            parked_ground_z_m=float(self.respawn_params.get("parked_ground_z_m", 0.0)),
+            parked_chassis_size_m=tuple(self.respawn_params.get("parked_chassis_size_m", (4.0, 2.0, 1.0))),
+            parked_wheel_radius_m=float(self.respawn_params.get("parked_wheel_radius_m", 0.35)),
+            parked_wheel_thickness_m=float(self.respawn_params.get("parked_wheel_thickness_m", 0.15)),
+            parked_wheel_inset_x_m=float(self.respawn_params.get("parked_wheel_inset_x_m", 0.35)),
+            parked_wheel_inset_y_m=float(self.respawn_params.get("parked_wheel_inset_y_m", 0.25)),
+            parked_ground_clearance_m=float(self.respawn_params.get("parked_ground_clearance_m", 0.25)),
+            goal_radius_m=float(self.respawn_params.get("goal_radius_m", self.goal_success_dist_m)),
+            goal_ring_z_m=float(self.respawn_params.get("goal_ring_z_m", 0.0)),
+            goal_ring_tube_radius_m=float(self.respawn_params.get("goal_ring_tube_radius_m", 0.12)),
+            goal_trigger_height_m=float(self.respawn_params.get("goal_trigger_height_m", 0.6)),
+        )
+
+        return True
+
     def reset_done(self, done_mask: np.ndarray) -> None:
         if done_mask is None or not np.any(done_mask):
             return
 
         idx = np.where(done_mask)[0]
+
+        if self.respawn_on_reset:
+            for i in idx:
+                k = self._keys[i]
+                self._respawn_agent_from_metadata(k.world_idx, k.agent_id)
+            self.ctrl.refresh()
+            self._done[idx] = False
+            self._success_latched[idx] = False
+            self.sim.step(render=False)
+            obs, mask, keys2 = self._build_obs()
+            self._keys = keys2
+            dist_n = obs[:, 4].astype(np.float32)
+            dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
+            self._mask = mask.copy()
+            self._prev_dist_m[idx] = dist_m[idx]
+            return
 
         # make sure spawn cache exists
         self._cache_spawn_if_missing()
@@ -369,6 +468,14 @@ class ChocolateEnv:
         dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
         self._mask = mask.copy()
         self._prev_dist_m[idx] = dist_m[idx]
+
+    def reset_timeout(self) -> None:
+        if self.respawn_on_reset and self._keys:
+            done_mask = np.ones((len(self._keys),), dtype=bool)
+            self.reset_done(done_mask)
+            self.t = 0
+        else:
+            self.reset()
 
 
     # -------------------------
@@ -441,7 +548,6 @@ class ChocolateEnv:
         # Apply controls once per env step
         self.ctrl.apply_all(U3)
 
-        print('ahhhhhhhhhhhhhh')
         # Step physics action_repeat times
         for _ in range(self.action_repeat):
             self.sim.step(render=self.render)

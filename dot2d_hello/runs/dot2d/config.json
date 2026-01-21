@@ -1,7 +1,7 @@
 {
   "seed": 42,
   "total_timesteps": 200000,
-  "num_envs": 4,
+  "num_envs": 1,
   "vec_env_type": "dummy",
   "algo": null,
   "tensorboard_log": "runs",
@@ -9,6 +9,8 @@
   "save_dir": "runs",
   "model_name": "dot2d",
   "action_noise_std": 0.1,
+  "render_during_training": true,
+  "render_freq": 1,
   "use_vecnormalize": true,
   "norm_obs": true,
   "norm_reward": false,
@@ -40,7 +42,7 @@
   },
   "env_config": {
     "action_type": "continuous",
-    "dynamics_mode": "position",
+    "dynamics_mode": "velocity",
     "observation_mode": "relative",
     "vel_enabled": false,
     "step_size": 0.1,
@@ -56,6 +58,6 @@
     "reward_mode": "dense_neg_dist",
     "alive_penalty": 0.0,
     "success_bonus": 1.0,
-    "render_mode": null
+    "render_mode": "human"
   }
 }
