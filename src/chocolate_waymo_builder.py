@@ -121,6 +121,23 @@ def _get_world_translation_m(stage: Usd.Stage, prim_path: str) -> Optional[Tuple
     return (float(t[0] * mpu), float(t[1] * mpu), float(t[2] * mpu))
 from pxr import UsdShade
 
+
+def _apply_contact_report_to_colliders(root_prim: Usd.Prim) -> None:
+    """Apply PhysX contact reporting to all collision shapes under root_prim."""
+    if PhysxSchema is None or not root_prim.IsValid():
+        return
+    for prim in Usd.PrimRange(root_prim):
+        try:
+            if not UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().IsValid():
+                continue
+            cr = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+            if hasattr(cr, "CreateThresholdAttr"):
+                cr.CreateThresholdAttr().Set(0.0)
+            else:
+                cr.CreatePhysxContactReportThresholdAttr().Set(0.0)
+        except Exception:
+            continue
+
 def _road_type_color_srgb(t: int) -> Tuple[float, float, float]:
     # Big-contrast palette (sRGB). Tune as you like.
     palette = [
@@ -376,6 +393,13 @@ class WaymoJsonMiniWorldBuilder:
         max_segments_per_type: Optional[int] = None,
         flatten_road_z: bool = True,
         road_z_m: float = 0.0,
+        enable_segment_collision: bool = False,
+        trigger_enable: bool = False,
+        trigger_height_m: float = 1.0,
+        trigger_width_scale: float = 1.0,
+        trigger_offset_z_m: float = 0.5,
+        trigger_match_segment: bool = True,
+        trigger_script_enable: bool = True,
     ) -> None:
         road = (cfg.get("road", {}) or {})
         polylines = road.get("polylines", []) or []
@@ -424,6 +448,8 @@ class WaymoJsonMiniWorldBuilder:
             seg_orients_py = []
             seg_scales_py = []
             proto_indices_py = []
+            trigger_positions_py = []
+            trigger_scales_py = []
 
             seg_count = 0
             for poly in polys:
@@ -457,6 +483,14 @@ class WaymoJsonMiniWorldBuilder:
                     seg_orients_py.append(q)
                     seg_scales_py.append(scale)
                     proto_indices_py.append(0)
+                    if trigger_enable:
+                        trigger_h = float(seg_height) if trigger_match_segment else float(trigger_height_m)
+                        trigger_positions_py.append(
+                            Gf.Vec3f(float(mid[0]), float(mid[1]), float(mid[2] + trigger_offset_z_m))
+                        )
+                        trigger_scales_py.append(
+                            Gf.Vec3f(float(length), float(seg_width * trigger_width_scale), float(trigger_h))
+                        )
 
                     seg_count += 1
                     if max_segments_per_type is not None and seg_count >= int(max_segments_per_type):
@@ -483,6 +517,13 @@ class WaymoJsonMiniWorldBuilder:
             except Exception:
                 pass
 
+            if enable_segment_collision:
+                UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+                try:
+                    UsdPhysics.CollisionAPI(cube.GetPrim()).CreateCollisionEnabledAttr(True)
+                except Exception:
+                    pass
+            cube.GetPrim().SetCustomDataByKey("road_type", int(t))
 
             instancer.CreatePrototypesRel().SetTargets([cube.GetPath()])
             instancer.GetPositionsAttr().Set(Vt.Vec3fArray(seg_positions_py))
@@ -490,6 +531,39 @@ class WaymoJsonMiniWorldBuilder:
             instancer.GetScalesAttr().Set(Vt.Vec3fArray(seg_scales_py))
             instancer.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
             instancer.GetPrim().SetCustomDataByKey("road_type", int(t))
+
+            if trigger_enable and trigger_positions_py:
+                trigger_path = f"{type_root}/Triggers"
+                trig_inst = UsdGeom.PointInstancer.Define(self.stage, trigger_path)
+                trig_proto_path = f"{trigger_path}/CubeProto"
+                trig_cube = UsdGeom.Cube.Define(self.stage, trig_proto_path)
+                trig_cube.GetSizeAttr().Set(1.0)
+
+                UsdGeom.Imageable(trig_cube.GetPrim()).MakeInvisible()
+                UsdPhysics.CollisionAPI.Apply(trig_cube.GetPrim())
+                if PhysxSchema is not None:
+                    try:
+                        PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                    except Exception:
+                        pass
+                    if trigger_script_enable:
+                        try:
+                            trigger_script = Path(__file__).resolve().parent / "trigger_road_contact.py"
+                            trig_api = PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                            trig_api.CreateEnterScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                            trig_api.CreateOnEnterScriptAttr().Set(str(trigger_script))
+                            trig_api.CreateLeaveScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                            trig_api.CreateOnLeaveScriptAttr().Set(str(trigger_script))
+                        except Exception:
+                            pass
+
+                trig_cube.GetPrim().SetCustomDataByKey("road_type", int(t))
+                trig_inst.CreatePrototypesRel().SetTargets([trig_cube.GetPath()])
+                trig_inst.GetPositionsAttr().Set(Vt.Vec3fArray(trigger_positions_py))
+                trig_inst.GetOrientationsAttr().Set(Vt.QuathArray(seg_orients_py))
+                trig_inst.GetScalesAttr().Set(Vt.Vec3fArray(trigger_scales_py))
+                trig_inst.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
+                trig_inst.GetPrim().SetCustomDataByKey("road_type", int(t))
 
     # -------- vehicles + parked cars --------
 
@@ -797,6 +871,14 @@ class WaymoJsonMiniWorldBuilder:
             prim_outer.SetCustomDataByKey("track_idx", int(_safe_int(a.get("track_idx", kept), kept)))
             prim_outer.SetCustomDataByKey("start_in_goal", False)
             prim_outer.SetCustomDataByKey("controllable", True)
+            prim_outer.SetCustomDataByKey("road_contact_types", Vt.IntArray())
+            if PhysxSchema is not None:
+                try:
+                    rb_prim = self.stage.GetPrimAtPath(f"{veh_outer}/Vehicle")
+                    if rb_prim.IsValid():
+                        _apply_contact_report_to_colliders(rb_prim)
+                except Exception:
+                    pass
 
             # GOAL ring + trigger collider (no RB), enforced z=goal_ring_z_m
             goal_path = f"{self.goals_root}/Goal_{kept:04d}_id{agent_id}"
@@ -893,6 +975,14 @@ class WaymoJsonMiniWorldBuilder:
         prim_outer.SetCustomDataByKey("agent_id", int(agent_id))
         prim_outer.SetCustomDataByKey("start_in_goal", False)
         prim_outer.SetCustomDataByKey("controllable", True)
+        prim_outer.SetCustomDataByKey("road_contact_types", Vt.IntArray())
+        if PhysxSchema is not None:
+            try:
+                rb_prim = self.stage.GetPrimAtPath(f"{veh_outer}/Vehicle")
+                if rb_prim.IsValid():
+                    _apply_contact_report_to_colliders(rb_prim)
+            except Exception:
+                pass
 
         goal_path = f"{self.goals_root}/Goal_{int(kept_idx):04d}_id{int(agent_id)}"
         self._spawn_goal_ring_with_trigger(
@@ -930,6 +1020,13 @@ class WaymoJsonMiniWorldBuilder:
         z_lift: float = 0.02,
         flatten_road_z: bool = True,
         road_z_m: float = 0.0,
+        enable_segment_collision: bool = False,
+        trigger_enable: bool = True,
+        trigger_height_m: float = 1.0,
+        trigger_width_scale: float = 1.0,
+        trigger_offset_z_m: float = 0.5,
+        trigger_match_segment: bool = True,
+        trigger_script_enable: bool = True,
 
         # agent params:
         spawn_z_m: float = 1.0,
@@ -973,6 +1070,13 @@ class WaymoJsonMiniWorldBuilder:
             z_lift=z_lift,
             flatten_road_z=flatten_road_z,
             road_z_m=road_z_m,
+            enable_segment_collision=enable_segment_collision,
+            trigger_enable=trigger_enable,
+            trigger_height_m=trigger_height_m,
+            trigger_width_scale=trigger_width_scale,
+            trigger_offset_z_m=trigger_offset_z_m,
+            trigger_match_segment=trigger_match_segment,
+            trigger_script_enable=trigger_script_enable,
         )
         self.build_agents_with_goals(
             cfg,
@@ -1185,6 +1289,13 @@ class ChocolateBarConstructor:
         z_lift: float = 0.02,
         flatten_road_z: bool = True,
         road_z_m: float = 0.0,
+        enable_segment_collision: bool = False,
+        trigger_enable: bool = False,
+        trigger_height_m: float = 1.0,
+        trigger_width_scale: float = 1.0,
+        trigger_offset_z_m: float = 0.5,
+        trigger_match_segment: bool = True,
+        trigger_script_enable: bool = True,
 
         # agent params:
         spawn_z_m: float = 1.0,
@@ -1245,6 +1356,13 @@ class ChocolateBarConstructor:
                 z_lift=z_lift,
                 flatten_road_z=flatten_road_z,
                 road_z_m=road_z_m,
+                enable_segment_collision=enable_segment_collision,
+                trigger_enable=trigger_enable,
+                trigger_height_m=trigger_height_m,
+                trigger_width_scale=trigger_width_scale,
+                trigger_offset_z_m=trigger_offset_z_m,
+                trigger_match_segment=trigger_match_segment,
+                trigger_script_enable=trigger_script_enable,
 
                 # agents
                 spawn_z_m=spawn_z_m,

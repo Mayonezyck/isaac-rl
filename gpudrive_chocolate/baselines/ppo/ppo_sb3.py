@@ -7,6 +7,7 @@ from datetime import datetime
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.utils import get_schedule_fn
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if REPO_ROOT not in sys.path:
@@ -49,24 +50,32 @@ def train(exp_config: Box):
     if hasattr(exp_config, "policy_net_arch") and exp_config.policy_net_arch:
         policy_kwargs["net_arch"] = exp_config.policy_net_arch
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        n_steps=exp_config.n_steps,
-        batch_size=exp_config.batch_size,
-        n_epochs=exp_config.n_epochs,
-        gamma=exp_config.gamma,
-        gae_lambda=exp_config.gae_lambda,
-        clip_range=exp_config.clip_range,
-        ent_coef=exp_config.ent_coef,
-        vf_coef=exp_config.vf_coef,
-        learning_rate=get_schedule_fn(exp_config.lr),
-        verbose=exp_config.verbose,
-        seed=exp_config.seed,
-        device=exp_config.device,
-        tensorboard_log=f"runs/{run_id}",
-        policy_kwargs=policy_kwargs,
-    )
+    if getattr(exp_config, "resume_from", None):
+        model = PPO.load(
+            exp_config.resume_from,
+            env=env,
+            device=exp_config.device,
+            tensorboard_log=f"runs/{run_id}",
+        )
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            n_steps=exp_config.n_steps,
+            batch_size=exp_config.batch_size,
+            n_epochs=exp_config.n_epochs,
+            gamma=exp_config.gamma,
+            gae_lambda=exp_config.gae_lambda,
+            clip_range=exp_config.clip_range,
+            ent_coef=exp_config.ent_coef,
+            vf_coef=exp_config.vf_coef,
+            learning_rate=get_schedule_fn(exp_config.lr),
+            verbose=exp_config.verbose,
+            seed=exp_config.seed,
+            device=exp_config.device,
+            tensorboard_log=f"runs/{run_id}",
+            policy_kwargs=policy_kwargs,
+        )
 
     capture_callback = RolloutCaptureCallback(
         render_every_updates=exp_config.render_every_updates,
@@ -75,7 +84,16 @@ def train(exp_config: Box):
         always_render=bool(getattr(exp_config, "render_during_training", False)),
     )
 
-    model.learn(total_timesteps=exp_config.total_timesteps, callback=capture_callback)
+    checkpoint_cb = CheckpointCallback(
+        save_freq=int(exp_config.save_freq),
+        save_path=str(exp_config.save_dir),
+        name_prefix=str(exp_config.save_prefix),
+    )
+
+    model.learn(
+        total_timesteps=exp_config.total_timesteps,
+        callback=[capture_callback, checkpoint_cb],
+    )
     env.close()
 
 

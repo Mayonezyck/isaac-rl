@@ -82,6 +82,11 @@ class ChocolateEnv:
         reward_scale: float = 1.0,
         success_bonus: float = 10.0,
         action_l2_penalty: float = 0.0,
+        collision_penalty: float = 0.0,
+        collision_penalty_types: Optional[List[int]] = None,
+        collision_debug: bool = False,
+        road_contact_done_types: Optional[List[int]] = None,
+        road_contact_done_penalty: float = -1.0,
         render: bool = False,
         root_container: str = "/World/MiniWorlds",
         world_prefix: str = "world_",
@@ -106,6 +111,11 @@ class ChocolateEnv:
         self.reward_scale = float(reward_scale)
         self.success_bonus = float(success_bonus)
         self.action_l2_penalty = float(action_l2_penalty)
+        self.collision_penalty = float(collision_penalty)
+        self.collision_penalty_types = set(int(x) for x in (collision_penalty_types or []))
+        self.collision_debug = bool(collision_debug)
+        self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
+        self.road_contact_done_penalty = float(road_contact_done_penalty)
 
         self.render = bool(render)
         self.root_container = str(root_container)
@@ -130,6 +140,10 @@ class ChocolateEnv:
         self._spawn_pos_units: dict = {}   # key -> (x_u, y_u, z_u)
         self._spawn_quat: dict = {}        # key -> (w, x, y, z)  (world orientation)
         self._mpu = float(getattr(self.sim, "meters_per_unit", 1.0))  # IsaacSim usually has this
+        self._collision_tracker = None
+        if self.collision_penalty_types or self.collision_debug:
+            self._collision_tracker = _RoadCollisionTracker(self.stage, self.ctrl, self.collision_penalty_types)
+        self._collision_debug_printed = False
 
 
     # -------------------------
@@ -316,6 +330,27 @@ class ChocolateEnv:
                 UsdGeom.Imageable(h.pose_prim).MakeInvisible()
             except Exception:
                 pass
+
+    def _get_contact_types(self, h) -> List[int]:
+        if h is None:
+            return []
+        prim = self.stage.GetPrimAtPath(h.vehicle_root_path)
+        if not prim.IsValid():
+            return []
+        try:
+            cd = prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return []
+        types = cd.get("road_contact_types", [])
+        out = []
+        try:
+            for v in types:
+                out.append(int(v))
+        except Exception:
+            return []
+        return out
 
     def _find_agent_prim_path(self, world_idx: int, agent_id: int) -> Optional[str]:
         world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
@@ -598,6 +633,40 @@ class ChocolateEnv:
         if self.action_l2_penalty > 0:
             l2 = (U3[:, 0] ** 2 + U3[:, 1] ** 2 + U3[:, 2] ** 2).astype(np.float32)
             reward[active] -= self.action_l2_penalty * l2[active]
+        print(self._collision_tracker)
+        # Collision penalty with selected road types
+        if self._collision_tracker is not None:
+            collided = self._collision_tracker.consume_collisions(keys)
+            print('collided', collided)
+            if collided.any() and self.collision_penalty != 0.0:
+                reward[collided] += float(self.collision_penalty)
+            if self.collision_debug:
+                if not self._collision_debug_printed:
+                    summary = self._collision_tracker.debug_summary()
+                    print(f"[collision-debug] trigger_summary={summary}")
+                    self._collision_debug_printed = True
+                pairs = self._collision_tracker.consume_pairs()
+                if pairs:
+                    print(f"[collision-debug] t={self.t} pairs={pairs}")
+                debug_hits = self._collision_tracker.consume_debug()
+                if debug_hits:
+                    print(f"[collision] t={self.t} hits={debug_hits}")
+
+        # Road-contact termination based on trigger contact list
+        if self.road_contact_done_types:
+            hit_contact = np.zeros((N,), dtype=bool)
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                h = self.ctrl.get(k.world_idx, k.agent_id)
+                if h is None:
+                    continue
+                contact_types = self._get_contact_types(h)
+                if any(t in self.road_contact_done_types for t in contact_types):
+                    hit_contact[i] = True
+            if hit_contact.any():
+                reward[hit_contact] += float(self.road_contact_done_penalty)
+                self._done[hit_contact] = True
 
         # Timeout
         timeout = (self.t >= self.max_steps)
@@ -623,3 +692,180 @@ class ChocolateEnv:
             t_env=int(self.t),
         )
         return obs, reward, done, info
+
+
+class _RoadCollisionTracker:
+    def __init__(self, stage: Usd.Stage, ctrl, road_types: set):
+        self.stage = stage
+        self.ctrl = ctrl
+        self.road_types = set(int(x) for x in road_types)
+        self._collided_keys = set()
+        self._debug_hits = []
+        self._pairs = []
+        self._trigger_instancers = []
+        self._trigger_counts = {}
+        self._sub = None
+        self._sub_trigger = None
+        self._scan_trigger_instancers()
+        self._subscribe()
+
+    def _subscribe(self) -> None:
+        try:
+            import omni.physx
+
+            if hasattr(omni.physx, "get_physx_simulation_interface"):
+                sim_iface = omni.physx.get_physx_simulation_interface()
+            else:
+                sim_iface = omni.physx.get_physx_interface()
+
+            if hasattr(sim_iface, "subscribe_contact_report_events"):
+                self._sub = sim_iface.subscribe_contact_report_events(self._on_contact)
+            if hasattr(sim_iface, "subscribe_trigger_report_events"):
+                self._sub_trigger = sim_iface.subscribe_trigger_report_events(self._on_trigger)
+        except Exception:
+            self._sub = None
+            self._sub_trigger = None
+
+    def _scan_trigger_instancers(self) -> None:
+        self._trigger_instancers = []
+        self._trigger_counts = {}
+        try:
+            for prim in self.stage.TraverseAll():
+                if not prim.IsValid():
+                    continue
+                path = prim.GetPath().pathString
+                if not path.endswith("/Triggers"):
+                    continue
+                if prim.GetTypeName() != "PointInstancer":
+                    continue
+                rt = None
+                try:
+                    cd = prim.GetCustomData()
+                except Exception:
+                    cd = {}
+                if isinstance(cd, dict) and "road_type" in cd:
+                    try:
+                        rt = int(cd["road_type"])
+                    except Exception:
+                        rt = None
+                self._trigger_instancers.append(path)
+                if rt is not None:
+                    self._trigger_counts[rt] = self._trigger_counts.get(rt, 0) + 1
+        except Exception:
+            pass
+
+    def debug_summary(self) -> dict:
+        return {
+            "trigger_instancers": len(self._trigger_instancers),
+            "trigger_types": dict(self._trigger_counts),
+        }
+
+    def _find_road_type(self, prim_path: str) -> Optional[int]:
+        if not prim_path:
+            return None
+        prim = self.stage.GetPrimAtPath(prim_path)
+        while prim and prim.IsValid():
+            try:
+                cd = prim.GetCustomData()
+            except Exception:
+                cd = {}
+            if isinstance(cd, dict) and "road_type" in cd:
+                try:
+                    return int(cd["road_type"])
+                except Exception:
+                    return None
+            prim = prim.GetParent()
+        return None
+
+    def _find_key_for_path(self, prim_path: str):
+        if not prim_path:
+            return None
+        for k in self.ctrl.keys():
+            h = self.ctrl.get(k.world_idx, k.agent_id)
+            if h is None:
+                continue
+            if prim_path.startswith(h.vehicle_root_path):
+                return k
+            if prim_path.startswith(h.pose_path):
+                return k
+        return None
+
+    def _handle_pair(self, a_path: str, b_path: str) -> None:
+        a_type = self._find_road_type(a_path)
+        b_type = self._find_road_type(b_path)
+
+        self._pairs.append((a_path, b_path, a_type, b_type))
+
+        if a_type is not None and a_type in self.road_types:
+            key = self._find_key_for_path(b_path)
+            if key is not None:
+                self._collided_keys.add(key)
+                self._debug_hits.append((key, int(a_type), a_path, b_path))
+        if b_type is not None and b_type in self.road_types:
+            key = self._find_key_for_path(a_path)
+            if key is not None:
+                self._collided_keys.add(key)
+                self._debug_hits.append((key, int(b_type), b_path, a_path))
+
+    def _on_contact(self, contact) -> None:
+        try:
+            a_path = getattr(contact, "actor0", None)
+            b_path = getattr(contact, "actor1", None)
+            if a_path or b_path:
+                print(f"[collision-debug] contact actor0={a_path} actor1={b_path}")
+                self._handle_pair(str(a_path), str(b_path))
+                return
+        except Exception:
+            pass
+
+        try:
+            a_path = contact.get("actor0", None)
+            b_path = contact.get("actor1", None)
+            if a_path or b_path:
+                print(f"[collision-debug] contact dict actor0={a_path} actor1={b_path}")
+                self._handle_pair(str(a_path), str(b_path))
+        except Exception:
+            pass
+
+    def _on_trigger(self, trigger) -> None:
+        try:
+            a_path = getattr(trigger, "trigger", None)
+            b_path = getattr(trigger, "other", None)
+            if a_path or b_path:
+                print(f"[collision-debug] trigger trigger={a_path} other={b_path}")
+                self._handle_pair(str(a_path), str(b_path))
+                return
+        except Exception:
+            pass
+        try:
+            a_path = trigger.get("trigger", None)
+            b_path = trigger.get("other", None)
+            if a_path or b_path:
+                print(f"[collision-debug] trigger dict trigger={a_path} other={b_path}")
+                self._handle_pair(str(a_path), str(b_path))
+        except Exception:
+            pass
+
+    def consume_collisions(self, keys: List[object]) -> np.ndarray:
+        mask = np.zeros((len(keys),), dtype=bool)
+        if not self._collided_keys:
+            return mask
+        for i, k in enumerate(keys):
+            if k in self._collided_keys:
+                mask[i] = True
+        self._collided_keys.clear()
+        return mask
+
+    def consume_debug(self) -> List[Tuple[object, int, str, str]]:
+        if not self._debug_hits:
+            return []
+        hits = list(self._debug_hits)
+        self._debug_hits.clear()
+        return hits
+
+    def consume_pairs(self) -> List[Tuple[str, str, Optional[int], Optional[int]]]:
+        if not self._pairs:
+            return []
+        pairs = list(self._pairs)
+        self._pairs.clear()
+        return pairs

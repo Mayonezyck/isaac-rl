@@ -25,3 +25,8 @@ render_every_updates: 1000
 render_rollout_steps: 0
 render_dir: "runs/capture"
 render_during_training: true
+
+save_freq: 10000
+save_dir: "runs/checkpoints"
+save_prefix: "ppo_choco"
+resume_from: null

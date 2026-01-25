@@ -11,7 +11,7 @@ io:
 
 world:
   root_container: "/World/MiniWorlds"
-  world_count: 1
+  world_count: 2
   grid_cols: 1            # W=2
   rows: 1                 # L=5 (informational; derived from world_count/grid_cols)
   world_size_m: [200.0, 200.0]
@@ -24,15 +24,22 @@ world:
 road:
   jump_break_m: 3.0
   seg_width: 0.10
-  seg_height: 0.10
+  seg_height: 0.01
   z_lift: 0.02
   flatten_road_z: true
   road_z_m: 0.0
   polyline_reduction_area: 0.0
   min_points_for_reduction: 10
+  enable_segment_collision: false
+  trigger_enable: true
+  trigger_height_m: 1.0
+  trigger_width_scale: 1.0
+  trigger_offset_z_m: 1.2
+  trigger_match_segment: true
+  trigger_script_enable: true
 
 agents:
-  spawn_z_m: 1.0
+  spawn_z_m: .7
   goal_radius_m: 3.0
   parked_if_start_in_goal: true
   start_goal_thresh_m: 10.0
@@ -95,3 +102,8 @@ env:
   clear_on_done: true
   respawn_on_reset: true
   render: true
+  collision_penalty: -1.0
+  collision_penalty_types: []
+  collision_debug: true
+  road_contact_done_types: [15]
+  road_contact_done_penalty: -5.0
