@@ -87,6 +87,10 @@ class ChocolateEnv:
         collision_debug: bool = False,
         road_contact_done_types: Optional[List[int]] = None,
         road_contact_done_penalty: float = -1.0,
+        road_points_enable: bool = False,
+        road_points_k: int = 16,
+        road_points_radius_m: float = 50.0,
+        road_points_type_norm: float = 1.0,
         render: bool = False,
         root_container: str = "/World/MiniWorlds",
         world_prefix: str = "world_",
@@ -116,6 +120,10 @@ class ChocolateEnv:
         self.collision_debug = bool(collision_debug)
         self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
         self.road_contact_done_penalty = float(road_contact_done_penalty)
+        self.road_points_enable = bool(road_points_enable)
+        self.road_points_k = int(road_points_k)
+        self.road_points_radius_m = float(road_points_radius_m)
+        self.road_points_type_norm = float(road_points_type_norm)
 
         self.render = bool(render)
         self.root_container = str(root_container)
@@ -248,6 +256,10 @@ class ChocolateEnv:
             dt=self.physics_dt,
             root_container=self.root_container,
             world_prefix=self.world_prefix,
+            road_points_enable=self.road_points_enable,
+            road_points_k=self.road_points_k,
+            road_points_radius_m=self.road_points_radius_m,
+            road_points_type_norm=self.road_points_type_norm,
         )
         return obs, mask, keys
 
@@ -633,11 +645,9 @@ class ChocolateEnv:
         if self.action_l2_penalty > 0:
             l2 = (U3[:, 0] ** 2 + U3[:, 1] ** 2 + U3[:, 2] ** 2).astype(np.float32)
             reward[active] -= self.action_l2_penalty * l2[active]
-        print(self._collision_tracker)
         # Collision penalty with selected road types
         if self._collision_tracker is not None:
             collided = self._collision_tracker.consume_collisions(keys)
-            print('collided', collided)
             if collided.any() and self.collision_penalty != 0.0:
                 reward[collided] += float(self.collision_penalty)
             if self.collision_debug:

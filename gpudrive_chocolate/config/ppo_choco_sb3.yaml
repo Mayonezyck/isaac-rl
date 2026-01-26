@@ -7,6 +7,20 @@ collision_weight: -0.5
 goal_achieved_weight: 1.0
 off_road_weight: -0.5
 log_distance_weight: 0.01
+policy_type: "late_fusion" # late_fusion or mlp
+
+late_fusion:
+  ego_dim: 7
+  point_dim: 3
+  point_k: null
+  ego_layers: [64, 64]
+  point_layers: [64, 64]
+  shared_layers: [64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: "relu"
+  dropout: 0.0
+  pool: "max"
 
 seed: 42
 gamma: 0.99

@@ -147,6 +147,29 @@ class ChocolateObsBuilder:
         pass
         #self.state = ObsState(prev_pos_xy_m={})
 
+    def _get_road_points_for_world(self, stage: Usd.Stage, world_root: str):
+        prim = stage.GetPrimAtPath(world_root)
+        if not prim.IsValid():
+            return None, None
+        try:
+            cd = prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return None, None
+        pts = cd.get("road_points_m", None)
+        types = cd.get("road_point_types", None)
+        if pts is None or types is None:
+            return None, None
+        try:
+            pts_np = np.asarray(pts, dtype=np.float32)
+            types_np = np.asarray(types, dtype=np.int32)
+        except Exception:
+            return None, None
+        if pts_np.ndim != 2 or pts_np.shape[1] < 2:
+            return None, None
+        return pts_np, types_np
+
     def build_obs_all_controlled(
         self,
         *,
@@ -157,6 +180,10 @@ class ChocolateObsBuilder:
         world_prefix: str = "world_",
         dt: float = 1.0 / 60.0,
         use_world_count_from_ctrl: bool = True,
+        road_points_enable: bool = False,
+        road_points_k: int = 16,
+        road_points_radius_m: float = 50.0,
+        road_points_type_norm: float = 1.0,
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         """
         Returns:
@@ -166,7 +193,11 @@ class ChocolateObsBuilder:
         """
         keys = ctrl.keys()
         N = len(keys)
-        obs = np.zeros((N, 7), dtype=np.float32)
+        base_dim = 7
+        extra_dim = 0
+        if road_points_enable:
+            extra_dim = int(road_points_k) * 3
+        obs = np.zeros((N, base_dim + extra_dim), dtype=np.float32)
         mask = np.zeros((N,), dtype=bool)
         #print('im in the builder')
         # Build per-world goal maps once
@@ -260,5 +291,30 @@ class ChocolateObsBuilder:
             obs[i, 4] = float(dist_n)
             obs[i, 5] = float(vx_n)
             obs[i, 6] = float(vy_n)
+            if road_points_enable:
+                world_root = f"{root_container}/{world_prefix}{k.world_idx:03d}"
+                pts, types = self._get_road_points_for_world(stage, world_root)
+                if pts is not None and types is not None and pts.shape[0] > 0:
+                    dx_all = pts[:, 0] - px
+                    dy_all = pts[:, 1] - py
+                    dist2 = dx_all * dx_all + dy_all * dy_all
+                    if road_points_radius_m > 0:
+                        keep = dist2 <= float(road_points_radius_m * road_points_radius_m)
+                    else:
+                        keep = np.ones_like(dist2, dtype=bool)
+                    idxs = np.where(keep)[0]
+                    if idxs.size > 0:
+                        idxs = idxs[np.argsort(dist2[idxs])]
+                        idxs = idxs[: int(road_points_k)]
+                        off = base_dim
+                        for j, idx in enumerate(idxs):
+                            dx = float(dx_all[idx])
+                            dy = float(dy_all[idx])
+                            x_e, y_e = _world_to_ego_xy(dx, dy, yaw)
+                            norm = float(road_points_radius_m) if road_points_radius_m > 0 else 1.0
+                            obs[i, off + 3 * j + 0] = float(x_e / norm)
+                            obs[i, off + 3 * j + 1] = float(y_e / norm)
+                            t_val = float(types[idx])
+                            obs[i, off + 3 * j + 2] = t_val / float(road_points_type_norm) if road_points_type_norm > 0 else t_val
             mask[i] = True
         return obs, mask, keys

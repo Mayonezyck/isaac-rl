@@ -403,6 +403,8 @@ class WaymoJsonMiniWorldBuilder:
     ) -> None:
         road = (cfg.get("road", {}) or {})
         polylines = road.get("polylines", []) or []
+        road_points_all: List[Gf.Vec3f] = []
+        road_types_all: List[int] = []
 
         # compute scene center (for origin_mode="center")
         if self.origin_mode == "center":
@@ -483,6 +485,8 @@ class WaymoJsonMiniWorldBuilder:
                     seg_orients_py.append(q)
                     seg_scales_py.append(scale)
                     proto_indices_py.append(0)
+                    road_points_all.append(mid)
+                    road_types_all.append(int(t))
                     if trigger_enable:
                         trigger_h = float(seg_height) if trigger_match_segment else float(trigger_height_m)
                         trigger_positions_py.append(
@@ -564,6 +568,11 @@ class WaymoJsonMiniWorldBuilder:
                 trig_inst.GetScalesAttr().Set(Vt.Vec3fArray(trigger_scales_py))
                 trig_inst.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
                 trig_inst.GetPrim().SetCustomDataByKey("road_type", int(t))
+
+        if road_points_all:
+            root_prim = self.stage.GetPrimAtPath(self.world_root)
+            root_prim.SetCustomDataByKey("road_points_m", Vt.Vec3fArray(road_points_all))
+            root_prim.SetCustomDataByKey("road_point_types", Vt.IntArray(road_types_all))
 
     # -------- vehicles + parked cars --------
 
@@ -744,9 +753,14 @@ class WaymoJsonMiniWorldBuilder:
             pass
 
         # Tag
-        stage.GetPrimAtPath(goal_root_path).SetCustomDataByKey("is_goal", True)
-        stage.GetPrimAtPath(goal_root_path).SetCustomDataByKey("goal_radius_m", float(radius_m))
-        stage.GetPrimAtPath(goal_root_path).SetCustomDataByKey("goal_center_m", (float(cx), float(cy), float(cz)))
+        goal_prim = stage.GetPrimAtPath(goal_root_path)
+        goal_prim.SetCustomDataByKey("is_goal", True)
+        goal_prim.SetCustomDataByKey("goal_radius_m", float(radius_m))
+        goal_prim.SetCustomDataByKey("goal_center_local_m", (float(cx), float(cy), float(cz)))
+        world_center = _get_world_translation_m(stage, goal_root_path)
+        if world_center is None:
+            world_center = (float(cx), float(cy), float(cz))
+        goal_prim.SetCustomDataByKey("goal_center_m", tuple(map(float, world_center)))
 
         return goal_root_path
 
@@ -892,9 +906,12 @@ class WaymoJsonMiniWorldBuilder:
             )
 
             # register with polling manager (correct car only)
+            world_center = _get_world_translation_m(self.stage, goal_path)
+            if world_center is None:
+                world_center = (float(ex), float(ey), float(goal_ring_z_m))
             mgr.add_goal(
                 goal_path,
-                center_m=(float(ex), float(ey), float(goal_ring_z_m)),
+                center_m=tuple(map(float, world_center)),
                 radius_m=float(goal_radius_m),
                 car_root_path=str(veh_outer),
                 agent_id=int(agent_id),
@@ -995,9 +1012,12 @@ class WaymoJsonMiniWorldBuilder:
         )
 
         mgr = _goal_mgr(self.stage)
+        world_center = _get_world_translation_m(self.stage, goal_path)
+        if world_center is None:
+            world_center = (float(goal_local_m[0]), float(goal_local_m[1]), float(goal_ring_z_m))
         mgr.add_goal(
             goal_path,
-            center_m=(float(goal_local_m[0]), float(goal_local_m[1]), float(goal_ring_z_m)),
+            center_m=tuple(map(float, world_center)),
             radius_m=float(goal_radius_m),
             car_root_path=str(veh_outer),
             agent_id=int(agent_id),

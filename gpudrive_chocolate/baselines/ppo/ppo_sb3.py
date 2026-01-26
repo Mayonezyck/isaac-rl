@@ -14,6 +14,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from gpudrive_chocolate.env.sb3_wrapper import ChocolateSB3MultiAgentEnv
+from gpudrive_chocolate.networks.late_fusion_policy import LateFusionPolicy
 from gpudrive_chocolate.baselines.ppo.callbacks import RolloutCaptureCallback
 
 
@@ -46,9 +47,32 @@ def train(exp_config: Box):
 
     run_id = datetime.now().strftime("%m_%d_%H_%S")
 
+    policy_type = str(getattr(exp_config, "policy_type", "mlp"))
     policy_kwargs = {}
-    if hasattr(exp_config, "policy_net_arch") and exp_config.policy_net_arch:
-        policy_kwargs["net_arch"] = exp_config.policy_net_arch
+    if policy_type == "mlp":
+        if hasattr(exp_config, "policy_net_arch") and exp_config.policy_net_arch:
+            policy_kwargs["net_arch"] = exp_config.policy_net_arch
+        policy = "MlpPolicy"
+    elif policy_type == "late_fusion":
+        lf_cfg = getattr(exp_config, "late_fusion", {})
+        policy = LateFusionPolicy
+        policy_kwargs.update(
+            {
+                "ego_dim": int(lf_cfg.get("ego_dim", 7)),
+                "point_dim": int(lf_cfg.get("point_dim", 3)),
+                "point_k": lf_cfg.get("point_k", None),
+                "ego_layers": lf_cfg.get("ego_layers", [64, 64]),
+                "point_layers": lf_cfg.get("point_layers", [64, 64]),
+                "shared_layers": lf_cfg.get("shared_layers", [64]),
+                "last_layer_dim_pi": int(lf_cfg.get("last_layer_dim_pi", 64)),
+                "last_layer_dim_vf": int(lf_cfg.get("last_layer_dim_vf", 64)),
+                "act": str(lf_cfg.get("act", "relu")),
+                "dropout": float(lf_cfg.get("dropout", 0.0)),
+                "pool": str(lf_cfg.get("pool", "max")),
+            }
+        )
+    else:
+        raise ValueError(f"Unknown policy_type: {policy_type}")
 
     if getattr(exp_config, "resume_from", None):
         model = PPO.load(
@@ -59,7 +83,7 @@ def train(exp_config: Box):
         )
     else:
         model = PPO(
-            policy="MlpPolicy",
+            policy=policy,
             env=env,
             n_steps=exp_config.n_steps,
             batch_size=exp_config.batch_size,

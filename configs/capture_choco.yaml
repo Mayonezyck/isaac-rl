@@ -11,8 +11,8 @@ io:
 
 world:
   root_container: "/World/MiniWorlds"
-  world_count: 2
-  grid_cols: 1            # W=2
+  world_count: 4
+  grid_cols: 2            # W=2
   rows: 1                 # L=5 (informational; derived from world_count/grid_cols)
   world_size_m: [200.0, 200.0]
   padding_m: 20.0
@@ -103,7 +103,15 @@ env:
   respawn_on_reset: true
   render: true
   collision_penalty: -1.0
-  collision_penalty_types: []
+  collision_penalty_types: [6]
   collision_debug: true
-  road_contact_done_types: [15]
+  road_contact_done_types: [15,16]
   road_contact_done_penalty: -5.0
+  road_points_enable: true
+  road_points_k: 200
+  road_points_radius_m: 50.0
+  road_points_type_norm: 20.0
+  obs_vis_enable: true
+  obs_vis_every_steps: 2000
+  obs_vis_out_dir: "runs/obs_vis"
+  obs_vis_agent_index: 0
