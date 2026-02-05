@@ -56,6 +56,31 @@ def _update_contact_list(veh_prim, road_type: int, enter: bool):
     updated = Vt.IntArray(sorted(cur_set))
     veh_prim.SetCustomDataByKey("road_contact_types", updated)
 
+def _update_vehicle_contact_list(veh_prim, other_agent_id: int, enter: bool):
+    if not enter:
+        return
+    try:
+        cd = veh_prim.GetCustomData()
+    except Exception:
+        cd = {}
+    if not isinstance(cd, dict):
+        cd = {}
+
+    cur = cd.get("vehicle_contact_ids", None)
+    cur_set = set()
+    if cur is not None:
+        try:
+            for v in cur:
+                cur_set.add(int(v))
+        except Exception:
+            cur_set = set()
+
+    cur_set.add(int(other_agent_id))
+
+    updated = Vt.IntArray(sorted(cur_set))
+    veh_prim.SetCustomDataByKey("vehicle_contact_ids", updated)
+    veh_prim.SetCustomDataByKey("vehicle_collided", True)
+
 
 def main():
     if not hasattr(sys, "argv"):
@@ -74,15 +99,45 @@ def main():
         return
 
     road_type = _find_road_type(stage, trigger_path)
-    if road_type is None:
+    if road_type is not None:
+        veh_prim = _find_vehicle_prim(stage, other_path)
+        if veh_prim is None:
+            return
+        enter = event_name != "LeaveEvent"
+        _update_contact_list(veh_prim, road_type, enter)
         return
 
-    veh_prim = _find_vehicle_prim(stage, other_path)
-    if veh_prim is None:
+    a_veh_prim = _find_vehicle_prim(stage, other_path)
+    b_veh_prim = _find_vehicle_prim(stage, trigger_path)
+    if a_veh_prim is None or b_veh_prim is None:
+        return
+
+    try:
+        b_cd = b_veh_prim.GetCustomData()
+    except Exception:
+        b_cd = {}
+    if not isinstance(b_cd, dict):
+        return
+    b_agent_id = b_cd.get("agent_id", None)
+    if b_agent_id is None:
+        return
+
+    try:
+        a_cd = a_veh_prim.GetCustomData()
+    except Exception:
+        a_cd = {}
+    if isinstance(a_cd, dict) and a_cd.get("agent_id", None) == b_agent_id:
         return
 
     enter = event_name != "LeaveEvent"
-    _update_contact_list(veh_prim, road_type, enter)
+    if enter:
+        a_agent_id = None
+        try:
+            a_agent_id = int(a_cd.get("agent_id", None))
+        except Exception:
+            a_agent_id = None
+        print(f"--------Triggered -------- A={a_agent_id} hit B={int(b_agent_id)}")
+    _update_vehicle_contact_list(a_veh_prim, int(b_agent_id), enter)
 
 
 main()

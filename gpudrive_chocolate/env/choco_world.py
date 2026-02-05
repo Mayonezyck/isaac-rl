@@ -470,6 +470,16 @@ class ChocoWorldBuilder:
             goal_trigger_height_m=float(
                 agents.get("goal_trigger_height_m", 0.6)
             ),
+            vehicle_trigger_enable=bool(agents.get("vehicle_trigger_enable", False)),
+            vehicle_trigger_offset_m=tuple(
+                map(float, agents.get("vehicle_trigger_offset_m", [0.0, 0.0, 0.0]))
+            ),
+            vehicle_trigger_size_m=tuple(
+                map(float, agents.get("vehicle_trigger_size_m", [1.0, 1.0, 1.0]))
+            ),
+            vehicle_trigger_script_enable=bool(
+                agents.get("vehicle_trigger_script_enable", True)
+            ),
         )
 
         gcfg = self.cfg.get("ground", {})

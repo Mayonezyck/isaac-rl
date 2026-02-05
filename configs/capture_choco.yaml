@@ -53,6 +53,10 @@ agents:
   goal_ring_z_m: 0.0
   goal_ring_tube_radius_m: 0.12
   goal_trigger_height_m: 0.6
+  vehicle_trigger_enable: true
+  vehicle_trigger_offset_m: [0.0, 0.0, 0.5]
+  vehicle_trigger_size_m: [4.5, 2.5, 0.4]
+  vehicle_trigger_script_enable: true
 
 physics:
   warmup_frames: 30
@@ -107,6 +111,9 @@ env:
   collision_debug: true
   road_contact_done_types: [15,16]
   road_contact_done_penalty: -5.0
+  vehicle_contact_done: true
+  vehicle_contact_done_penalty: -5.0
+  vehicle_contact_done_mark_both: true
   road_points_enable: true
   road_points_k: 200
   road_points_radius_m: 50.0

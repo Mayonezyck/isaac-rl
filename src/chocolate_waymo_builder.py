@@ -764,6 +764,79 @@ class WaymoJsonMiniWorldBuilder:
 
         return goal_root_path
 
+    def _spawn_vehicle_trigger(
+        self,
+        vehicle_root_path: str,
+        *,
+        offset_m: Tuple[float, float, float],
+        size_m: Tuple[float, float, float],
+        enable: bool = True,
+        script_enable: bool = True,
+    ) -> None:
+        if not enable:
+            return
+
+        stage = self.stage
+        vehicle_chassis_path = f"{vehicle_root_path}/Vehicle"
+        veh_prim = stage.GetPrimAtPath(vehicle_chassis_path)
+        if not veh_prim.IsValid():
+            return
+
+        trig_root = f"{vehicle_chassis_path}/VehicleTrigger"
+        trig_prim = stage.GetPrimAtPath(trig_root)
+        if not trig_prim.IsValid():
+            UsdGeom.Xform.Define(stage, trig_root)
+            trig_prim = stage.GetPrimAtPath(trig_root)
+
+        cube_path = f"{trig_root}/Cube"
+        cube = UsdGeom.Cube.Define(stage, cube_path)
+        cube.GetSizeAttr().Set(1.0)
+
+        mpu = _meters_per_unit(stage)
+        xform_api = UsdGeom.XformCommonAPI(cube)
+        xform_api.SetTranslate(
+            Gf.Vec3d(
+                float(offset_m[0]) / mpu,
+                float(offset_m[1]) / mpu,
+                float(offset_m[2]) / mpu,
+            )
+        )
+        xform_api.SetScale(
+            Gf.Vec3f(
+                float(size_m[0]) / mpu,
+                float(size_m[1]) / mpu,
+                float(size_m[2]) / mpu,
+            )
+        )
+
+        UsdGeom.Imageable(cube.GetPrim()).MakeInvisible()
+        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+        if PhysxSchema is not None:
+            try:
+                PhysxSchema.PhysxTriggerAPI.Apply(cube.GetPrim())
+            except Exception:
+                pass
+            if script_enable:
+                try:
+                    trigger_script = Path(__file__).resolve().parent / "trigger_road_contact.py"
+                    trig_api = PhysxSchema.PhysxTriggerAPI.Apply(cube.GetPrim())
+                    trig_api.CreateEnterScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                    trig_api.CreateOnEnterScriptAttr().Set(str(trigger_script))
+                    trig_api.CreateLeaveScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                    trig_api.CreateOnLeaveScriptAttr().Set(str(trigger_script))
+                except Exception:
+                    pass
+
+        try:
+            cd = veh_prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if isinstance(cd, dict):
+            agent_id = cd.get("agent_id", None)
+            if agent_id is not None:
+                cube.GetPrim().SetCustomDataByKey("vehicle_trigger_owner_id", int(agent_id))
+        cube.GetPrim().SetCustomDataByKey("vehicle_trigger", True)
+
     # -------- agents + goals --------
 
     def build_agents_with_goals(
@@ -789,6 +862,12 @@ class WaymoJsonMiniWorldBuilder:
         goal_ring_z_m: float = 0.0,  # enforce on ground
         goal_ring_tube_radius_m: float = 0.12,
         goal_trigger_height_m: float = 0.6,
+
+        # vehicle trigger knobs:
+        vehicle_trigger_enable: bool = False,
+        vehicle_trigger_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        vehicle_trigger_size_m: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        vehicle_trigger_script_enable: bool = True,
     ) -> None:
         agents = (cfg.get("agents", {}) or {}).get("items", []) or []
         kept = 0
@@ -886,6 +965,8 @@ class WaymoJsonMiniWorldBuilder:
             prim_outer.SetCustomDataByKey("start_in_goal", False)
             prim_outer.SetCustomDataByKey("controllable", True)
             prim_outer.SetCustomDataByKey("road_contact_types", Vt.IntArray())
+            prim_outer.SetCustomDataByKey("vehicle_contact_ids", Vt.IntArray())
+            prim_outer.SetCustomDataByKey("vehicle_collided", False)
             if PhysxSchema is not None:
                 try:
                     rb_prim = self.stage.GetPrimAtPath(f"{veh_outer}/Vehicle")
@@ -893,6 +974,14 @@ class WaymoJsonMiniWorldBuilder:
                         _apply_contact_report_to_colliders(rb_prim)
                 except Exception:
                     pass
+
+            self._spawn_vehicle_trigger(
+                veh_outer,
+                offset_m=vehicle_trigger_offset_m,
+                size_m=vehicle_trigger_size_m,
+                enable=bool(vehicle_trigger_enable),
+                script_enable=bool(vehicle_trigger_script_enable),
+            )
 
             # GOAL ring + trigger collider (no RB), enforced z=goal_ring_z_m
             goal_path = f"{self.goals_root}/Goal_{kept:04d}_id{agent_id}"
@@ -943,6 +1032,12 @@ class WaymoJsonMiniWorldBuilder:
         goal_ring_z_m: float = 0.0,
         goal_ring_tube_radius_m: float = 0.12,
         goal_trigger_height_m: float = 0.6,
+
+        # vehicle trigger knobs:
+        vehicle_trigger_enable: bool = False,
+        vehicle_trigger_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        vehicle_trigger_size_m: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        vehicle_trigger_script_enable: bool = True,
     ) -> None:
         agent_path = f"{self.agents_root}/Agent_{int(kept_idx):04d}_id{int(agent_id)}"
         UsdGeom.Xform.Define(self.stage, agent_path)
@@ -993,6 +1088,8 @@ class WaymoJsonMiniWorldBuilder:
         prim_outer.SetCustomDataByKey("start_in_goal", False)
         prim_outer.SetCustomDataByKey("controllable", True)
         prim_outer.SetCustomDataByKey("road_contact_types", Vt.IntArray())
+        prim_outer.SetCustomDataByKey("vehicle_contact_ids", Vt.IntArray())
+        prim_outer.SetCustomDataByKey("vehicle_collided", False)
         if PhysxSchema is not None:
             try:
                 rb_prim = self.stage.GetPrimAtPath(f"{veh_outer}/Vehicle")
@@ -1000,6 +1097,14 @@ class WaymoJsonMiniWorldBuilder:
                     _apply_contact_report_to_colliders(rb_prim)
             except Exception:
                 pass
+
+        self._spawn_vehicle_trigger(
+            veh_outer,
+            offset_m=vehicle_trigger_offset_m,
+            size_m=vehicle_trigger_size_m,
+            enable=bool(vehicle_trigger_enable),
+            script_enable=bool(vehicle_trigger_script_enable),
+        )
 
         goal_path = f"{self.goals_root}/Goal_{int(kept_idx):04d}_id{int(agent_id)}"
         self._spawn_goal_ring_with_trigger(
@@ -1068,7 +1173,11 @@ class WaymoJsonMiniWorldBuilder:
         goal_ring_tube_radius_m: float = 0.12,
         goal_trigger_height_m: float = 0.6,
 
-        
+        # vehicle trigger params:
+        vehicle_trigger_enable: bool = False,
+        vehicle_trigger_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        vehicle_trigger_size_m: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        vehicle_trigger_script_enable: bool = True,
     ) -> None:
         p = Path(json_path).expanduser().resolve()
         with p.open("r", encoding="utf-8") as f:
@@ -1118,6 +1227,11 @@ class WaymoJsonMiniWorldBuilder:
             goal_ring_z_m=goal_ring_z_m,
             goal_ring_tube_radius_m=goal_ring_tube_radius_m,
             goal_trigger_height_m=goal_trigger_height_m,
+
+            vehicle_trigger_enable=vehicle_trigger_enable,
+            vehicle_trigger_offset_m=vehicle_trigger_offset_m,
+            vehicle_trigger_size_m=vehicle_trigger_size_m,
+            vehicle_trigger_script_enable=vehicle_trigger_script_enable,
         )
 
 
@@ -1336,6 +1450,12 @@ class ChocolateBarConstructor:
         goal_ring_z_m: float = 0.0,
         goal_ring_tube_radius_m: float = 0.12,
         goal_trigger_height_m: float = 0.6,
+
+        # vehicle trigger params:
+        vehicle_trigger_enable: bool = False,
+        vehicle_trigger_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        vehicle_trigger_size_m: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        vehicle_trigger_script_enable: bool = True,
     ) -> None:
         json_list = [str(Path(p).expanduser().resolve()) for p in json_paths]
         if len(json_list) == 0:
@@ -1403,6 +1523,12 @@ class ChocolateBarConstructor:
                 goal_ring_z_m=goal_ring_z_m,
                 goal_ring_tube_radius_m=goal_ring_tube_radius_m,
                 goal_trigger_height_m=goal_trigger_height_m,
+
+                # vehicle trigger
+                vehicle_trigger_enable=vehicle_trigger_enable,
+                vehicle_trigger_offset_m=vehicle_trigger_offset_m,
+                vehicle_trigger_size_m=vehicle_trigger_size_m,
+                vehicle_trigger_script_enable=vehicle_trigger_script_enable,
             )
         self.build_global_boundary(
             world_count=int(world_count),

@@ -87,6 +87,9 @@ class ChocolateEnv:
         collision_debug: bool = False,
         road_contact_done_types: Optional[List[int]] = None,
         road_contact_done_penalty: float = -1.0,
+        vehicle_contact_done: bool = False,
+        vehicle_contact_done_penalty: float = -5.0,
+        vehicle_contact_done_mark_both: bool = True,
         road_points_enable: bool = False,
         road_points_k: int = 16,
         road_points_radius_m: float = 50.0,
@@ -120,6 +123,9 @@ class ChocolateEnv:
         self.collision_debug = bool(collision_debug)
         self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
         self.road_contact_done_penalty = float(road_contact_done_penalty)
+        self.vehicle_contact_done = bool(vehicle_contact_done)
+        self.vehicle_contact_done_penalty = float(vehicle_contact_done_penalty)
+        self.vehicle_contact_done_mark_both = bool(vehicle_contact_done_mark_both)
         self.road_points_enable = bool(road_points_enable)
         self.road_points_k = int(road_points_k)
         self.road_points_radius_m = float(road_points_radius_m)
@@ -364,6 +370,27 @@ class ChocolateEnv:
             return []
         return out
 
+    def _get_vehicle_contact_ids(self, h) -> List[int]:
+        if h is None:
+            return []
+        prim = self.stage.GetPrimAtPath(h.vehicle_root_path)
+        if not prim.IsValid():
+            return []
+        try:
+            cd = prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return []
+        ids = cd.get("vehicle_contact_ids", [])
+        out = []
+        try:
+            for v in ids:
+                out.append(int(v))
+        except Exception:
+            return []
+        return out
+
     def _find_agent_prim_path(self, world_idx: int, agent_id: int) -> Optional[str]:
         world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
         agents_root = f"{world_root}/Agents"
@@ -439,6 +466,16 @@ class ChocolateEnv:
             goal_ring_z_m=float(self.respawn_params.get("goal_ring_z_m", 0.0)),
             goal_ring_tube_radius_m=float(self.respawn_params.get("goal_ring_tube_radius_m", 0.12)),
             goal_trigger_height_m=float(self.respawn_params.get("goal_trigger_height_m", 0.6)),
+            vehicle_trigger_enable=bool(self.respawn_params.get("vehicle_trigger_enable", False)),
+            vehicle_trigger_offset_m=tuple(
+                self.respawn_params.get("vehicle_trigger_offset_m", (0.0, 0.0, 0.0))
+            ),
+            vehicle_trigger_size_m=tuple(
+                self.respawn_params.get("vehicle_trigger_size_m", (1.0, 1.0, 1.0))
+            ),
+            vehicle_trigger_script_enable=bool(
+                self.respawn_params.get("vehicle_trigger_script_enable", True)
+            ),
         )
 
         return True
@@ -633,7 +670,6 @@ class ChocolateEnv:
                 self._hide_agents(keys, newly_success)
         # Reward: progress toward goal (meters)
         progress = (self._prev_dist_m - dist_m) * self.reward_scale
-        print('progress', progress)
         reward = np.zeros((N,), dtype=np.float32)
         reward[active] = progress[active]
 
@@ -676,6 +712,29 @@ class ChocolateEnv:
                     hit_contact[i] = True
             if hit_contact.any():
                 reward[hit_contact] += float(self.road_contact_done_penalty)
+                self._done[hit_contact] = True
+
+        # Vehicle-trigger termination based on vehicle contact list
+        if self.vehicle_contact_done:
+            hit_contact = np.zeros((N,), dtype=bool)
+            agent_id_to_idx = {int(k.agent_id): i for i, k in enumerate(keys)}
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                h = self.ctrl.get(k.world_idx, k.agent_id)
+                if h is None:
+                    continue
+                contact_ids = self._get_vehicle_contact_ids(h)
+                if not contact_ids:
+                    continue
+                hit_contact[i] = True
+                if self.vehicle_contact_done_mark_both:
+                    for other_id in contact_ids:
+                        j = agent_id_to_idx.get(int(other_id))
+                        if j is not None:
+                            hit_contact[j] = True
+            if hit_contact.any():
+                reward[hit_contact] += float(self.vehicle_contact_done_penalty)
                 self._done[hit_contact] = True
 
         # Timeout
@@ -821,8 +880,8 @@ class _RoadCollisionTracker:
         try:
             a_path = getattr(contact, "actor0", None)
             b_path = getattr(contact, "actor1", None)
+            print(f"[collision-debug] contact actor0={a_path} actor1={b_path}")
             if a_path or b_path:
-                print(f"[collision-debug] contact actor0={a_path} actor1={b_path}")
                 self._handle_pair(str(a_path), str(b_path))
                 return
         except Exception:
@@ -831,8 +890,8 @@ class _RoadCollisionTracker:
         try:
             a_path = contact.get("actor0", None)
             b_path = contact.get("actor1", None)
+            print(f"[collision-debug] contact dict actor0={a_path} actor1={b_path}")
             if a_path or b_path:
-                print(f"[collision-debug] contact dict actor0={a_path} actor1={b_path}")
                 self._handle_pair(str(a_path), str(b_path))
         except Exception:
             pass
@@ -841,8 +900,8 @@ class _RoadCollisionTracker:
         try:
             a_path = getattr(trigger, "trigger", None)
             b_path = getattr(trigger, "other", None)
+            print(f"[collision-debug] trigger trigger={a_path} other={b_path}")
             if a_path or b_path:
-                print(f"[collision-debug] trigger trigger={a_path} other={b_path}")
                 self._handle_pair(str(a_path), str(b_path))
                 return
         except Exception:
@@ -850,8 +909,8 @@ class _RoadCollisionTracker:
         try:
             a_path = trigger.get("trigger", None)
             b_path = trigger.get("other", None)
+            print(f"[collision-debug] trigger dict trigger={a_path} other={b_path}")
             if a_path or b_path:
-                print(f"[collision-debug] trigger dict trigger={a_path} other={b_path}")
                 self._handle_pair(str(a_path), str(b_path))
         except Exception:
             pass

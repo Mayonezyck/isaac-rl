@@ -66,6 +66,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             collision_debug=bool(cfg_env.get("collision_debug", False)),
             road_contact_done_types=list(cfg_env.get("road_contact_done_types", [])),
             road_contact_done_penalty=float(cfg_env.get("road_contact_done_penalty", -1.0)),
+            vehicle_contact_done=bool(cfg_env.get("vehicle_contact_done", False)),
+            vehicle_contact_done_penalty=float(cfg_env.get("vehicle_contact_done_penalty", -5.0)),
+            vehicle_contact_done_mark_both=bool(cfg_env.get("vehicle_contact_done_mark_both", True)),
             road_points_enable=bool(cfg_env.get("road_points_enable", False)),
             road_points_k=int(cfg_env.get("road_points_k", 16)),
             road_points_radius_m=float(cfg_env.get("road_points_radius_m", 50.0)),
@@ -86,6 +89,16 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 "goal_ring_z_m": float(agents_cfg.get("goal_ring_z_m", 0.0)),
                 "goal_ring_tube_radius_m": float(agents_cfg.get("goal_ring_tube_radius_m", 0.12)),
                 "goal_trigger_height_m": float(agents_cfg.get("goal_trigger_height_m", 0.6)),
+                "vehicle_trigger_enable": bool(agents_cfg.get("vehicle_trigger_enable", False)),
+                "vehicle_trigger_offset_m": tuple(
+                    map(float, agents_cfg.get("vehicle_trigger_offset_m", [0.0, 0.0, 0.0]))
+                ),
+                "vehicle_trigger_size_m": tuple(
+                    map(float, agents_cfg.get("vehicle_trigger_size_m", [1.0, 1.0, 1.0]))
+                ),
+                "vehicle_trigger_script_enable": bool(
+                    agents_cfg.get("vehicle_trigger_script_enable", True)
+                ),
             },
             verbose=bool(cfg_env.get("verbose", False)),
         )
