@@ -75,6 +75,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             road_points_type_norm=float(cfg_env["road_points_type_norm"]),
             vehicle_obs_enable=bool(cfg_env["vehicle_obs_enable"]),
             vehicle_obs_k=int(cfg_env["vehicle_obs_k"]),
+            obs_viz_enable=bool(cfg_env.get("obs_viz_enable", False)),
+            obs_viz_world_idx=int(cfg_env.get("obs_viz_world_idx", 0)),
+            obs_viz_agent_rank=int(cfg_env.get("obs_viz_agent_rank", 0)),
             render=bool(cfg_env.get("render", False)),
             respawn_on_reset=bool(cfg_env.get("respawn_on_reset", False)),
             respawn_params={

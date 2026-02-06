@@ -96,6 +96,9 @@ class ChocolateEnv:
         road_points_type_norm: float = 1.0,
         vehicle_obs_enable: bool = False,
         vehicle_obs_k: int = 63,
+        obs_viz_enable: bool = False,
+        obs_viz_world_idx: int = 0,
+        obs_viz_agent_rank: int = 0,
         render: bool = False,
         root_container: str = "/World/MiniWorlds",
         world_prefix: str = "world_",
@@ -134,6 +137,9 @@ class ChocolateEnv:
         self.road_points_type_norm = float(road_points_type_norm)
         self.vehicle_obs_enable = bool(vehicle_obs_enable)
         self.vehicle_obs_k = int(vehicle_obs_k)
+        self.obs_viz_enable = bool(obs_viz_enable)
+        self.obs_viz_world_idx = int(obs_viz_world_idx)
+        self.obs_viz_agent_rank = int(obs_viz_agent_rank)
 
         self.render = bool(render)
         self.root_container = str(root_container)
@@ -274,6 +280,122 @@ class ChocolateEnv:
             vehicle_obs_k=self.vehicle_obs_k,
         )
         return obs, mask, keys
+
+    def _debug_viz_obs_first_agent(self, obs: np.ndarray, keys: List[object]) -> None:
+        # Visualize a selected agent using its observation.
+        stage = self.stage
+        root = "/World/ObsViz"
+        if not stage.GetPrimAtPath(root).IsValid():
+            UsdGeom.Xform.Define(stage, root)
+
+        target_idx = None
+        target_key = None
+        rank = 0
+        for i, k in enumerate(keys):
+            if int(getattr(k, "world_idx", -1)) != self.obs_viz_world_idx:
+                continue
+            if rank == self.obs_viz_agent_rank:
+                target_idx = i
+                target_key = k
+                break
+            rank += 1
+        if target_idx is None or target_key is None:
+            return
+
+        h = self.ctrl.get(target_key.world_idx, target_key.agent_id)
+        if h is None:
+            return
+
+        try:
+            M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            p = M.ExtractTranslation()
+            yaw = _yaw_from_xform(M)
+        except Exception:
+            return
+
+        agent_root = f"{root}/W000_A{int(target_key.agent_id)}"
+        if stage.GetPrimAtPath(agent_root).IsValid():
+            stage.RemovePrim(agent_root)
+        mpu = self._mpu
+        agent_xf = UsdGeom.Xform.Define(stage, agent_root)
+        xapi = UsdGeom.XformCommonAPI(agent_xf)
+        z_lift_m = 2.5
+        xapi.SetTranslate(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2]) + z_lift_m / mpu))
+        xapi.SetRotate(Gf.Vec3f(0.0, 0.0, float(math.degrees(yaw))), UsdGeom.XformCommonAPI.RotationOrderXYZ)
+
+        mpu = self._mpu
+        obs_vec = obs[target_idx]
+
+        # Ego marker
+        ego_cube = UsdGeom.Cube.Define(stage, f"{agent_root}/Ego")
+        ego_cube.GetSizeAttr().Set(1.0)
+        ego_x = UsdGeom.XformCommonAPI(ego_cube)
+        ego_x.SetScale(Gf.Vec3f(1.2 / mpu, 0.6 / mpu, 0.3 / mpu))
+        UsdGeom.Gprim(ego_cube.GetPrim()).CreateDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.9, 0.2)])
+
+        # Forward arrow
+        arrow = UsdGeom.Cube.Define(stage, f"{agent_root}/Forward")
+        arrow.GetSizeAttr().Set(1.0)
+        arrow_x = UsdGeom.XformCommonAPI(arrow)
+        arrow_x.SetTranslate(Gf.Vec3d(2.5 / mpu, 0.0, 0.0))
+        arrow_x.SetScale(Gf.Vec3f(5.0 / mpu, 0.25 / mpu, 0.25 / mpu))
+        UsdGeom.Gprim(arrow.GetPrim()).CreateDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.3, 0.3)])
+
+        # Goal marker (rel goal in ego frame)
+        L = float(self.bounds_size_m)
+        goal_x = float(obs_vec[0]) * L
+        goal_y = float(obs_vec[1]) * L
+        goal = UsdGeom.Sphere.Define(stage, f"{agent_root}/Goal")
+        goal.GetRadiusAttr().Set(float(0.8 / mpu))
+        goal_xf = UsdGeom.XformCommonAPI(goal)
+        goal_xf.SetTranslate(Gf.Vec3d(goal_x / mpu, goal_y / mpu, 0.3 / mpu))
+        UsdGeom.Gprim(goal.GetPrim()).CreateDisplayColorAttr().Set([Gf.Vec3f(0.2, 1.0, 0.2)])
+
+        # Road points visualization
+        if self.road_points_enable:
+            rp_root = UsdGeom.Xform.Define(stage, f"{agent_root}/RoadPoints")
+            base = 7
+            k = int(self.road_points_k)
+            radius = float(self.road_points_radius_m)
+            for j in range(k):
+                off = base + 3 * j
+                rx = float(obs_vec[off + 0]) * radius
+                ry = float(obs_vec[off + 1]) * radius
+                t = float(obs_vec[off + 2])
+                if rx == 0.0 and ry == 0.0 and t == 0.0:
+                    continue
+                s = UsdGeom.Sphere.Define(stage, f"{agent_root}/RoadPoints/P{j:03d}")
+                s.GetRadiusAttr().Set(float(0.25 / mpu))
+                sx = UsdGeom.XformCommonAPI(s)
+                sx.SetTranslate(Gf.Vec3d(rx / mpu, ry / mpu, 0.2 / mpu))
+                color = Gf.Vec3f(0.2, 0.4 + 0.6 * max(0.0, min(1.0, t)), 1.0)
+                UsdGeom.Gprim(s.GetPrim()).CreateDisplayColorAttr().Set([color])
+
+        # Vehicle observations visualization
+        if self.vehicle_obs_enable:
+            veh_root = UsdGeom.Xform.Define(stage, f"{agent_root}/Vehicles")
+            base = 7 + (int(self.road_points_k) * 3 if self.road_points_enable else 0)
+            k = int(self.vehicle_obs_k)
+            feat = 6
+            for j in range(k):
+                off = base + feat * j
+                rx = float(obs_vec[off + 0]) * L
+                ry = float(obs_vec[off + 1]) * L
+                length = float(obs_vec[off + 2]) * L
+                width = float(obs_vec[off + 3]) * L
+                rel_yaw = float(obs_vec[off + 4]) * math.pi
+                speed = float(obs_vec[off + 5])
+                if rx == 0.0 and ry == 0.0 and length == 0.0 and width == 0.0:
+                    continue
+                c = UsdGeom.Cube.Define(stage, f"{agent_root}/Vehicles/V{j:03d}")
+                c.GetSizeAttr().Set(1.0)
+                cx = UsdGeom.XformCommonAPI(c)
+                cx.SetTranslate(Gf.Vec3d(rx / mpu, ry / mpu, 0.1 / mpu))
+                cx.SetRotate(Gf.Vec3f(0.0, 0.0, float(math.degrees(rel_yaw))), UsdGeom.XformCommonAPI.RotationOrderXYZ)
+                cx.SetScale(Gf.Vec3f(max(0.6, length) / mpu, max(0.4, width) / mpu, 0.3 / mpu))
+                sp = max(0.0, min(1.0, speed))
+                color = Gf.Vec3f(1.0 - sp, 0.2 + 0.8 * sp, 0.3)
+                UsdGeom.Gprim(c.GetPrim()).CreateDisplayColorAttr().Set([color])
 
     def _cache_start_pose_for_keys(self, keys: List[object]) -> None:
         """
@@ -646,6 +768,8 @@ class ChocolateEnv:
 
         # Observe
         obs, mask, keys2 = self._build_obs()
+        if self.obs_viz_enable:
+            self._debug_viz_obs_first_agent(obs, keys2)
 
         # If keys changed, re-init state (should not happen if you stopped deleting prims).
         if len(keys2) != N:
