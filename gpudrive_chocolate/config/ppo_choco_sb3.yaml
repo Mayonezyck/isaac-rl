@@ -43,4 +43,4 @@ render_during_training: true
 save_freq: 10000
 save_dir: "runs/checkpoints"
 save_prefix: "ppo_choco"
-resume_from: "runs/checkpoints/ppo_choco_4930000_steps"
+resume_from: null #"runs/checkpoints/ppo_choco_4930000_steps"

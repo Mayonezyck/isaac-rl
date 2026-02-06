@@ -51,6 +51,29 @@ def _get_rb_linear_velocity_world(rb_prim: Usd.Prim, tc: Usd.TimeCode) -> Tuple[
         return 0.0, 0.0, 0.0
     return float(v[0]), float(v[1]), float(v[2])
 
+def _get_vehicle_size_local(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache) -> Tuple[float, float]:
+    # Returns (length_x, width_y) in stage units from local bounds.
+    if prim is None or not prim.IsValid():
+        return 0.0, 0.0
+    try:
+        box = bbox_cache.ComputeLocalBound(prim)
+        rng = box.GetRange()
+        size = rng.GetSize()
+        return abs(float(size[0])), abs(float(size[1]))
+    except Exception:
+        return 0.0, 0.0
+
+def _pick_vehicle_size_prim(stage: Usd.Stage, start_prim: Usd.Prim) -> Optional[Usd.Prim]:
+    if start_prim is None or not start_prim.IsValid():
+        return None
+    try:
+        child = stage.GetPrimAtPath(f"{start_prim.GetPath()}/Vehicle")
+        if child.IsValid():
+            return child
+    except Exception:
+        pass
+    return start_prim
+
 def _find_rigid_body_prim(start_prim: Usd.Prim) -> Optional[Usd.Prim]:
     """
     Walk up parents to find a prim with UsdPhysics.RigidBodyAPI applied.
@@ -141,6 +164,9 @@ class ChocolateObsBuilder:
         dist_to_goal_m,
         vx_ego_mps,
         vy_ego_mps,
+        (optional) road points ...
+        (always) nearest vehicle features (63 * 6):
+          [rel_x, rel_y, length, width, rel_yaw, speed]
       ]
     """
     def __init__(self):
@@ -180,24 +206,30 @@ class ChocolateObsBuilder:
         world_prefix: str = "world_",
         dt: float = 1.0 / 60.0,
         use_world_count_from_ctrl: bool = True,
-        road_points_enable: bool = False,
-        road_points_k: int = 16,
-        road_points_radius_m: float = 50.0,
-        road_points_type_norm: float = 1.0,
+        road_points_enable: bool,
+        road_points_k: int,
+        road_points_radius_m: float,
+        road_points_type_norm: float,
+        vehicle_obs_enable: bool,
+        vehicle_obs_k: int,
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         """
         Returns:
-          obs:  (N,7) float32
+          obs:  (N, 7 + road_points + 63*6) float32
           mask: (N,) bool  (True if goal + pose valid)
           keys: length N (AgentKey list aligned with obs rows)
         """
         keys = ctrl.keys()
         N = len(keys)
         base_dim = 7
+        vehicle_feat_dim = 6
         extra_dim = 0
         if road_points_enable:
             extra_dim = int(road_points_k) * 3
+        vehicle_dim = int(vehicle_obs_k) * int(vehicle_feat_dim) if vehicle_obs_enable else 0
         obs = np.zeros((N, base_dim + extra_dim), dtype=np.float32)
+        if vehicle_dim > 0:
+            obs = np.pad(obs, ((0, 0), (0, vehicle_dim)), mode="constant")
         mask = np.zeros((N,), dtype=bool)
         #print('im in the builder')
         # Build per-world goal maps once
@@ -207,6 +239,50 @@ class ChocolateObsBuilder:
             world_root = f"{root_container}/{world_prefix}{wi:03d}"
             goals_root = f"{world_root}/Goals"
             goals_by_world.append(_build_goal_map_for_world(stage, goals_root))
+
+        # Precompute per-agent state for neighbor observations
+        per_agent = {}
+        world_to_indices: Dict[int, List[int]] = {}
+        if vehicle_obs_enable and vehicle_dim > 0:
+            tc = Usd.TimeCode.Default()
+            bbox_cache = UsdGeom.BBoxCache(tc, [UsdGeom.Tokens.default_], useExtentsHint=True)
+            for i, k in enumerate(keys):
+                h = ctrl.get(k.world_idx, k.agent_id)
+                if h is None:
+                    continue
+                try:
+                    M = h.xform.ComputeLocalToWorldTransform(tc)
+                    p = M.ExtractTranslation()
+                    px, py, _pz = float(p[0]), float(p[1]), float(p[2])
+                    yaw = _yaw_from_xform(M)
+                except Exception:
+                    continue
+
+                vx_w, vy_w = 0.0, 0.0
+                try:
+                    start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+                    if start_prim is None:
+                        start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+                    rb_prim = _find_rigid_body_prim(start_prim) if start_prim is not None else None
+                    if rb_prim is not None:
+                        vx_w, vy_w, _vz_w = _get_rb_linear_velocity_world(rb_prim, tc)
+                except Exception:
+                    vx_w, vy_w = 0.0, 0.0
+
+                length_m, width_m = 0.0, 0.0
+                try:
+                    size_prim = _pick_vehicle_size_prim(stage, start_prim) if start_prim is not None else None
+                    length_m, width_m = _get_vehicle_size_local(size_prim, bbox_cache)
+                except Exception:
+                    length_m, width_m = 0.0, 0.0
+
+                if length_m <= 0.0:
+                    length_m = 4.0
+                if width_m <= 0.0:
+                    width_m = 2.0
+
+                per_agent[i] = (k.world_idx, px, py, yaw, vx_w, vy_w, length_m, width_m)
+                world_to_indices.setdefault(k.world_idx, []).append(i)
 
         for i, k in enumerate(keys):
             h = ctrl.get(k.world_idx, k.agent_id)
@@ -316,5 +392,43 @@ class ChocolateObsBuilder:
                             obs[i, off + 3 * j + 1] = float(y_e / norm)
                             t_val = float(types[idx])
                             obs[i, off + 3 * j + 2] = t_val / float(road_points_type_norm) if road_points_type_norm > 0 else t_val
+
+            # Nearest vehicle features (always appended)
+            if vehicle_obs_enable and vehicle_dim > 0 and i in per_agent:
+                off = base_dim + (int(road_points_k) * 3 if road_points_enable else 0)
+                world_idx, px_i, py_i, yaw_i, _vx_i, _vy_i, _len_i, _wid_i = per_agent[i]
+                candidates = []
+                for j in world_to_indices.get(world_idx, []):
+                    if j == i:
+                        continue
+                    _, px_j, py_j, yaw_j, vx_j, vy_j, len_j, wid_j = per_agent.get(j, (None,) * 8)
+                    if px_j is None:
+                        continue
+                    dx = px_j - px_i
+                    dy = py_j - py_i
+                    dist2 = dx * dx + dy * dy
+                    candidates.append((dist2, j, dx, dy, yaw_j, vx_j, vy_j, len_j, wid_j))
+                if candidates:
+                    candidates.sort(key=lambda x: x[0])
+                    L = float(bounds_size_m)
+                    max_yaw = math.pi
+                    speed_scale = 10.0
+                    for n, (_, j, dx, dy, yaw_j, vx_j, vy_j, len_j, wid_j) in enumerate(candidates[:vehicle_obs_k]):
+                        relx, rely = _world_to_ego_xy(dx, dy, yaw_i)
+                        rel_yaw = _wrap_pi(yaw_j - yaw_i)
+                        speed = math.sqrt(vx_j * vx_j + vy_j * vy_j)
+                        relx_n = relx / L
+                        rely_n = rely / L
+                        len_n = len_j / L
+                        wid_n = wid_j / L
+                        yaw_n = rel_yaw / max_yaw
+                        speed_n = speed / speed_scale
+                        idx = off + n * vehicle_feat_dim
+                        obs[i, idx + 0] = float(relx_n)
+                        obs[i, idx + 1] = float(rely_n)
+                        obs[i, idx + 2] = float(len_n)
+                        obs[i, idx + 3] = float(wid_n)
+                        obs[i, idx + 4] = float(yaw_n)
+                        obs[i, idx + 5] = float(speed_n)
             mask[i] = True
         return obs, mask, keys

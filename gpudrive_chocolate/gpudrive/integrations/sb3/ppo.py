@@ -7,7 +7,10 @@ import numpy as np
 from gymnasium import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.utils import get_schedule_fn
+try:
+    from stable_baselines3.common.utils import FloatSchedule
+except Exception:  # pragma: no cover - fallback for older SB3
+    from stable_baselines3.common.utils import get_schedule_fn as FloatSchedule
 from stable_baselines3.common.vec_env import VecEnv
 from torch import nn
 
@@ -291,7 +294,8 @@ class IPPO(PPO):
         self.policy = self.policy.to(self.device)
 
         # Initialize schedules for policy/value clipping
-        self.clip_range = get_schedule_fn(self.clip_range)
+        if self.clip_range is not None:
+            self.clip_range = FloatSchedule(float(self.clip_range)) if not callable(self.clip_range) else self.clip_range
         if self.clip_range_vf is not None:
             if isinstance(self.clip_range_vf, (float, int)):
                 assert self.clip_range_vf > 0, (
@@ -299,7 +303,11 @@ class IPPO(PPO):
                     "pass `None` to deactivate vf clipping"
                 )
 
-            self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
+            self.clip_range_vf = (
+                FloatSchedule(float(self.clip_range_vf))
+                if not callable(self.clip_range_vf)
+                else self.clip_range_vf
+            )
 
     def train(self) -> None:
         """

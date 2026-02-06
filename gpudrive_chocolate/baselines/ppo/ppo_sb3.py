@@ -6,7 +6,10 @@ from datetime import datetime
 
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.utils import get_schedule_fn
+try:
+    from stable_baselines3.common.utils import FloatSchedule
+except Exception:  # pragma: no cover - fallback for older SB3
+    from stable_baselines3.common.utils import get_schedule_fn as FloatSchedule
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -93,7 +96,7 @@ def train(exp_config: Box):
             clip_range=exp_config.clip_range,
             ent_coef=exp_config.ent_coef,
             vf_coef=exp_config.vf_coef,
-            learning_rate=get_schedule_fn(exp_config.lr),
+            learning_rate=FloatSchedule(float(exp_config.lr)),
             verbose=exp_config.verbose,
             seed=exp_config.seed,
             device=exp_config.device,

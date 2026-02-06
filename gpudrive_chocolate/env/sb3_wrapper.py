@@ -69,10 +69,12 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             vehicle_contact_done=bool(cfg_env.get("vehicle_contact_done", False)),
             vehicle_contact_done_penalty=float(cfg_env.get("vehicle_contact_done_penalty", -5.0)),
             vehicle_contact_done_mark_both=bool(cfg_env.get("vehicle_contact_done_mark_both", True)),
-            road_points_enable=bool(cfg_env.get("road_points_enable", False)),
-            road_points_k=int(cfg_env.get("road_points_k", 16)),
-            road_points_radius_m=float(cfg_env.get("road_points_radius_m", 50.0)),
-            road_points_type_norm=float(cfg_env.get("road_points_type_norm", 1.0)),
+            road_points_enable=bool(cfg_env["road_points_enable"]),
+            road_points_k=int(cfg_env["road_points_k"]),
+            road_points_radius_m=float(cfg_env["road_points_radius_m"]),
+            road_points_type_norm=float(cfg_env["road_points_type_norm"]),
+            vehicle_obs_enable=bool(cfg_env["vehicle_obs_enable"]),
+            vehicle_obs_k=int(cfg_env["vehicle_obs_k"]),
             render=bool(cfg_env.get("render", False)),
             respawn_on_reset=bool(cfg_env.get("respawn_on_reset", False)),
             respawn_params={
@@ -137,6 +139,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self._rebuild_slot_mapping(keys)
 
         self.obs_dim = int(obs.shape[-1])
+        print(f"[sb3] initial obs shape={tuple(obs.shape)} obs_dim={self.obs_dim}")
         self.action_dim = 2
 
         self.observation_space = gym.spaces.Box(
@@ -247,6 +250,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self._rebuild_slot_mapping(keys)
 
         obs_flat = obs[self.flat_key_indices]
+        print(f"[sb3] reset obs shape={tuple(obs_flat.shape)}")
         obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device)
 
         self.dead_agent_mask = ~self.controlled_agent_mask.clone()
@@ -328,7 +332,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             obs, _, _ = self.choco_env._build_obs()
 
         obs_flat = obs[self.flat_key_indices]
-        #print(f"[obs] dim={obs_flat.shape[-1]}")
+        print(f"[sb3] step obs shape={tuple(obs_flat.shape)}")
         obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device)
         self.obs_alive = obs_t.clone()
 

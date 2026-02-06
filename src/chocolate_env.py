@@ -94,6 +94,8 @@ class ChocolateEnv:
         road_points_k: int = 16,
         road_points_radius_m: float = 50.0,
         road_points_type_norm: float = 1.0,
+        vehicle_obs_enable: bool = False,
+        vehicle_obs_k: int = 63,
         render: bool = False,
         root_container: str = "/World/MiniWorlds",
         world_prefix: str = "world_",
@@ -130,6 +132,8 @@ class ChocolateEnv:
         self.road_points_k = int(road_points_k)
         self.road_points_radius_m = float(road_points_radius_m)
         self.road_points_type_norm = float(road_points_type_norm)
+        self.vehicle_obs_enable = bool(vehicle_obs_enable)
+        self.vehicle_obs_k = int(vehicle_obs_k)
 
         self.render = bool(render)
         self.root_container = str(root_container)
@@ -266,6 +270,8 @@ class ChocolateEnv:
             road_points_k=self.road_points_k,
             road_points_radius_m=self.road_points_radius_m,
             road_points_type_norm=self.road_points_type_norm,
+            vehicle_obs_enable=self.vehicle_obs_enable,
+            vehicle_obs_k=self.vehicle_obs_k,
         )
         return obs, mask, keys
 
