@@ -42,6 +42,7 @@ agents:
   spawn_z_m: .7
   goal_radius_m: 3.0
   parked_if_start_in_goal: true
+  skip_if_start_in_goal: true
   start_goal_thresh_m: 10.0
   parked_ground_z_m: 0.0
   parked_chassis_size_m: [4.0, 2.0, 1.0]

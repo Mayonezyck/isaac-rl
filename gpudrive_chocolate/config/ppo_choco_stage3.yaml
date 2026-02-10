@@ -3,7 +3,7 @@ choco_config_path: "configs/curriculum_stage3.yaml"
 device: "cuda"
 
 reward_type: "weighted_combination"
-collision_weight: -0.5
+collision_weight: 0.0 #remove because of redundency
 goal_achieved_weight: 1.0
 off_road_weight: -0.5
 log_distance_weight: 0.01

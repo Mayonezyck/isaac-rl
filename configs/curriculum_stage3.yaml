@@ -42,6 +42,7 @@ agents:
   spawn_z_m: .7
   goal_radius_m: 3.0
   parked_if_start_in_goal: true
+  skip_if_start_in_goal: true
   start_goal_thresh_m: 10.0
   parked_ground_z_m: 0.0
   parked_chassis_size_m: [4.0, 2.0, 1.0]
@@ -106,10 +107,10 @@ env:
   clear_on_done: true
   respawn_on_reset: true
   render: true
-  collision_penalty: -1.0
-  collision_penalty_types: [6]
+  collision_penalty: -0.5
+  collision_penalty_types: [5,6,7,8,9,10,11,12,13]
   collision_debug: true
-  road_contact_done_types: [15,16]
+  road_contact_done_types: [14,15,16]
   road_contact_done_penalty: -5.0
   lane_center_reward_enable: true
   lane_center_reward_type: 2

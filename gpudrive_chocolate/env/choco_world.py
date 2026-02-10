@@ -449,6 +449,7 @@ class ChocoWorldBuilder:
             spawn_z_m=float(agents.get("spawn_z_m", 1.0)),
             goal_radius_m=float(agents.get("goal_radius_m", 3.0)),
             parked_if_start_in_goal=bool(agents.get("parked_if_start_in_goal", True)),
+            skip_if_start_in_goal=bool(agents.get("skip_if_start_in_goal", False)),
             start_goal_thresh_m=float(agents.get("start_goal_thresh_m", 10.0)),
             parked_ground_z_m=float(agents.get("parked_ground_z_m", 0.0)),
             parked_chassis_size_m=tuple(

@@ -849,6 +849,7 @@ class WaymoJsonMiniWorldBuilder:
 
         # parked-car knobs:
         parked_if_start_in_goal: bool = True,
+        skip_if_start_in_goal: bool = False,
         start_goal_thresh_m: Optional[float] = None,  # if None uses goal_radius_m
         parked_ground_z_m: float = 0.0,
         parked_chassis_size_m: Tuple[float, float, float] = (4.0, 2.0, 1.0),
@@ -909,6 +910,10 @@ class WaymoJsonMiniWorldBuilder:
 
             thresh = float(start_goal_thresh_m) if start_goal_thresh_m is not None else float(goal_radius_m)
             start_in_goal = self._is_start_within_goal(sx, sy, sz, ex, ey, ez, thresh)
+
+            if skip_if_start_in_goal and start_in_goal:
+                skipped += 1
+                continue
 
             agent_id = _safe_int(a.get("agent_id", idx), idx)
             agent_path = f"{self.agents_root}/Agent_{kept:04d}_id{agent_id}"
@@ -1159,6 +1164,7 @@ class WaymoJsonMiniWorldBuilder:
 
         # parked car params:
         parked_if_start_in_goal: bool = True,
+        skip_if_start_in_goal: bool = False,
         start_goal_thresh_m: Optional[float] = None,
         parked_ground_z_m: float = 0.0,
         parked_chassis_size_m: Tuple[float, float, float] = (4.0, 2.0, 1.0),
@@ -1215,6 +1221,7 @@ class WaymoJsonMiniWorldBuilder:
             require_goal_in_bounds=True,
 
             parked_if_start_in_goal=parked_if_start_in_goal,
+            skip_if_start_in_goal=skip_if_start_in_goal,
             start_goal_thresh_m=start_goal_thresh_m,
             parked_ground_z_m=parked_ground_z_m,
             parked_chassis_size_m=parked_chassis_size_m,
@@ -1437,6 +1444,7 @@ class ChocolateBarConstructor:
 
         # parked car params:
         parked_if_start_in_goal: bool = True,
+        skip_if_start_in_goal: bool = False,
         start_goal_thresh_m: Optional[float] = None,
         parked_ground_z_m: float = 0.0,
         parked_chassis_size_m: Tuple[float, float, float] = (4.0, 2.0, 1.0),
@@ -1510,6 +1518,7 @@ class ChocolateBarConstructor:
 
                 # parked cars
                 parked_if_start_in_goal=parked_if_start_in_goal,
+                skip_if_start_in_goal=skip_if_start_in_goal,
                 start_goal_thresh_m=start_goal_thresh_m,
                 parked_ground_z_m=parked_ground_z_m,
                 parked_chassis_size_m=parked_chassis_size_m,
