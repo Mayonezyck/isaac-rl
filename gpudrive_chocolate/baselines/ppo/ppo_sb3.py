@@ -125,5 +125,5 @@ def train(exp_config: Box):
 
 
 if __name__ == "__main__":
-    exp_config = load_config("gpudrive_chocolate/config/ppo_choco_sb3.yaml")
+    exp_config = load_config("gpudrive_chocolate/config/ppo_choco_stage3.yaml")
     train(exp_config)

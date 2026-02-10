@@ -66,6 +66,12 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             collision_debug=bool(cfg_env.get("collision_debug", False)),
             road_contact_done_types=list(cfg_env.get("road_contact_done_types", [])),
             road_contact_done_penalty=float(cfg_env.get("road_contact_done_penalty", -1.0)),
+            lane_center_reward_enable=bool(cfg_env.get("lane_center_reward_enable", False)),
+            lane_center_reward_type=int(cfg_env.get("lane_center_reward_type", 2)),
+            lane_center_reward_per_step=float(cfg_env.get("lane_center_reward_per_step", 0.05)),
+            idle_penalty_enable=bool(cfg_env.get("idle_penalty_enable", False)),
+            idle_penalty_per_step=float(cfg_env.get("idle_penalty_per_step", 0.05)),
+            idle_speed_threshold_mps=float(cfg_env.get("idle_speed_threshold_mps", 0.5)),
             vehicle_contact_done=bool(cfg_env.get("vehicle_contact_done", False)),
             vehicle_contact_done_penalty=float(cfg_env.get("vehicle_contact_done_penalty", -5.0)),
             vehicle_contact_done_mark_both=bool(cfg_env.get("vehicle_contact_done_mark_both", True)),
@@ -75,6 +81,10 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             road_points_type_norm=float(cfg_env["road_points_type_norm"]),
             vehicle_obs_enable=bool(cfg_env["vehicle_obs_enable"]),
             vehicle_obs_k=int(cfg_env["vehicle_obs_k"]),
+            ttc_penalty_enable=bool(cfg_env.get("ttc_penalty_enable", False)),
+            ttc_penalty_alpha=float(cfg_env.get("ttc_penalty_alpha", 1.0)),
+            ttc_penalty_max=float(cfg_env.get("ttc_penalty_max", 1.0)),
+            ttc_penalty_min_ttc=float(cfg_env.get("ttc_penalty_min_ttc", 0.2)),
             obs_viz_enable=bool(cfg_env.get("obs_viz_enable", False)),
             obs_viz_world_idx=int(cfg_env.get("obs_viz_world_idx", 0)),
             obs_viz_agent_rank=int(cfg_env.get("obs_viz_agent_rank", 0)),
@@ -265,13 +275,12 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
     def _compute_rewards(self, obs, reward, done, info):
         reward = np.asarray(reward, dtype=np.float32)
-        # TODO: replace these placeholders with collision/off-road metrics from Isaac sim.
         if self.reward_type == "sparse_on_goal_achieved":
             return (info.success.astype(np.float32)).copy()
 
         if self.reward_type == "weighted_combination":
-            collided = np.zeros_like(reward)
-            off_road = np.zeros_like(reward)
+            collided = getattr(info, "collided", np.zeros_like(reward)).astype(np.float32)
+            off_road = getattr(info, "off_road", np.zeros_like(reward)).astype(np.float32)
             goal_achieved = info.success.astype(np.float32)
             return reward + (
                 self.collision_weight * collided

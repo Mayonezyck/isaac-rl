@@ -1,0 +1,46 @@
+choco_config_path: "configs/curriculum_stage3.yaml"
+
+device: "cuda"
+
+reward_type: "weighted_combination"
+collision_weight: -0.5
+goal_achieved_weight: 1.0
+off_road_weight: -0.5
+log_distance_weight: 0.01
+policy_type: "late_fusion" # late_fusion or mlp
+
+late_fusion:
+  ego_dim: 7
+  point_dim: 3
+  point_k: null
+  ego_layers: [64, 64]
+  point_layers: [64, 64]
+  shared_layers: [64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: "relu"
+  dropout: 0.0
+  pool: "max"
+
+seed: 42
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+vf_coef: 0.5
+n_steps: 128
+num_minibatches: 4
+verbose: 1
+total_timesteps: 5_000_000
+ent_coef: 0.0001
+lr: 0.0003
+n_epochs: 5
+
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: "runs/capture_stage3"
+render_during_training: true
+
+save_freq: 10000
+save_dir: "runs/checkpoints_stage3"
+save_prefix: "ppo_choco_stage3"
+resume_from: "runs/checkpoints_stage3/ppo_choco_stage3_4930000_steps"

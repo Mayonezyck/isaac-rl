@@ -1,5 +1,5 @@
 app:
-  headless: false  # viewport capture needs GUI
+  headless: true  # viewport capture needs GUI
   renderer: "RayTracedLighting"  # or "PathTracing" / "Hydra" depending on your setup
 
 io:
@@ -106,27 +106,27 @@ env:
   clear_on_done: true
   respawn_on_reset: true
   render: true
-  collision_penalty: -1.0
-  collision_penalty_types: [6]
-  collision_debug: true
-  road_contact_done_types: [15,16]
-  road_contact_done_penalty: -5.0
-  lane_center_reward_enable: true
+  collision_penalty: 0.0
+  collision_penalty_types: []
+  collision_debug: false
+  road_contact_done_types: []
+  road_contact_done_penalty: 0.0
+  lane_center_reward_enable: false
   lane_center_reward_type: 2
   lane_center_reward_per_step: 0.05
-  idle_penalty_enable: true
+  idle_penalty_enable: false
   idle_penalty_per_step: 0.05
   idle_speed_threshold_mps: 0.5
-  vehicle_contact_done: true
-  vehicle_contact_done_penalty: -5.0
-  vehicle_contact_done_mark_both: true
+  vehicle_contact_done: false
+  vehicle_contact_done_penalty: 0.0
+  vehicle_contact_done_mark_both: false
   road_points_enable: true
   road_points_k: 200
   road_points_radius_m: 50.0
   road_points_type_norm: 20.0
   vehicle_obs_enable: true
   vehicle_obs_k: 63
-  ttc_penalty_enable: true
+  ttc_penalty_enable: false
   ttc_penalty_alpha: 1.0
   ttc_penalty_max: 1.0
   ttc_penalty_min_ttc: 0.2

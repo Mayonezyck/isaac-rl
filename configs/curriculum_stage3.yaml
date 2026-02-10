@@ -1,5 +1,5 @@
 app:
-  headless: false  # viewport capture needs GUI
+  headless: false   # viewport capture needs GUI
   renderer: "RayTracedLighting"  # or "PathTracing" / "Hydra" depending on your setup
 
 io:

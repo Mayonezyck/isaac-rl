@@ -16,6 +16,8 @@ class StepInfo:
     mask: np.ndarray          # (N,) bool
     dist_m: np.ndarray        # (N,) float32  (note: your obs builder currently returns DIST IN METERS, not normalized)
     success: np.ndarray       # (N,) bool     (latched)
+    collided: np.ndarray      # (N,) bool
+    off_road: np.ndarray      # (N,) bool
     timeout: bool
     t_env: int
 
@@ -87,6 +89,12 @@ class ChocolateEnv:
         collision_debug: bool = False,
         road_contact_done_types: Optional[List[int]] = None,
         road_contact_done_penalty: float = -1.0,
+        lane_center_reward_enable: bool = False,
+        lane_center_reward_type: int = 2,
+        lane_center_reward_per_step: float = 0.05,
+        idle_penalty_enable: bool = False,
+        idle_penalty_per_step: float = 0.05,
+        idle_speed_threshold_mps: float = 0.5,
         vehicle_contact_done: bool = False,
         vehicle_contact_done_penalty: float = -5.0,
         vehicle_contact_done_mark_both: bool = True,
@@ -96,6 +104,10 @@ class ChocolateEnv:
         road_points_type_norm: float = 1.0,
         vehicle_obs_enable: bool = False,
         vehicle_obs_k: int = 63,
+        ttc_penalty_enable: bool = False,
+        ttc_penalty_alpha: float = 1.0,
+        ttc_penalty_max: float = 1.0,
+        ttc_penalty_min_ttc: float = 0.2,
         obs_viz_enable: bool = False,
         obs_viz_world_idx: int = 0,
         obs_viz_agent_rank: int = 0,
@@ -128,6 +140,12 @@ class ChocolateEnv:
         self.collision_debug = bool(collision_debug)
         self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
         self.road_contact_done_penalty = float(road_contact_done_penalty)
+        self.lane_center_reward_enable = bool(lane_center_reward_enable)
+        self.lane_center_reward_type = int(lane_center_reward_type)
+        self.lane_center_reward_per_step = float(lane_center_reward_per_step)
+        self.idle_penalty_enable = bool(idle_penalty_enable)
+        self.idle_penalty_per_step = float(idle_penalty_per_step)
+        self.idle_speed_threshold_mps = float(idle_speed_threshold_mps)
         self.vehicle_contact_done = bool(vehicle_contact_done)
         self.vehicle_contact_done_penalty = float(vehicle_contact_done_penalty)
         self.vehicle_contact_done_mark_both = bool(vehicle_contact_done_mark_both)
@@ -137,6 +155,10 @@ class ChocolateEnv:
         self.road_points_type_norm = float(road_points_type_norm)
         self.vehicle_obs_enable = bool(vehicle_obs_enable)
         self.vehicle_obs_k = int(vehicle_obs_k)
+        self.ttc_penalty_enable = bool(ttc_penalty_enable)
+        self.ttc_penalty_alpha = float(ttc_penalty_alpha)
+        self.ttc_penalty_max = float(ttc_penalty_max)
+        self.ttc_penalty_min_ttc = float(ttc_penalty_min_ttc)
         self.obs_viz_enable = bool(obs_viz_enable)
         self.obs_viz_world_idx = int(obs_viz_world_idx)
         self.obs_viz_agent_rank = int(obs_viz_agent_rank)
@@ -189,6 +211,132 @@ class ChocolateEnv:
                 pass
             p = p.GetParent()
         return None
+
+    def _get_rb_linear_velocity_world(self, rb_prim: Usd.Prim) -> Tuple[float, float, float]:
+        rb = UsdPhysics.RigidBodyAPI(rb_prim)
+        v_attr = rb.GetVelocityAttr()
+        if not v_attr or not v_attr.IsValid():
+            return 0.0, 0.0, 0.0
+        v = v_attr.Get(Usd.TimeCode.Default())
+        if v is None:
+            return 0.0, 0.0, 0.0
+        return float(v[0]), float(v[1]), float(v[2])
+
+    def _collect_all_vehicle_states(self):
+        world_count = int(getattr(self.ctrl, "world_count", 0))
+        out = {}
+        tc = Usd.TimeCode.Default()
+        for wi in range(world_count):
+            agents_root = f"{self.root_container}/{self.world_prefix}{wi:03d}/Agents"
+            root = self.stage.GetPrimAtPath(agents_root)
+            if not root.IsValid():
+                continue
+            states = []
+            for agent in root.GetAllChildren():
+                # Find a descendant with 'controllable' customData (vehicle root)
+                stack = [agent]
+                vehicle_prim = None
+                while stack:
+                    p = stack.pop()
+                    try:
+                        cd = p.GetCustomData()
+                    except Exception:
+                        cd = {}
+                    if isinstance(cd, dict) and "controllable" in cd and "agent_id" in cd:
+                        vehicle_prim = p
+                        break
+                    stack.extend(p.GetAllChildren())
+                if vehicle_prim is None:
+                    continue
+                try:
+                    cd = vehicle_prim.GetCustomData()
+                except Exception:
+                    cd = {}
+                if not isinstance(cd, dict):
+                    continue
+                agent_id = cd.get("agent_id", None)
+                if agent_id is None:
+                    continue
+                controllable = bool(cd.get("controllable", False))
+
+                xform = UsdGeom.Xformable(vehicle_prim)
+                try:
+                    M = xform.ComputeLocalToWorldTransform(tc)
+                    p = M.ExtractTranslation()
+                    px, py = float(p[0]), float(p[1])
+                except Exception:
+                    continue
+
+                vx, vy = 0.0, 0.0
+                if controllable:
+                    h = self.ctrl.get(wi, int(agent_id))
+                    if h is not None and h.pose_prim:
+                        rb_prim = self._find_rb_prim(h.pose_prim)
+                        if rb_prim is not None:
+                            vx, vy, _ = self._get_rb_linear_velocity_world(rb_prim)
+
+                states.append(
+                    {
+                        "agent_id": int(agent_id),
+                        "pos": (px, py),
+                        "vel": (vx, vy),
+                        "controllable": controllable,
+                    }
+                )
+            if states:
+                out[wi] = states
+        return out
+
+    def _compute_ttc_penalty(self, keys: List[object], active: np.ndarray) -> np.ndarray:
+        if not self.ttc_penalty_enable:
+            return np.zeros((len(keys),), dtype=np.float32)
+
+        states_by_world = self._collect_all_vehicle_states()
+        penalties = np.zeros((len(keys),), dtype=np.float32)
+
+        for i, k in enumerate(keys):
+            if not active[i]:
+                continue
+            wi = int(getattr(k, "world_idx", -1))
+            if wi not in states_by_world:
+                continue
+            ego_state = None
+            for s in states_by_world[wi]:
+                if s["agent_id"] == int(k.agent_id):
+                    ego_state = s
+                    break
+            if ego_state is None:
+                continue
+            ex, ey = ego_state["pos"]
+            evx, evy = ego_state["vel"]
+            min_ttc = None
+            for s in states_by_world[wi]:
+                if s["agent_id"] == int(k.agent_id):
+                    continue
+                ox, oy = s["pos"]
+                ovx, ovy = s["vel"]
+                rx = ox - ex
+                ry = oy - ey
+                rvx = ovx - evx
+                rvy = ovy - evy
+                v2 = rvx * rvx + rvy * rvy
+                if v2 < 1e-6:
+                    continue
+                rdotv = rx * rvx + ry * rvy
+                if rdotv >= 0.0:
+                    continue
+                ttc = -rdotv / v2
+                if ttc <= 0.0:
+                    continue
+                if min_ttc is None or ttc < min_ttc:
+                    min_ttc = ttc
+            if min_ttc is None:
+                continue
+            denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
+            penalty = float(self.ttc_penalty_alpha) / denom
+            penalty = min(float(self.ttc_penalty_max), penalty)
+            penalties[i] = -float(penalty)
+        return penalties
     def _cache_spawn_if_missing(self):
         # cache LOCAL pose from pose_prim (NOT rigid body prim)
         for k in self._keys:
@@ -519,6 +667,20 @@ class ChocolateEnv:
             return []
         return out
 
+    def _get_vehicle_collided(self, h) -> bool:
+        if h is None:
+            return False
+        prim = self.stage.GetPrimAtPath(h.vehicle_root_path)
+        if not prim.IsValid():
+            return False
+        try:
+            cd = prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return False
+        return bool(cd.get("vehicle_collided", False))
+
     def _find_agent_prim_path(self, world_idx: int, agent_id: int) -> Optional[str]:
         world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
         agents_root = f"{world_root}/Agents"
@@ -811,11 +973,26 @@ class ChocolateEnv:
         if self.action_l2_penalty > 0:
             l2 = (U3[:, 0] ** 2 + U3[:, 1] ** 2 + U3[:, 2] ** 2).astype(np.float32)
             reward[active] -= self.action_l2_penalty * l2[active]
+
+        # Idle penalty (encourage movement)
+        if self.idle_penalty_enable:
+            vx_n = obs[:, 5].astype(np.float32)
+            vy_n = obs[:, 6].astype(np.float32)
+            speed_mps = np.sqrt(vx_n * vx_n + vy_n * vy_n) * 10.0
+            idle = (speed_mps < self.idle_speed_threshold_mps) & active
+            if idle.any():
+                reward[idle] -= float(self.idle_penalty_per_step)
+
+        # Dense TTC penalty (only for active rows)
+        if self.ttc_penalty_enable:
+            ttc_pen = self._compute_ttc_penalty(keys, active)
+            reward[active] += ttc_pen[active]
         # Collision penalty with selected road types
+        road_collided = np.zeros((N,), dtype=bool)
         if self._collision_tracker is not None:
-            collided = self._collision_tracker.consume_collisions(keys)
-            if collided.any() and self.collision_penalty != 0.0:
-                reward[collided] += float(self.collision_penalty)
+            road_collided = self._collision_tracker.consume_collisions(keys)
+            if road_collided.any() and self.collision_penalty != 0.0:
+                reward[road_collided] += float(self.collision_penalty)
             if self.collision_debug:
                 if not self._collision_debug_printed:
                     summary = self._collision_tracker.debug_summary()
@@ -844,6 +1021,21 @@ class ChocolateEnv:
                 reward[hit_contact] += float(self.road_contact_done_penalty)
                 self._done[hit_contact] = True
 
+        # Lane-center per-step reward (based on road contact types)
+        if self.lane_center_reward_enable:
+            lane_hit = np.zeros((N,), dtype=bool)
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                h = self.ctrl.get(k.world_idx, k.agent_id)
+                if h is None:
+                    continue
+                contact_types = self._get_contact_types(h)
+                if self.lane_center_reward_type in contact_types:
+                    lane_hit[i] = True
+            if lane_hit.any():
+                reward[lane_hit] += float(self.lane_center_reward_per_step)
+
         # Vehicle-trigger termination based on vehicle contact list
         if self.vehicle_contact_done:
             hit_contact = np.zeros((N,), dtype=bool)
@@ -867,6 +1059,18 @@ class ChocolateEnv:
                 reward[hit_contact] += float(self.vehicle_contact_done_penalty)
                 self._done[hit_contact] = True
 
+        # Collision flags (for reward shaping / logging)
+        vehicle_collided = np.zeros((N,), dtype=bool)
+        for i, k in enumerate(keys):
+            if not active[i]:
+                continue
+            h = self.ctrl.get(k.world_idx, k.agent_id)
+            if h is None:
+                continue
+            if self._get_vehicle_collided(h):
+                vehicle_collided[i] = True
+        collided_flags = road_collided | vehicle_collided
+
         # Timeout
         timeout = (self.t >= self.max_steps)
 
@@ -887,6 +1091,8 @@ class ChocolateEnv:
             mask=mask,
             dist_m=dist_m,                  # kept name for compatibility with your prints
             success=self._success_latched.copy(),
+            collided=collided_flags.copy(),
+            off_road=np.zeros((N,), dtype=bool),
             timeout=bool(timeout),
             t_env=int(self.t),
         )
