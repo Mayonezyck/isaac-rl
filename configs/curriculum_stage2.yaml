@@ -113,7 +113,7 @@ env:
   road_contact_done_types: []
   road_contact_done_penalty: 0.0
   lane_center_reward_enable: true
-  lane_center_reward_type: 2
+  lane_center_reward_type: [1,2]
   lane_center_reward_per_step: 0.05
   idle_penalty_enable: true
   idle_penalty_per_step: 0.05

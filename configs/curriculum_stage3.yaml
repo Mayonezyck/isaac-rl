@@ -111,15 +111,15 @@ env:
   collision_penalty_types: [5,6,7,8,9,10,11,12,13]
   collision_debug: true
   road_contact_done_types: [14,15,16]
-  road_contact_done_penalty: -5.0
+  road_contact_done_penalty: -20.0
   lane_center_reward_enable: true
-  lane_center_reward_type: 2
+  lane_center_reward_type: [1,2]
   lane_center_reward_per_step: 0.05
   idle_penalty_enable: true
   idle_penalty_per_step: 0.05
   idle_speed_threshold_mps: 0.5
   vehicle_contact_done: true
-  vehicle_contact_done_penalty: -5.0
+  vehicle_contact_done_penalty: -20.0
   vehicle_contact_done_mark_both: true
   road_points_enable: true
   road_points_k: 200

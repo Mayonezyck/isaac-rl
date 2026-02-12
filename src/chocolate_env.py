@@ -141,7 +141,10 @@ class ChocolateEnv:
         self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
         self.road_contact_done_penalty = float(road_contact_done_penalty)
         self.lane_center_reward_enable = bool(lane_center_reward_enable)
-        self.lane_center_reward_type = int(lane_center_reward_type)
+        if isinstance(lane_center_reward_type, (list, tuple, set)):
+            self.lane_center_reward_types = set(int(x) for x in lane_center_reward_type)
+        else:
+            self.lane_center_reward_types = {int(lane_center_reward_type)}
         self.lane_center_reward_per_step = float(lane_center_reward_per_step)
         self.idle_penalty_enable = bool(idle_penalty_enable)
         self.idle_penalty_per_step = float(idle_penalty_per_step)
@@ -1022,8 +1025,8 @@ class ChocolateEnv:
                 self._done[hit_contact] = True
 
         # Lane-center per-step reward (based on road contact types)
+        lane_hit = np.zeros((N,), dtype=bool)
         if self.lane_center_reward_enable:
-            lane_hit = np.zeros((N,), dtype=bool)
             for i, k in enumerate(keys):
                 if not active[i]:
                     continue
@@ -1031,10 +1034,20 @@ class ChocolateEnv:
                 if h is None:
                     continue
                 contact_types = self._get_contact_types(h)
-                if self.lane_center_reward_type in contact_types:
+                if any(t in self.lane_center_reward_types for t in contact_types):
                     lane_hit[i] = True
             if lane_hit.any():
                 reward[lane_hit] += float(self.lane_center_reward_per_step)
+        elif self.lane_center_reward_types:
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                h = self.ctrl.get(k.world_idx, k.agent_id)
+                if h is None:
+                    continue
+                contact_types = self._get_contact_types(h)
+                if any(t in self.lane_center_reward_types for t in contact_types):
+                    lane_hit[i] = True
 
         # Vehicle-trigger termination based on vehicle contact list
         if self.vehicle_contact_done:
@@ -1086,13 +1099,17 @@ class ChocolateEnv:
         self._prev_dist_m = dist_m.copy()
         self._mask = mask.copy()
 
+        off_road = np.zeros((N,), dtype=bool)
+        if self.lane_center_reward_types:
+            off_road = active & (~lane_hit)
+
         info = StepInfo(
             keys=keys,
             mask=mask,
             dist_m=dist_m,                  # kept name for compatibility with your prints
             success=self._success_latched.copy(),
             collided=collided_flags.copy(),
-            off_road=np.zeros((N,), dtype=bool),
+            off_road=off_road,
             timeout=bool(timeout),
             t_env=int(self.t),
         )

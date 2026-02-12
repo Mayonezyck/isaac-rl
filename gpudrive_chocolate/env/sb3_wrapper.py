@@ -67,7 +67,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             road_contact_done_types=list(cfg_env.get("road_contact_done_types", [])),
             road_contact_done_penalty=float(cfg_env.get("road_contact_done_penalty", -1.0)),
             lane_center_reward_enable=bool(cfg_env.get("lane_center_reward_enable", False)),
-            lane_center_reward_type=int(cfg_env.get("lane_center_reward_type", 2)),
+            lane_center_reward_type=cfg_env.get("lane_center_reward_type", 2),
             lane_center_reward_per_step=float(cfg_env.get("lane_center_reward_per_step", 0.05)),
             idle_penalty_enable=bool(cfg_env.get("idle_penalty_enable", False)),
             idle_penalty_per_step=float(cfg_env.get("idle_penalty_per_step", 0.05)),
