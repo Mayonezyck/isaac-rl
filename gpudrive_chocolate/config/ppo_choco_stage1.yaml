@@ -41,6 +41,6 @@ render_dir: "runs/capture_stage1"
 render_during_training: true
 
 save_freq: 10000
-save_dir: "runs/checkpoints_stage1"
+save_dir: "runs/checkpoints_stage1_roadrunning"
 save_prefix: "ppo_choco_stage1"
-resume_from: null
+resume_from: "runs/checkpoints_stage1_roadrunning/ppo_choco_stage1_4250000_steps"

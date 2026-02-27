@@ -11,8 +11,8 @@ io:
 
 world:
   root_container: "/World/MiniWorlds"
-  world_count: 4
-  grid_cols: 2            # W=2
+  world_count: 9
+  grid_cols: 3            # W=2
   rows: 1                 # L=5 (informational; derived from world_count/grid_cols)
   world_size_m: [200.0, 200.0]
   padding_m: 20.0
@@ -123,6 +123,7 @@ env:
   vehicle_contact_done_mark_both: false
   road_points_enable: true
   road_points_k: 200
+  road_points_mode: "road-running"
   road_points_radius_m: 50.0
   road_points_type_norm: 20.0
   vehicle_obs_enable: true

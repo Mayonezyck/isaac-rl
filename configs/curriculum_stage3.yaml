@@ -107,23 +107,27 @@ env:
   clear_on_done: true
   respawn_on_reset: true
   render: true
-  collision_penalty: -0.5
+  collision_penalty: -0.1 #this changed on 2/14/12/16
   collision_penalty_types: [5,6,7,8,9,10,11,12,13]
   collision_debug: true
   road_contact_done_types: [14,15,16]
-  road_contact_done_penalty: -20.0
+  road_contact_done_penalty: -10.0
   lane_center_reward_enable: true
   lane_center_reward_type: [1,2]
-  lane_center_reward_per_step: 0.05
+  lane_center_reward_per_step: 0.05 # first trial reward 0.05 (2/12/22/27) | second trial 0.1 (2/13/18/29)
+  survival_reward_per_step: 0.01
   idle_penalty_enable: true
   idle_penalty_per_step: 0.05
   idle_speed_threshold_mps: 0.5
   vehicle_contact_done: true
   vehicle_contact_done_penalty: -20.0
   vehicle_contact_done_mark_both: true
+  road_contact_debug: false
+  road_contact_debug_every: 100
   road_points_enable: true
   road_points_k: 200
-  road_points_radius_m: 50.0
+  road_points_mode: "road-running"   # "knn" or "road-running"
+  road_points_radius_m: 20.0
   road_points_type_norm: 20.0
   vehicle_obs_enable: true
   vehicle_obs_k: 63
@@ -131,10 +135,10 @@ env:
   ttc_penalty_alpha: 1.0
   ttc_penalty_max: 1.0
   ttc_penalty_min_ttc: 0.2
-  obs_vis_enable: true
+  obs_vis_enable: false
   obs_vis_every_steps: 2000
   obs_vis_out_dir: "runs/obs_vis"
   obs_vis_agent_index: 0
-  obs_viz_enable: false
+  obs_viz_enable: true #THIS ONE TURNS ON the on map visualization
   obs_viz_world_idx: 0
-  obs_viz_agent_rank: 1
+  obs_viz_agent_rank: 0

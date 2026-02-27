@@ -123,7 +123,8 @@ env:
   vehicle_contact_done_mark_both: false
   road_points_enable: true
   road_points_k: 200
-  road_points_radius_m: 50.0
+  road_points_mode: "road-running"
+  road_points_radius_m: 20.0
   road_points_type_norm: 20.0
   vehicle_obs_enable: true
   vehicle_obs_k: 63

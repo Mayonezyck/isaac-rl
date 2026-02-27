@@ -69,16 +69,20 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             lane_center_reward_enable=bool(cfg_env.get("lane_center_reward_enable", False)),
             lane_center_reward_type=cfg_env.get("lane_center_reward_type", 2),
             lane_center_reward_per_step=float(cfg_env.get("lane_center_reward_per_step", 0.05)),
+            survival_reward_per_step=float(cfg_env.get("survival_reward_per_step", 0.0)),
             idle_penalty_enable=bool(cfg_env.get("idle_penalty_enable", False)),
             idle_penalty_per_step=float(cfg_env.get("idle_penalty_per_step", 0.05)),
             idle_speed_threshold_mps=float(cfg_env.get("idle_speed_threshold_mps", 0.5)),
             vehicle_contact_done=bool(cfg_env.get("vehicle_contact_done", False)),
             vehicle_contact_done_penalty=float(cfg_env.get("vehicle_contact_done_penalty", -5.0)),
             vehicle_contact_done_mark_both=bool(cfg_env.get("vehicle_contact_done_mark_both", True)),
+            road_contact_debug=bool(cfg_env.get("road_contact_debug", False)),
+            road_contact_debug_every=int(cfg_env.get("road_contact_debug_every", 100)),
             road_points_enable=bool(cfg_env["road_points_enable"]),
             road_points_k=int(cfg_env["road_points_k"]),
             road_points_radius_m=float(cfg_env["road_points_radius_m"]),
             road_points_type_norm=float(cfg_env["road_points_type_norm"]),
+            road_points_mode=str(cfg_env.get("road_points_mode", "knn")),
             vehicle_obs_enable=bool(cfg_env["vehicle_obs_enable"]),
             vehicle_obs_k=int(cfg_env["vehicle_obs_k"]),
             ttc_penalty_enable=bool(cfg_env.get("ttc_penalty_enable", False)),
@@ -316,6 +320,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         reward = self._compute_rewards(obs, reward, done, info)
 
         done_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
+        success_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
         reward_mask = np.full(
             (self.num_worlds, self.max_agent_count), fill_value=np.nan, dtype=np.float32
         )
@@ -328,6 +333,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     continue
                 key_idx = self._key_index[k]
                 done_mask[wi, si] = bool(done[key_idx])
+                if hasattr(info, "success"):
+                    success_mask[wi, si] = bool(info.success[key_idx])
                 reward_mask[wi, si] = float(reward[key_idx])
 
         done_mask_t = torch.tensor(done_mask, device=self.device)
@@ -354,7 +361,11 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.info_dict = {
             "num_controlled_agents": int(self.controlled_agent_mask.sum().item()),
             "goal_achieved": float(info.success.sum()) if hasattr(info, "success") else 0.0,
+            "done_count": float(done_mask.sum()),
+            "done_success_count": float(np.logical_and(done_mask, success_mask).sum()),
             "truncated": float(info.timeout) if hasattr(info, "timeout") else 0.0,
+            "off_road": float(info.off_road.sum()) if hasattr(info, "off_road") else 0.0,
+            "collided": float(info.collided.sum()) if hasattr(info, "collided") else 0.0,
         }
 
         mask_cpu = self.controlled_agent_mask.cpu()

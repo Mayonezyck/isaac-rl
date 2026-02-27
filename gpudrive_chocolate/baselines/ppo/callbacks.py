@@ -25,8 +25,20 @@ class RolloutCaptureCallback(BaseCallback):
         self.recording = False
         self.frame_idx = 0
         self.rollout_idx = 0
+        self._reset_rollout_stats()
+
+    def _reset_rollout_stats(self) -> None:
+        self._rollout_steps = 0
+        self._rollout_reward_sum = 0.0
+        self._rollout_goal_sum = 0.0
+        self._rollout_off_road_sum = 0.0
+        self._rollout_collision_sum = 0.0
+        self._rollout_agent_steps = 0.0
+        self._rollout_done_count = 0.0
+        self._rollout_done_success_count = 0.0
 
     def _on_rollout_start(self) -> None:
+        self._reset_rollout_stats()
         if self.render_every_updates <= 0:
             self.recording = False
             return
@@ -54,6 +66,22 @@ class RolloutCaptureCallback(BaseCallback):
             if rewards is not None:
                 avg_reward = float(np.nanmean(rewards))
                 self.logger.record("choco/avg_reward_step", avg_reward)
+                self._rollout_reward_sum += float(np.nansum(rewards))
+                self._rollout_steps += 1
+        except Exception:
+            pass
+
+        try:
+            env = self.locals.get("env", None)
+            if env is not None and hasattr(env, "info_dict"):
+                info = env.info_dict
+                n_agents = float(info.get("num_controlled_agents", 0.0))
+                self._rollout_agent_steps += n_agents
+                self._rollout_goal_sum += float(info.get("goal_achieved", 0.0))
+                self._rollout_off_road_sum += float(info.get("off_road", 0.0))
+                self._rollout_collision_sum += float(info.get("collided", 0.0))
+                self._rollout_done_count += float(info.get("done_count", 0.0))
+                self._rollout_done_success_count += float(info.get("done_success_count", 0.0))
         except Exception:
             pass
 
@@ -85,5 +113,37 @@ class RolloutCaptureCallback(BaseCallback):
             rewards = self.model.rollout_buffer.rewards
             avg_reward = float(np.nanmean(rewards))
             self.logger.record("choco/avg_reward", avg_reward)
+        except Exception:
+            pass
+
+        # Per-rollout aggregates
+        try:
+            if self._rollout_agent_steps > 0:
+                self.logger.record(
+                    "rollout/goal_rate",
+                    self._rollout_goal_sum / self._rollout_agent_steps,
+                )
+                self.logger.record(
+                    "rollout/off_road_rate",
+                    self._rollout_off_road_sum / self._rollout_agent_steps,
+                )
+                self.logger.record(
+                    "rollout/collision_rate",
+                    self._rollout_collision_sum / self._rollout_agent_steps,
+                )
+            if self._rollout_steps > 0:
+                self.logger.record(
+                    "rollout/mean_reward",
+                    self._rollout_reward_sum / self._rollout_steps,
+                )
+            if self._rollout_done_count > 0:
+                self.logger.record(
+                    "rollout/mean_episode_len",
+                    self._rollout_agent_steps / self._rollout_done_count,
+                )
+                self.logger.record(
+                    "rollout/success_rate",
+                    self._rollout_done_success_count / self._rollout_done_count,
+                )
         except Exception:
             pass

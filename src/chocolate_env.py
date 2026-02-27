@@ -92,16 +92,20 @@ class ChocolateEnv:
         lane_center_reward_enable: bool = False,
         lane_center_reward_type: int = 2,
         lane_center_reward_per_step: float = 0.05,
+        survival_reward_per_step: float = 0.0,
         idle_penalty_enable: bool = False,
         idle_penalty_per_step: float = 0.05,
         idle_speed_threshold_mps: float = 0.5,
         vehicle_contact_done: bool = False,
         vehicle_contact_done_penalty: float = -5.0,
         vehicle_contact_done_mark_both: bool = True,
+        road_contact_debug: bool = False,
+        road_contact_debug_every: int = 100,
         road_points_enable: bool = False,
         road_points_k: int = 16,
         road_points_radius_m: float = 50.0,
         road_points_type_norm: float = 1.0,
+        road_points_mode: str = "knn",
         vehicle_obs_enable: bool = False,
         vehicle_obs_k: int = 63,
         ttc_penalty_enable: bool = False,
@@ -146,16 +150,20 @@ class ChocolateEnv:
         else:
             self.lane_center_reward_types = {int(lane_center_reward_type)}
         self.lane_center_reward_per_step = float(lane_center_reward_per_step)
+        self.survival_reward_per_step = float(survival_reward_per_step)
         self.idle_penalty_enable = bool(idle_penalty_enable)
         self.idle_penalty_per_step = float(idle_penalty_per_step)
         self.idle_speed_threshold_mps = float(idle_speed_threshold_mps)
         self.vehicle_contact_done = bool(vehicle_contact_done)
         self.vehicle_contact_done_penalty = float(vehicle_contact_done_penalty)
         self.vehicle_contact_done_mark_both = bool(vehicle_contact_done_mark_both)
+        self.road_contact_debug = bool(road_contact_debug)
+        self.road_contact_debug_every = max(1, int(road_contact_debug_every))
         self.road_points_enable = bool(road_points_enable)
         self.road_points_k = int(road_points_k)
         self.road_points_radius_m = float(road_points_radius_m)
         self.road_points_type_norm = float(road_points_type_norm)
+        self.road_points_mode = str(road_points_mode)
         self.vehicle_obs_enable = bool(vehicle_obs_enable)
         self.vehicle_obs_k = int(vehicle_obs_k)
         self.ttc_penalty_enable = bool(ttc_penalty_enable)
@@ -427,6 +435,7 @@ class ChocolateEnv:
             road_points_k=self.road_points_k,
             road_points_radius_m=self.road_points_radius_m,
             road_points_type_norm=self.road_points_type_norm,
+            road_points_mode=self.road_points_mode,
             vehicle_obs_enable=self.vehicle_obs_enable,
             vehicle_obs_k=self.vehicle_obs_k,
         )
@@ -458,7 +467,14 @@ class ChocolateEnv:
             return
 
         try:
-            M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+            if start_prim is None:
+                start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+            rb_prim = self._find_rb_prim(start_prim) if start_prim is not None else None
+            if rb_prim is not None:
+                M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            else:
+                M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
             p = M.ExtractTranslation()
             yaw = _yaw_from_xform(M)
         except Exception:
@@ -990,6 +1006,9 @@ class ChocolateEnv:
         if self.ttc_penalty_enable:
             ttc_pen = self._compute_ttc_penalty(keys, active)
             reward[active] += ttc_pen[active]
+        # Per-step survival reward (only for active rows)
+        if self.survival_reward_per_step != 0.0:
+            reward[active] += float(self.survival_reward_per_step)
         # Collision penalty with selected road types
         road_collided = np.zeros((N,), dtype=bool)
         if self._collision_tracker is not None:
@@ -1038,16 +1057,6 @@ class ChocolateEnv:
                     lane_hit[i] = True
             if lane_hit.any():
                 reward[lane_hit] += float(self.lane_center_reward_per_step)
-        elif self.lane_center_reward_types:
-            for i, k in enumerate(keys):
-                if not active[i]:
-                    continue
-                h = self.ctrl.get(k.world_idx, k.agent_id)
-                if h is None:
-                    continue
-                contact_types = self._get_contact_types(h)
-                if any(t in self.lane_center_reward_types for t in contact_types):
-                    lane_hit[i] = True
 
         # Vehicle-trigger termination based on vehicle contact list
         if self.vehicle_contact_done:
@@ -1100,8 +1109,25 @@ class ChocolateEnv:
         self._mask = mask.copy()
 
         off_road = np.zeros((N,), dtype=bool)
-        if self.lane_center_reward_types:
+        if self.lane_center_reward_enable:
             off_road = active & (~lane_hit)
+
+        if self.road_contact_debug and (self.t % self.road_contact_debug_every == 0):
+            # Print one example agent's contact types and off_road flag
+            sample_idx = None
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                sample_idx = i
+                h = self.ctrl.get(k.world_idx, k.agent_id)
+                types = self._get_contact_types(h) if h is not None else []
+                print(
+                    f"[road-contact] t={self.t} agent={int(k.agent_id)} "
+                    f"types={types} off_road={bool(off_road[i])}"
+                )
+                break
+            if sample_idx is None:
+                print(f"[road-contact] t={self.t} no active agents")
 
         info = StepInfo(
             keys=keys,

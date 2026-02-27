@@ -51,6 +51,11 @@ def _get_rb_linear_velocity_world(rb_prim: Usd.Prim, tc: Usd.TimeCode) -> Tuple[
         return 0.0, 0.0, 0.0
     return float(v[0]), float(v[1]), float(v[2])
 
+
+def _meters_per_unit(stage: Usd.Stage) -> float:
+    mpu = UsdGeom.GetStageMetersPerUnit(stage)
+    return float(mpu) if mpu and float(mpu) > 0 else 0.01
+
 def _get_vehicle_size_local(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache) -> Tuple[float, float]:
     # Returns (length_x, width_y) in stage units from local bounds.
     if prim is None or not prim.IsValid():
@@ -194,6 +199,23 @@ class ChocolateObsBuilder:
             return None, None
         if pts_np.ndim != 2 or pts_np.shape[1] < 2:
             return None, None
+        mpu = _meters_per_unit(stage)
+        # Stored road points are local to world_root; convert to world frame so they
+        # are in the same frame as agent poses from ComputeLocalToWorldTransform.
+        try:
+            M = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            t = M.ExtractTranslation()
+            pts_np = pts_np.copy()
+            pts_np[:, 0] += float(t[0])
+            pts_np[:, 1] += float(t[1])
+            if pts_np.shape[1] >= 3:
+                pts_np[:, 2] += float(t[2])
+        except Exception:
+            pass
+        # Convert stage units to meters for consistency with reward/obs config values.
+        pts_np[:, :2] *= float(mpu)
+        if pts_np.shape[1] >= 3:
+            pts_np[:, 2] *= float(mpu)
         return pts_np, types_np
 
     def build_obs_all_controlled(
@@ -210,6 +232,7 @@ class ChocolateObsBuilder:
         road_points_k: int,
         road_points_radius_m: float,
         road_points_type_norm: float,
+        road_points_mode: str = "knn",
         vehicle_obs_enable: bool,
         vehicle_obs_k: int,
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
@@ -221,6 +244,7 @@ class ChocolateObsBuilder:
         """
         keys = ctrl.keys()
         N = len(keys)
+        mpu = _meters_per_unit(stage)
         base_dim = 7
         vehicle_feat_dim = 6
         extra_dim = 0
@@ -251,9 +275,16 @@ class ChocolateObsBuilder:
                 if h is None:
                     continue
                 try:
-                    M = h.xform.ComputeLocalToWorldTransform(tc)
+                    start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+                    if start_prim is None:
+                        start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+                    rb_prim = _find_rigid_body_prim(start_prim) if start_prim is not None else None
+                    if rb_prim is not None:
+                        M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(tc)
+                    else:
+                        M = h.xform.ComputeLocalToWorldTransform(tc)
                     p = M.ExtractTranslation()
-                    px, py, _pz = float(p[0]), float(p[1]), float(p[2])
+                    px, py, _pz = float(p[0]) * mpu, float(p[1]) * mpu, float(p[2]) * mpu
                     yaw = _yaw_from_xform(M)
                 except Exception:
                     continue
@@ -268,6 +299,8 @@ class ChocolateObsBuilder:
                         vx_w, vy_w, _vz_w = _get_rb_linear_velocity_world(rb_prim, tc)
                 except Exception:
                     vx_w, vy_w = 0.0, 0.0
+                vx_w *= float(mpu)
+                vy_w *= float(mpu)
 
                 length_m, width_m = 0.0, 0.0
                 try:
@@ -275,6 +308,8 @@ class ChocolateObsBuilder:
                     length_m, width_m = _get_vehicle_size_local(size_prim, bbox_cache)
                 except Exception:
                     length_m, width_m = 0.0, 0.0
+                length_m *= float(mpu)
+                width_m *= float(mpu)
 
                 if length_m <= 0.0:
                     length_m = 4.0
@@ -291,9 +326,16 @@ class ChocolateObsBuilder:
 
             # Pose
             try:
-                M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+                if start_prim is None:
+                    start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+                rb_prim = _find_rigid_body_prim(start_prim) if start_prim is not None else None
+                if rb_prim is not None:
+                    M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                else:
+                    M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
                 p = M.ExtractTranslation()
-                px, py, pz = float(p[0]), float(p[1]), float(p[2])
+                px, py, pz = float(p[0]) * mpu, float(p[1]) * mpu, float(p[2]) * mpu
             except Exception:
                 continue
 
@@ -344,6 +386,8 @@ class ChocolateObsBuilder:
                     rb_prim = _find_rigid_body_prim(start_prim)
                     if rb_prim is not None:
                         vx_w, vy_w, _vz_w = _get_rb_linear_velocity_world(rb_prim, tc)
+                        vx_w *= float(mpu)
+                        vy_w *= float(mpu)
                         vx_ego, vy_ego = _world_to_ego_xy(vx_w, vy_w, yaw)
             except Exception:
                 # keep zeros if anything fails
@@ -380,7 +424,15 @@ class ChocolateObsBuilder:
                         keep = np.ones_like(dist2, dtype=bool)
                     idxs = np.where(keep)[0]
                     if idxs.size > 0:
-                        idxs = idxs[np.argsort(dist2[idxs])]
+                        mode = str(road_points_mode).strip().lower().replace("_", "-")
+                        if mode == "knn":
+                            idxs = idxs[np.argsort(dist2[idxs])]
+                        elif mode == "road-running":
+                            # Keep original map insertion order from road_points_m.
+                            pass
+                        else:
+                            # Fallback for unknown mode.
+                            idxs = idxs[np.argsort(dist2[idxs])]
                         idxs = idxs[: int(road_points_k)]
                         off = base_dim
                         for j, idx in enumerate(idxs):

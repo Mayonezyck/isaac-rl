@@ -3,13 +3,10 @@ import sys
 import yaml
 from box import Box
 from datetime import datetime
+from typing import Callable
 
 import torch
 from stable_baselines3 import PPO
-try:
-    from stable_baselines3.common.utils import FloatSchedule
-except Exception:  # pragma: no cover - fallback for older SB3
-    from stable_baselines3.common.utils import get_schedule_fn as FloatSchedule
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -24,6 +21,26 @@ from gpudrive_chocolate.baselines.ppo.callbacks import RolloutCaptureCallback
 def load_config(config_path):
     with open(config_path, "r", encoding="utf-8") as f:
         return Box(yaml.safe_load(f))
+
+
+def linear_schedule(initial_value: float) -> Callable[[float], float]:
+    """Linear learning rate schedule that decays to zero."""
+
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+
+    return func
+
+
+def build_resume_custom_objects(env: ChocolateSB3MultiAgentEnv) -> dict[str, object]:
+    # SB3 checkpoints may embed NumPy-internal module paths in pickled metadata.
+    # Reuse the current env spaces and force a reset instead of deserializing them.
+    return {
+        "_last_obs": None,
+        "_last_episode_starts": None,
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+    }
 
 
 def train(exp_config: Box):
@@ -82,6 +99,7 @@ def train(exp_config: Box):
             exp_config.resume_from,
             env=env,
             device=exp_config.device,
+            custom_objects=build_resume_custom_objects(env),
             tensorboard_log=f"runs/{run_id}",
         )
     else:
@@ -96,7 +114,7 @@ def train(exp_config: Box):
             clip_range=exp_config.clip_range,
             ent_coef=exp_config.ent_coef,
             vf_coef=exp_config.vf_coef,
-            learning_rate=FloatSchedule(float(exp_config.lr)),
+            learning_rate=linear_schedule(float(exp_config.lr)),
             verbose=exp_config.verbose,
             seed=exp_config.seed,
             device=exp_config.device,
@@ -125,5 +143,5 @@ def train(exp_config: Box):
 
 
 if __name__ == "__main__":
-    exp_config = load_config("gpudrive_chocolate/config/ppo_choco_stage3.yaml")
+    exp_config = load_config("gpudrive_chocolate/config/ppo_choco_stage2.yaml")
     train(exp_config)

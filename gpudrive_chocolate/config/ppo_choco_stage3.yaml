@@ -41,6 +41,6 @@ render_dir: "runs/capture_stage3"
 render_during_training: true
 
 save_freq: 10000
-save_dir: "runs/checkpoints_stage3"
-save_prefix: "ppo_choco_stage3"
-resume_from: "runs/checkpoints_stage2/ppo_choco_stage2_4930000_steps"
+save_dir: "runs/checkpoints_stage3_large"
+save_prefix: "ppo_choco_stage3_large_cont"
+resume_from: "runs/checkpoints_stage3_large/ppo_choco_stage3_large_4250000_steps"
