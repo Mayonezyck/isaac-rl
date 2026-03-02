@@ -47,6 +47,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         from src.chocolate_env import ChocolateEnv
 
         agents_cfg = self.choco_cfg.get("agents", {})
+        min_vehicle_z_cfg = cfg_env.get("min_vehicle_z_m", None)
         self.choco_env = ChocolateEnv(
             sim=ctx["sim"],
             stage=ctx["stage"],
@@ -62,6 +63,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             success_bonus=float(cfg_env.get("success_bonus", 10.0)),
             action_l2_penalty=float(cfg_env.get("action_l2_penalty", 1e-3)),
             collision_penalty=float(cfg_env.get("collision_penalty", 0.0)),
+            min_vehicle_z_m=None if min_vehicle_z_cfg is None else float(min_vehicle_z_cfg),
             collision_penalty_types=list(cfg_env.get("collision_penalty_types", [])),
             collision_debug=bool(cfg_env.get("collision_debug", False)),
             road_contact_done_types=list(cfg_env.get("road_contact_done_types", [])),
@@ -118,6 +120,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 "vehicle_trigger_script_enable": bool(
                     agents_cfg.get("vehicle_trigger_script_enable", True)
                 ),
+                "respawn_hold_radius_m": float(cfg_env.get("respawn_hold_radius_m", 3.0)),
             },
             verbose=bool(cfg_env.get("verbose", False)),
         )

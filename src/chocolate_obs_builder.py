@@ -8,6 +8,8 @@ import numpy as np
 from pxr import Usd, UsdGeom, Gf
 from pxr import UsdPhysics
 
+from src.trfc import encode_weather_context, weather_context_dim
+
 
 # ----------------------------
 # Small math helpers
@@ -169,6 +171,10 @@ class ChocolateObsBuilder:
         dist_to_goal_m,
         vx_ego_mps,
         vy_ego_mps,
+        water_film_norm,
+        road_is_ac,
+        road_is_sma,
+        road_is_ogfc,
         (optional) road points ...
         (always) nearest vehicle features (63 * 6):
           [rel_x, rel_y, length, width, rel_yaw, speed]
@@ -218,6 +224,38 @@ class ChocolateObsBuilder:
             pts_np[:, 2] *= float(mpu)
         return pts_np, types_np
 
+    def _get_world_weather_context(self, stage: Usd.Stage, world_root: str) -> np.ndarray:
+        prim = stage.GetPrimAtPath(world_root)
+        if not prim.IsValid():
+            return np.zeros((weather_context_dim(),), dtype=np.float32)
+
+        try:
+            custom_data = prim.GetCustomData()
+        except Exception:
+            custom_data = {}
+        if not isinstance(custom_data, dict):
+            custom_data = {}
+
+        metadata = custom_data.get("ground_friction_metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        water_film_mm = metadata.get(
+            "water_film_mm",
+            custom_data.get("ground_water_film_mm", 0.0),
+        )
+        road_type = metadata.get(
+            "road_type",
+            custom_data.get("ground_road_type", None),
+        )
+        return np.asarray(
+            encode_weather_context(
+                water_film_mm=water_film_mm,
+                road_type=road_type,
+            ),
+            dtype=np.float32,
+        )
+
     def build_obs_all_controlled(
         self,
         *,
@@ -238,14 +276,14 @@ class ChocolateObsBuilder:
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         """
         Returns:
-          obs:  (N, 7 + road_points + 63*6) float32
+          obs:  (N, 11 + road_points + 63*6) float32
           mask: (N,) bool  (True if goal + pose valid)
           keys: length N (AgentKey list aligned with obs rows)
         """
         keys = ctrl.keys()
         N = len(keys)
         mpu = _meters_per_unit(stage)
-        base_dim = 7
+        base_dim = 7 + weather_context_dim()
         vehicle_feat_dim = 6
         extra_dim = 0
         if road_points_enable:
@@ -259,10 +297,14 @@ class ChocolateObsBuilder:
         # Build per-world goal maps once
         world_count = ctrl.world_count if use_world_count_from_ctrl else max([k.world_idx for k in keys], default=-1) + 1
         goals_by_world: List[Dict[int, Tuple[float, float, float]]] = []
+        weather_contexts_by_world: List[np.ndarray] = []
         for wi in range(int(world_count)):
             world_root = f"{root_container}/{world_prefix}{wi:03d}"
             goals_root = f"{world_root}/Goals"
             goals_by_world.append(_build_goal_map_for_world(stage, goals_root))
+            weather_contexts_by_world.append(
+                self._get_world_weather_context(stage, world_root)
+            )
 
         # Precompute per-agent state for neighbor observations
         per_agent = {}
@@ -411,6 +453,12 @@ class ChocolateObsBuilder:
             obs[i, 4] = float(dist_n)
             obs[i, 5] = float(vx_n)
             obs[i, 6] = float(vy_n)
+            weather_context = (
+                weather_contexts_by_world[k.world_idx]
+                if 0 <= k.world_idx < len(weather_contexts_by_world)
+                else np.zeros((weather_context_dim(),), dtype=np.float32)
+            )
+            obs[i, 7:11] = weather_context
             if road_points_enable:
                 world_root = f"{root_container}/{world_prefix}{k.world_idx:03d}"
                 pts, types = self._get_road_points_for_world(stage, world_root)

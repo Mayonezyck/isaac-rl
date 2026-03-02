@@ -1,5 +1,5 @@
 app:
-  headless: false  # viewport capture needs GUI
+  headless: false  # viewport/mp4 capture needs GUI
   renderer: "RayTracedLighting"  # or "PathTracing" / "Hydra" depending on your setup
 
 io:
@@ -20,6 +20,31 @@ world:
   bounds_size_m: 200.0
   origin_mode: "center"
   max_agents_per_world: 30
+  assignments:
+    - scene_json: "scene_000000.json"
+      friction:
+        road_type: "AC"
+        precip_type: "rain"
+        precip_intensity_mmph: 1.0
+        water_film_mm: 0.050
+    - scene_json: "scene_000001.json"
+      friction:
+        road_type: "AC"
+        precip_type: "rain"
+        precip_intensity_mmph: 6.0
+        water_film_mm: 0.300
+    - scene_json: "scene_000002.json"
+      friction:
+        road_type: "SMA"
+        precip_type: "rain"
+        precip_intensity_mmph: 4.0
+        water_film_mm: 0.200
+    - scene_json: "scene_000003.json"
+      friction:
+        road_type: "OGFC"
+        precip_type: "rain"
+        precip_intensity_mmph: 4.0
+        water_film_mm: 0.200
 
 road:
   jump_break_m: 3.0
@@ -66,10 +91,27 @@ physics:
 
 ground:
   enable: true
-  size_m: [2000.0, 2000.0]     # big enough to cover the grid
+  mode: "per_world"
+  size_m: [200.0, 200.0]
   thickness_m: 0.2
   z_m: 0.0
-  invisible: true
+  invisible: false
+  friction_values: [0.50]  # legacy fallback when friction_pipeline is disabled
+  friction_pipeline:
+    enable: true
+    defaults:
+      tire_model_id: "zhao2024_modified_all_default"
+      v_ref_mps: 13.89
+      s_ref_static: 0.15
+      s_ref_dynamic: 0.8
+      mu_eff_mode: "static"
+  label:
+    enable: true
+    format: "{value:.2f}"
+    corner: "top_right"
+    margin_m: 8.0
+    char_height_m: 8.0
+    char_spacing_m: 1.5
 
 light:
   enable: true
@@ -82,6 +124,8 @@ light:
 camera:
   prim_path: "/World/CaptureCam"
   mode: pose
+  viewport_width: 1280
+  viewport_height: 720
   pose:
     pos_units: [26.428,-1.383,319.049]
     rot_axis: [0.021,-0.027,1]
@@ -106,8 +150,10 @@ control:
 env:
   clear_on_done: true
   respawn_on_reset: true
+  respawn_hold_radius_m: 3.0
   render: true
   collision_penalty: 0.0
+  min_vehicle_z_m: -0.2
   collision_penalty_types: []
   collision_debug: false
   road_contact_done_types: []

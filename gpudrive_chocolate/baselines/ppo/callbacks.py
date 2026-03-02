@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+from datetime import datetime
 from time import perf_counter
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -14,6 +17,10 @@ class RolloutCaptureCallback(BaseCallback):
         render_rollout_steps: int = 0,
         render_dir: str = "runs/capture",
         always_render: bool = False,
+        continuous_recording: bool = False,
+        video_fps: int = 30,
+        video_name_prefix: str = "training",
+        keep_frames: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -21,10 +28,19 @@ class RolloutCaptureCallback(BaseCallback):
         self.render_rollout_steps = int(render_rollout_steps)
         self.render_dir = render_dir
         self.always_render = bool(always_render)
+        self.continuous_recording = bool(continuous_recording)
+        self.video_fps = max(1, int(video_fps))
+        self.video_name_prefix = str(video_name_prefix)
+        self.keep_frames = bool(keep_frames)
         self.update_count = 0
         self.recording = False
         self.frame_idx = 0
         self.rollout_idx = 0
+        self.rollout_dir = None
+        self.session_dir = None
+        self.frame_dir = None
+        self.video_path = None
+        self._render_enabled_by_callback = False
         self._reset_rollout_stats()
 
     def _reset_rollout_stats(self) -> None:
@@ -37,8 +53,86 @@ class RolloutCaptureCallback(BaseCallback):
         self._rollout_done_count = 0.0
         self._rollout_done_success_count = 0.0
 
+    def _set_render_enabled(self, enabled: bool) -> None:
+        try:
+            self.training_env.env_method("set_render", bool(enabled))
+        except Exception:
+            pass
+
+    def _start_continuous_recording(self) -> None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_name = f"{self.video_name_prefix}_{stamp}"
+        self.session_dir = os.path.join(self.render_dir, session_name)
+        self.frame_dir = os.path.join(self.session_dir, "frames")
+        self.video_path = os.path.join(self.session_dir, f"{session_name}.mp4")
+        os.makedirs(self.frame_dir, exist_ok=True)
+        self.recording = True
+        self.frame_idx = 0
+        if not self.always_render:
+            self._set_render_enabled(True)
+            self._render_enabled_by_callback = True
+        print(f"[capture] recording training video frames to {self.frame_dir}")
+
+    def _capture_frame(self, frame_path: str) -> None:
+        try:
+            ok = bool(self.training_env.capture_frame(frame_path))
+        except Exception:
+            ok = False
+        if ok:
+            self.frame_idx += 1
+
+    def _encode_video(self) -> None:
+        if not self.frame_dir or self.frame_idx <= 0 or not self.video_path:
+            return
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(self.video_fps),
+            "-i",
+            os.path.join(self.frame_dir, "frame_%06d.png"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            self.video_path,
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception as exc:
+            print(f"[capture] ffmpeg launch failed: {exc}")
+            return
+        if completed.returncode != 0:
+            err = (completed.stderr or completed.stdout or "").strip()
+            print(f"[capture] ffmpeg failed ({completed.returncode}): {err}")
+            return
+        print(f"[capture] wrote training video to {self.video_path}")
+        if not self.keep_frames:
+            shutil.rmtree(self.frame_dir, ignore_errors=True)
+
+    def finalize(self) -> None:
+        if self.continuous_recording:
+            self.recording = False
+            self._encode_video()
+        if self._render_enabled_by_callback:
+            self._set_render_enabled(False)
+            self._render_enabled_by_callback = False
+
+    def _on_training_start(self) -> None:
+        if self.continuous_recording:
+            self._start_continuous_recording()
+
     def _on_rollout_start(self) -> None:
         self._reset_rollout_stats()
+        if self.continuous_recording:
+            return
         if self.render_every_updates <= 0:
             self.recording = False
             return
@@ -88,26 +182,25 @@ class RolloutCaptureCallback(BaseCallback):
         if not self.recording:
             return True
 
-        if self.render_rollout_steps > 0 and self.frame_idx >= self.render_rollout_steps:
+        if (
+            not self.continuous_recording
+            and self.render_rollout_steps > 0
+            and self.frame_idx >= self.render_rollout_steps
+        ):
             return True
 
-        frame_path = os.path.join(self.rollout_dir, f"frame_{self.frame_idx:06d}.png")
-        try:
-            self.training_env.capture_frame(frame_path)
-        except Exception:
-            pass
-
-        self.frame_idx += 1
+        frame_root = self.frame_dir if self.continuous_recording else self.rollout_dir
+        if frame_root:
+            frame_path = os.path.join(frame_root, f"frame_{self.frame_idx:06d}.png")
+            self._capture_frame(frame_path)
         return True
 
     def _on_rollout_end(self) -> None:
         self.update_count += 1
-        self.recording = False
-        if not self.always_render:
-            try:
-                self.training_env.env_method("set_render", False)
-            except Exception:
-                pass
+        if not self.continuous_recording:
+            self.recording = False
+            if not self.always_render:
+                self._set_render_enabled(False)
 
         try:
             rewards = self.model.rollout_buffer.rewards

@@ -10,7 +10,7 @@ log_distance_weight: 0.01
 policy_type: "late_fusion" # late_fusion or mlp
 
 late_fusion:
-  ego_dim: 7
+  ego_dim: 11
   point_dim: 3
   point_k: null
   ego_layers: [64, 64]
@@ -39,6 +39,10 @@ render_every_updates: 1000
 render_rollout_steps: 0
 render_dir: "runs/capture_stage2"
 render_during_training: true
+record_training_video: true
+video_fps: 30
+video_name_prefix: "ppo_stage2_training"
+video_keep_frames: false
 
 save_freq: 10000
 save_dir: "runs/checkpoints_stage2_roadrunning"

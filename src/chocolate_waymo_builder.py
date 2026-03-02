@@ -1302,6 +1302,7 @@ class ChocolateBarConstructor:
         self,
         world_count: int,
         *,
+        add_floor: bool = False,
         thickness_m: float = 0.2,
         z_m: float = 0.0,
         color_srgb: Tuple[float, float, float] = (0.15, 0.15, 0.18),
@@ -1336,26 +1337,29 @@ class ChocolateBarConstructor:
     
         root = f"{self.root_container}/__GlobalBoundary"
         UsdGeom.Xform.Define(stage, root)
-    
-        # --- big floor plate (Cube scaled flat) ---
-        floor_path = root + "/Floor"
-        floor = UsdGeom.Cube.Define(stage, floor_path)
-        floor.GetSizeAttr().Set(1.0)
-    
+
         floor_w = (max_x - min_x)
         floor_l = (max_y - min_y)
         floor_h = float(thickness_m)
-    
-        fapi = UsdGeom.XformCommonAPI(floor)
-        fapi.SetTranslate(Gf.Vec3d(cx / mpu, cy / mpu, (z_m - 0.5 * floor_h) / mpu))
-        fapi.SetScale(Gf.Vec3f(floor_w / mpu, floor_l / mpu, floor_h / mpu))
-    
-        UsdPhysics.CollisionAPI.Apply(floor.GetPrim())
-    
-        mat = _get_or_create_preview_material(stage, root + "/Materials/FloorMat",
-                                              rgb_srgb=color_srgb,
-                                              emissive_strength=emissive_strength)
-        _bind_material(floor.GetPrim(), mat)
+
+        mat = _get_or_create_preview_material(
+            stage,
+            root + "/Materials/FloorMat",
+            rgb_srgb=color_srgb,
+            emissive_strength=emissive_strength,
+        )
+
+        if add_floor:
+            floor_path = root + "/Floor"
+            floor = UsdGeom.Cube.Define(stage, floor_path)
+            floor.GetSizeAttr().Set(1.0)
+
+            fapi = UsdGeom.XformCommonAPI(floor)
+            fapi.SetTranslate(Gf.Vec3d(cx / mpu, cy / mpu, (z_m - 0.5 * floor_h) / mpu))
+            fapi.SetScale(Gf.Vec3f(floor_w / mpu, floor_l / mpu, floor_h / mpu))
+
+            UsdPhysics.CollisionAPI.Apply(floor.GetPrim())
+            _bind_material(floor.GetPrim(), mat)
     
         # --- perimeter walls ---
         if add_perimeter_walls:
@@ -1541,6 +1545,7 @@ class ChocolateBarConstructor:
             )
         self.build_global_boundary(
             world_count=int(world_count),
+            add_floor=False,
             thickness_m=0.2,
             z_m=float(self.layout.base_z_m),
             add_perimeter_walls=True,

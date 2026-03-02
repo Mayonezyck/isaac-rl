@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import yaml
@@ -21,6 +22,26 @@ from gpudrive_chocolate.baselines.ppo.callbacks import RolloutCaptureCallback
 def load_config(config_path):
     with open(config_path, "r", encoding="utf-8") as f:
         return Box(yaml.safe_load(f))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default="gpudrive_chocolate/config/ppo_choco_stage2.yaml",
+        help="Path to the PPO experiment YAML.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore resume_from in the experiment config and start from scratch.",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Optional device override, for example cuda, cuda:0, or cpu.",
+    )
+    return parser.parse_args()
 
 
 def linear_schedule(initial_value: float) -> Callable[[float], float]:
@@ -78,7 +99,7 @@ def train(exp_config: Box):
         policy = LateFusionPolicy
         policy_kwargs.update(
             {
-                "ego_dim": int(lf_cfg.get("ego_dim", 7)),
+                "ego_dim": int(lf_cfg.get("ego_dim", 11)),
                 "point_dim": int(lf_cfg.get("point_dim", 3)),
                 "point_k": lf_cfg.get("point_k", None),
                 "ego_layers": lf_cfg.get("ego_layers", [64, 64]),
@@ -127,6 +148,10 @@ def train(exp_config: Box):
         render_rollout_steps=exp_config.render_rollout_steps,
         render_dir=exp_config.render_dir,
         always_render=bool(getattr(exp_config, "render_during_training", False)),
+        continuous_recording=bool(getattr(exp_config, "record_training_video", False)),
+        video_fps=int(getattr(exp_config, "video_fps", 30)),
+        video_name_prefix=str(getattr(exp_config, "video_name_prefix", "training")),
+        keep_frames=bool(getattr(exp_config, "video_keep_frames", False)),
     )
 
     checkpoint_cb = CheckpointCallback(
@@ -135,13 +160,30 @@ def train(exp_config: Box):
         name_prefix=str(exp_config.save_prefix),
     )
 
-    model.learn(
-        total_timesteps=exp_config.total_timesteps,
-        callback=[capture_callback, checkpoint_cb],
-    )
-    env.close()
+    interrupted = False
+    try:
+        model.learn(
+            total_timesteps=exp_config.total_timesteps,
+            callback=[capture_callback, checkpoint_cb],
+        )
+    except KeyboardInterrupt:
+        interrupted = True
+        print("[train] interrupted by user, finalizing video output...")
+    finally:
+        try:
+            capture_callback.finalize()
+        finally:
+            env.close()
+
+    if interrupted:
+        return
 
 
 if __name__ == "__main__":
-    exp_config = load_config("gpudrive_chocolate/config/ppo_choco_stage2.yaml")
+    args = parse_args()
+    exp_config = load_config(args.config)
+    if args.fresh:
+        exp_config.resume_from = None
+    if args.device is not None:
+        exp_config.device = args.device
     train(exp_config)

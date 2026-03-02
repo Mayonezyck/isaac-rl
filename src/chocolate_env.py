@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import math
 import numpy as np
 
-from pxr import Gf, Usd, UsdGeom, UsdPhysics, Sdf
+from pxr import Gf, Usd, UsdGeom, UsdPhysics, Sdf, Vt
+
+from src.trfc import weather_context_dim
 
 
 @dataclass
@@ -55,6 +57,33 @@ def _zero_rb_vel(rb_prim: Usd.Prim) -> None:
         pass
 
 
+def _is_vehicle_trigger_prim(prim: Usd.Prim) -> bool:
+    if prim is None or not prim.IsValid():
+        return False
+    try:
+        cd = prim.GetCustomData()
+    except Exception:
+        cd = {}
+    if isinstance(cd, dict) and bool(cd.get("vehicle_trigger", False)):
+        return True
+    return "/VehicleTrigger" in prim.GetPath().pathString
+
+
+def _set_collision_enabled_recursive(root_prim: Usd.Prim, enabled: bool) -> None:
+    if root_prim is None or not root_prim.IsValid():
+        return
+    for prim in Usd.PrimRange(root_prim):
+        if _is_vehicle_trigger_prim(prim):
+            continue
+        try:
+            api = UsdPhysics.CollisionAPI(prim)
+            attr = api.GetCollisionEnabledAttr()
+            if attr and attr.IsValid():
+                attr.Set(bool(enabled))
+        except Exception:
+            continue
+
+
 class ChocolateEnv:
     """
     Batched multi-agent RL-style environment on top of IsaacSim:
@@ -85,6 +114,7 @@ class ChocolateEnv:
         success_bonus: float = 10.0,
         action_l2_penalty: float = 0.0,
         collision_penalty: float = 0.0,
+        min_vehicle_z_m: Optional[float] = None,
         collision_penalty_types: Optional[List[int]] = None,
         collision_debug: bool = False,
         road_contact_done_types: Optional[List[int]] = None,
@@ -140,6 +170,7 @@ class ChocolateEnv:
         self.success_bonus = float(success_bonus)
         self.action_l2_penalty = float(action_l2_penalty)
         self.collision_penalty = float(collision_penalty)
+        self.min_vehicle_z_m = None if min_vehicle_z_m is None else float(min_vehicle_z_m)
         self.collision_penalty_types = set(int(x) for x in (collision_penalty_types or []))
         self.collision_debug = bool(collision_debug)
         self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
@@ -180,6 +211,7 @@ class ChocolateEnv:
         self.warmup_on_reset_steps = max(0, int(warmup_on_reset_steps))
         self.respawn_on_reset = bool(respawn_on_reset)
         self.respawn_params = respawn_params or {}
+        self.respawn_hold_radius_m = float(self.respawn_params.get("respawn_hold_radius_m", 3.0))
         self.verbose = bool(verbose)
 
         # --- episode state (per "row" = per AgentKey) ---
@@ -194,8 +226,10 @@ class ChocolateEnv:
         # --- per-agent cached reset pose ---
         self._start_local_translate: Dict[object, Tuple[float, float, float]] = {}
         self._start_local_yaw_deg: Dict[object, float] = {}
+        self._start_world_xy_m: Dict[object, Tuple[float, float]] = {}
         self._spawn_pos_units: dict = {}   # key -> (x_u, y_u, z_u)
         self._spawn_quat: dict = {}        # key -> (w, x, y, z)  (world orientation)
+        self._pending_respawns: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self._mpu = float(getattr(self.sim, "meters_per_unit", 1.0))  # IsaacSim usually has this
         self._collision_tracker = None
         if self.collision_penalty_types or self.collision_debug:
@@ -349,18 +383,14 @@ class ChocolateEnv:
             penalties[i] = -float(penalty)
         return penalties
     def _cache_spawn_if_missing(self):
-        # cache LOCAL pose from pose_prim (NOT rigid body prim)
+        # cache LOCAL pose from the stable Vehicle_Parent xform
         for k in self._keys:
             if k in self._start_local_translate:
                 continue
             h = self.ctrl.get(k.world_idx, k.agent_id)
-            if h is None or (not h.pose_prim) or (not h.pose_prim.IsValid()):
+            if h is None:
                 continue
-            capi = UsdGeom.XformCommonAPI(h.pose_prim)
-            t = capi.GetTranslate()
-            r = capi.GetRotate()  # XYZ degrees
-            self._start_local_translate[k] = (float(t[0]), float(t[1]), float(t[2]))
-            self._start_local_yaw_deg[k] = float(r[2])
+            self._cache_spawn_pose(k, h)
 
 
     def _physx_teleport_rb(self, rb_prim, pos_units, quat_wxyz):
@@ -521,7 +551,7 @@ class ChocolateEnv:
         # Road points visualization
         if self.road_points_enable:
             rp_root = UsdGeom.Xform.Define(stage, f"{agent_root}/RoadPoints")
-            base = 7
+            base = 7 + weather_context_dim()
             k = int(self.road_points_k)
             radius = float(self.road_points_radius_m)
             for j in range(k):
@@ -541,7 +571,9 @@ class ChocolateEnv:
         # Vehicle observations visualization
         if self.vehicle_obs_enable:
             veh_root = UsdGeom.Xform.Define(stage, f"{agent_root}/Vehicles")
-            base = 7 + (int(self.road_points_k) * 3 if self.road_points_enable else 0)
+            base = 7 + weather_context_dim() + (
+                int(self.road_points_k) * 3 if self.road_points_enable else 0
+            )
             k = int(self.vehicle_obs_k)
             feat = 6
             for j in range(k):
@@ -566,8 +598,7 @@ class ChocolateEnv:
 
     def _cache_start_pose_for_keys(self, keys: List[object]) -> None:
         """
-        Cache local translate + yaw (deg) using XformCommonAPI on pose_prim.
-        This is robust for resets because we're restoring local ops on the moving prim (pose_prim). :contentReference[oaicite:6]{index=6}
+        Cache local translate + yaw (deg) from the stable Vehicle_Parent xform.
         """
         for k in keys:
             if k in self._start_local_translate:
@@ -575,31 +606,257 @@ class ChocolateEnv:
             h = self.ctrl.get(k.world_idx, k.agent_id)
             if h is None:
                 continue
-            pose_prim = h.pose_prim
-            if not pose_prim or not pose_prim.IsValid():
+            self._cache_spawn_pose(k, h)
+
+    def _agent_token(self, world_idx: int, agent_id: int) -> Tuple[int, int]:
+        return (int(world_idx), int(agent_id))
+
+    def _agent_token_from_key(self, key: object) -> Tuple[int, int]:
+        return self._agent_token(getattr(key, "world_idx"), getattr(key, "agent_id"))
+
+    def _get_agent_handle(self, world_idx: int, agent_id: int):
+        return self.ctrl.get(int(world_idx), int(agent_id))
+
+    def _get_agent_root_prim(self, h) -> Optional[Usd.Prim]:
+        if h is None:
+            return None
+        root_path = getattr(h, "vehicle_root_path", None)
+        if isinstance(root_path, str):
+            prim = self.stage.GetPrimAtPath(root_path)
+            if prim.IsValid():
+                return prim
+        pose_prim = getattr(h, "pose_prim", None)
+        if pose_prim is not None and pose_prim.IsValid():
+            return pose_prim
+        return None
+
+    def _get_spawn_xform_prim(self, h) -> Optional[Usd.Prim]:
+        if h is None:
+            return None
+        root_path = getattr(h, "vehicle_root_path", None)
+        if isinstance(root_path, str):
+            root_prim = self.stage.GetPrimAtPath(root_path)
+            if root_prim.IsValid():
+                parent = root_prim.GetParent()
+                if parent is not None and parent.IsValid():
+                    return parent
+                return root_prim
+        pose_prim = getattr(h, "pose_prim", None)
+        if pose_prim is not None and pose_prim.IsValid():
+            parent = pose_prim.GetParent()
+            if parent is not None and parent.IsValid():
+                return parent
+            return pose_prim
+        return None
+
+    def _cache_spawn_pose(self, key: object, h) -> bool:
+        if key in self._start_local_translate:
+            return True
+        spawn_prim = self._get_spawn_xform_prim(h)
+        if spawn_prim is None or not spawn_prim.IsValid():
+            return False
+        try:
+            capi = UsdGeom.XformCommonAPI(spawn_prim)
+            t = capi.GetTranslate()
+            r = capi.GetRotate()
+            self._start_local_translate[key] = (float(t[0]), float(t[1]), float(t[2]))
+            self._start_local_yaw_deg[key] = float(r[2])
+        except Exception:
+            return False
+        try:
+            M = UsdGeom.Xformable(spawn_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            p = M.ExtractTranslation()
+            self._start_world_xy_m[key] = (float(p[0]) * self._mpu, float(p[1]) * self._mpu)
+        except Exception:
+            pass
+        return True
+
+    def _set_agent_visible(self, h, visible: bool) -> None:
+        if h is None:
+            return
+        try:
+            prim = self._get_spawn_xform_prim(h)
+            if prim is None or not prim.IsValid():
+                prim = self._get_agent_root_prim(h)
+            if prim is None or not prim.IsValid():
+                return
+            imageable = UsdGeom.Imageable(prim)
+            if visible:
+                imageable.MakeVisible()
+            else:
+                imageable.MakeInvisible()
+        except Exception:
+            pass
+
+    def _set_agent_collision_enabled(self, h, enabled: bool) -> None:
+        root_prim = self._get_agent_root_prim(h)
+        if root_prim is None or not root_prim.IsValid():
+            return
+        _set_collision_enabled_recursive(root_prim, enabled)
+
+    def _reset_agent_contact_state(self, h) -> None:
+        root_prim = self._get_agent_root_prim(h)
+        if root_prim is None or not root_prim.IsValid():
+            return
+        try:
+            root_prim.SetCustomDataByKey("road_contact_types", Vt.IntArray())
+            root_prim.SetCustomDataByKey("vehicle_contact_ids", Vt.IntArray())
+            root_prim.SetCustomDataByKey("vehicle_collided", False)
+        except Exception:
+            pass
+
+    def _set_agent_local_pose(self, h, translate: Tuple[float, float, float], yaw_deg: float) -> bool:
+        spawn_prim = self._get_spawn_xform_prim(h)
+        if spawn_prim is None or not spawn_prim.IsValid():
+            return False
+        try:
+            capi = UsdGeom.XformCommonAPI(spawn_prim)
+            capi.SetTranslate(Gf.Vec3d(float(translate[0]), float(translate[1]), float(translate[2])))
+            capi.SetRotate(
+                Gf.Vec3f(0.0, 0.0, float(yaw_deg)),
+                UsdGeom.XformCommonAPI.RotationOrderXYZ,
+            )
+        except Exception:
+            return False
+
+        pose_prim = getattr(h, "pose_prim", None)
+        if pose_prim is not None and pose_prim.IsValid():
+            rb_prim = _find_rigid_body_prim(pose_prim)
+            if rb_prim is not None:
+                _zero_rb_vel(rb_prim)
+        return True
+
+    def _get_agent_world_xy_m(self, h) -> Optional[Tuple[float, float]]:
+        if h is None:
+            return None
+        try:
+            start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+            if start_prim is None:
+                start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+            if start_prim is None:
+                return None
+            rb_prim = _find_rigid_body_prim(start_prim)
+            if rb_prim is not None:
+                M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            else:
+                M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            p = M.ExtractTranslation()
+            return (float(p[0]) * self._mpu, float(p[1]) * self._mpu)
+        except Exception:
+            return None
+
+    def _teleport_agent_to_spawn(self, key: object) -> bool:
+        self._cache_spawn_if_missing()
+        h = self.ctrl.get(key.world_idx, key.agent_id)
+        if h is None:
+            return False
+
+        t0 = self._start_local_translate.get(key, None)
+        yaw0 = self._start_local_yaw_deg.get(key, 0.0)
+        if t0 is None:
+            return False
+        return self._set_agent_local_pose(h, t0, yaw0)
+
+    def _move_agent_to_respawn_hold(self, key: object) -> bool:
+        self._cache_spawn_if_missing()
+        h = self.ctrl.get(key.world_idx, key.agent_id)
+        if h is None:
+            return False
+
+        t0 = self._start_local_translate.get(key, None)
+        yaw0 = self._start_local_yaw_deg.get(key, 0.0)
+        if t0 is None:
+            return False
+
+        hold_depth_units = 50.0 / max(self._mpu, 1e-6)
+        hold_translate = (float(t0[0]), float(t0[1]), float(t0[2] - hold_depth_units))
+        return self._set_agent_local_pose(h, hold_translate, yaw0)
+
+    def _spawn_area_is_clear(self, token: Tuple[int, int], radius_m: float) -> bool:
+        if radius_m <= 0.0:
+            return True
+
+        pending = self._pending_respawns.get(token, {})
+        spawn_xy = pending.get("spawn_xy_m", None)
+        if spawn_xy is None:
+            for key, cached_xy in self._start_world_xy_m.items():
+                if self._agent_token_from_key(key) == token:
+                    spawn_xy = cached_xy
+                    break
+        if spawn_xy is None:
+            return False
+
+        world_idx, agent_id = token
+        radius2 = float(radius_m) * float(radius_m)
+        states = self._collect_all_vehicle_states().get(int(world_idx), [])
+        for state in states:
+            other_agent_id = int(state.get("agent_id", -1))
+            other_token = self._agent_token(world_idx, other_agent_id)
+            if other_token == token or other_token in self._pending_respawns:
                 continue
+            pos = state.get("pos", None)
+            if pos is None or len(pos) < 2:
+                continue
+            other_x = float(pos[0]) * self._mpu
+            other_y = float(pos[1]) * self._mpu
+            dx = float(other_x - spawn_xy[0])
+            dy = float(other_y - spawn_xy[1])
+            if dx * dx + dy * dy < radius2:
+                return False
+        return True
 
-            capi = UsdGeom.XformCommonAPI(pose_prim)
-            try:
-                # local translate
-                t = capi.GetTranslate()
-                tx, ty, tz = float(t[0]), float(t[1]), float(t[2])
+    def _queue_respawn(self, key: object) -> bool:
+        self._cache_spawn_if_missing()
+        token = self._agent_token_from_key(key)
+        h = self.ctrl.get(key.world_idx, key.agent_id)
+        if h is None:
+            return False
+        spawn_xy = self._start_world_xy_m.get(key, None)
+        if spawn_xy is None:
+            return False
 
-                # local rotation: we only restore Z (yaw) in XYZ order
-                r = capi.GetRotate()
-                yaw_deg = float(r[2])
+        self._set_agent_visible(h, False)
+        self._set_agent_collision_enabled(h, False)
+        if not self._move_agent_to_respawn_hold(key):
+            self._set_agent_collision_enabled(h, True)
+            self._set_agent_visible(h, True)
+            return False
+        self._pending_respawns[token] = {
+            "key": key,
+            "radius_m": float(self.respawn_hold_radius_m),
+            "spawn_xy_m": spawn_xy,
+        }
+        return True
 
-                self._start_local_translate[k] = (tx, ty, tz)
-                self._start_local_yaw_deg[k] = yaw_deg
-            except Exception:
-                # fallback: derive yaw from world transform (best-effort)
-                try:
-                    M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                    p = M.ExtractTranslation()
-                    self._start_local_translate[k] = (float(p[0]), float(p[1]), float(p[2]))
-                    self._start_local_yaw_deg[k] = float(_yaw_from_xform(M) * 180.0 / math.pi)
-                except Exception:
-                    continue
+    def _release_pending_respawns(self) -> None:
+        if not self._pending_respawns:
+            return
+
+        released: List[Tuple[int, int]] = []
+        for token, pending in list(self._pending_respawns.items()):
+            radius_m = float(pending.get("radius_m", self.respawn_hold_radius_m))
+            if not self._spawn_area_is_clear(token, radius_m):
+                continue
+            world_idx, agent_id = token
+            h = self._get_agent_handle(world_idx, agent_id)
+            if h is None:
+                continue
+            key = pending.get("key", None)
+            if key is None or not self._teleport_agent_to_spawn(key):
+                continue
+            self._reset_agent_contact_state(h)
+            self._set_agent_collision_enabled(h, True)
+            self._set_agent_visible(h, True)
+            if getattr(h, "pose_prim", None) is not None and h.pose_prim.IsValid():
+                rb_prim = _find_rigid_body_prim(h.pose_prim)
+                if rb_prim is not None:
+                    _zero_rb_vel(rb_prim)
+            released.append(token)
+
+        for token in released:
+            self._pending_respawns.pop(token, None)
+            if self.verbose:
+                print(f"[respawn] released world={token[0]} agent={token[1]}")
 
     def _freeze_agents(self, keys: List[object], which: np.ndarray) -> None:
         """
@@ -629,6 +886,14 @@ class ChocolateEnv:
             rb_prim = _find_rigid_body_prim(prim)
             if rb_prim is not None:
                 _zero_rb_vel(rb_prim)
+
+    def _pending_mask_for_keys(self, keys: List[object]) -> np.ndarray:
+        if not self._pending_respawns:
+            return np.zeros((len(keys),), dtype=bool)
+        return np.asarray(
+            [self._agent_token_from_key(k) in self._pending_respawns for k in keys],
+            dtype=bool,
+        )
 
     def _hide_agents(self, keys: List[object], which: np.ndarray) -> None:
         idx = np.where(which)[0]
@@ -699,6 +964,25 @@ class ChocolateEnv:
         if not isinstance(cd, dict):
             return False
         return bool(cd.get("vehicle_collided", False))
+
+    def _get_vehicle_world_z_m(self, h) -> Optional[float]:
+        if h is None:
+            return None
+        try:
+            start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+            if start_prim is None:
+                start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+            if start_prim is None:
+                return None
+            rb_prim = _find_rigid_body_prim(start_prim)
+            if rb_prim is not None:
+                M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            else:
+                M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            p = M.ExtractTranslation()
+            return float(p[2]) * self._mpu
+        except Exception:
+            return None
 
     def _find_agent_prim_path(self, world_idx: int, agent_id: int) -> Optional[str]:
         world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
@@ -796,10 +1080,15 @@ class ChocolateEnv:
         idx = np.where(done_mask)[0]
 
         if self.respawn_on_reset:
+            used_builder_respawn = False
             for i in idx:
                 k = self._keys[i]
-                self._respawn_agent_from_metadata(k.world_idx, k.agent_id)
-            self.ctrl.refresh()
+                if not self._queue_respawn(k):
+                    self._respawn_agent_from_metadata(k.world_idx, k.agent_id)
+                    used_builder_respawn = True
+            if used_builder_respawn:
+                self.ctrl.refresh()
+            self._release_pending_respawns()
             self._done[idx] = False
             self._success_latched[idx] = False
             self.sim.step(render=False)
@@ -816,30 +1105,7 @@ class ChocolateEnv:
 
         for i in idx:
             k = self._keys[i]
-            h = self.ctrl.get(k.world_idx, k.agent_id)
-            if h is None or (not h.pose_prim) or (not h.pose_prim.IsValid()):
-                continue
-
-            t0 = self._start_local_translate.get(k, None)
-            yaw0 = self._start_local_yaw_deg.get(k, 0.0)
-            if t0 is None:
-                continue
-
-            # 1) teleport by USD local ops (on pose_prim = .../Vehicle)
-            capi = UsdGeom.XformCommonAPI(h.pose_prim)
-            capi.SetTranslate(Gf.Vec3d(t0[0], t0[1], t0[2]))
-            capi.SetRotate(
-                Gf.Vec3f(0.0, 0.0, float(yaw0)),
-                UsdGeom.XformCommonAPI.RotationOrderXYZ
-            )
-
-            # 2) zero rigidbody velocities (find RB by walking UP)
-            rb_prim = _find_rigid_body_prim(h.pose_prim)
-            if rb_prim is not None:
-                _zero_rb_vel(rb_prim)
-
-            # 3) make sure it’s not stuck braking forever (optional but helps)
-            #    briefly release controls next step by clearing done flags below
+            self._teleport_agent_to_spawn(k)
 
         # clear episode bookkeeping
         self._done[idx] = False
@@ -876,6 +1142,7 @@ class ChocolateEnv:
     # -------------------------
     def reset(self) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         self.t = 0
+        self._pending_respawns.clear()
 
         # Refresh controller registry
         self.ctrl.refresh()
@@ -938,6 +1205,20 @@ class ChocolateEnv:
             U3 = U3.copy()
             U3[self._done, :] = 0.0
             U3[self._done, 2] = 1.0  # brake
+        self._release_pending_respawns()
+        if self._pending_respawns:
+            if U3 is U:
+                U3 = U3.copy()
+            token_to_idx = {
+                self._agent_token_from_key(k): i
+                for i, k in enumerate(keys)
+            }
+            for token in self._pending_respawns:
+                idx = token_to_idx.get(token)
+                if idx is None:
+                    continue
+                U3[idx, :] = 0.0
+                U3[idx, 2] = 1.0
         # Apply controls once per env step
         self.ctrl.apply_all(U3)
 
@@ -967,7 +1248,8 @@ class ChocolateEnv:
         dist_n = obs[:, 4].astype(np.float32)  # normalized
         dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
 
-        active = mask & (~self._done)
+        pending_mask = self._pending_mask_for_keys(keys)
+        active = mask & (~self._done) & (~pending_mask)
 
         # SUCCESS: distance threshold in meters
         success_now = (dist_m <= self.goal_success_dist_m) & active
@@ -1026,6 +1308,22 @@ class ChocolateEnv:
                 debug_hits = self._collision_tracker.consume_debug()
                 if debug_hits:
                     print(f"[collision] t={self.t} hits={debug_hits}")
+
+        below_min_z = np.zeros((N,), dtype=bool)
+        if self.min_vehicle_z_m is not None:
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                h = self.ctrl.get(k.world_idx, k.agent_id)
+                if h is None:
+                    continue
+                z_m = self._get_vehicle_world_z_m(h)
+                if z_m is not None and z_m < self.min_vehicle_z_m:
+                    below_min_z[i] = True
+            if below_min_z.any():
+                if self.collision_penalty != 0.0:
+                    reward[below_min_z] += float(self.collision_penalty)
+                self._done[below_min_z] = True
 
         # Road-contact termination based on trigger contact list
         if self.road_contact_done_types:
@@ -1091,7 +1389,8 @@ class ChocolateEnv:
                 continue
             if self._get_vehicle_collided(h):
                 vehicle_collided[i] = True
-        collided_flags = road_collided | vehicle_collided
+        collided_flags = road_collided | vehicle_collided | below_min_z
+        collided_flags[pending_mask] = False
 
         # Timeout
         timeout = (self.t >= self.max_steps)
