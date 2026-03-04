@@ -41,6 +41,16 @@ def parse_args():
         default=None,
         help="Optional device override, for example cuda, cuda:0, or cpu.",
     )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Optional run identifier used to name the TensorBoard output directory.",
+    )
+    parser.add_argument(
+        "--runs-root",
+        default=None,
+        help="Optional root directory for TensorBoard logs. Defaults to exp_config.runs_root or runs.",
+    )
     return parser.parse_args()
 
 
@@ -64,7 +74,7 @@ def build_resume_custom_objects(env: ChocolateSB3MultiAgentEnv) -> dict[str, obj
     }
 
 
-def train(exp_config: Box):
+def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_override: str | None = None):
     if isinstance(exp_config.device, str) and exp_config.device.startswith("cuda") and ":" not in exp_config.device:
         exp_config.device = "cuda:0"
     if isinstance(exp_config.device, str) and exp_config.device.startswith("cuda"):
@@ -86,7 +96,10 @@ def train(exp_config: Box):
         exp_config.num_envs * exp_config.n_steps
     ) // exp_config.num_minibatches
 
-    run_id = datetime.now().strftime("%m_%d_%H_%S")
+    run_id = run_id_override or getattr(exp_config, "run_id", None) or datetime.now().strftime("%m_%d_%H_%S")
+    runs_root = runs_root_override or getattr(exp_config, "runs_root", None) or "runs"
+    tensorboard_root = os.path.join(runs_root, run_id)
+    print(f"[train] tensorboard_root={tensorboard_root}")
 
     policy_type = str(getattr(exp_config, "policy_type", "mlp"))
     policy_kwargs = {}
@@ -96,14 +109,42 @@ def train(exp_config: Box):
         policy = "MlpPolicy"
     elif policy_type == "late_fusion":
         lf_cfg = getattr(exp_config, "late_fusion", {})
+        env_cfg = env.choco_cfg.get("env", {})
+        road_points_enable = bool(env_cfg.get("road_points_enable", False))
+        road_points_include_dirs = bool(env_cfg.get("road_points_include_dirs", False))
+        vehicle_obs_enable = bool(env_cfg.get("vehicle_obs_enable", False))
+        point_layers = lf_cfg.get("point_layers", [64, 64])
         policy = LateFusionPolicy
         policy_kwargs.update(
             {
                 "ego_dim": int(lf_cfg.get("ego_dim", 11)),
                 "point_dim": int(lf_cfg.get("point_dim", 3)),
                 "point_k": lf_cfg.get("point_k", None),
+                "road_point_dim": int(
+                    lf_cfg.get(
+                        "road_point_dim",
+                        (5 if road_points_include_dirs else 3) if road_points_enable else 0,
+                    )
+                ),
+                "road_point_k": int(
+                    lf_cfg.get(
+                        "road_point_k",
+                        int(env_cfg.get("road_points_k", 0)) if road_points_enable else 0,
+                    )
+                ),
+                "vehicle_dim": int(
+                    lf_cfg.get("vehicle_dim", 6 if vehicle_obs_enable else 0)
+                ),
+                "vehicle_k": int(
+                    lf_cfg.get(
+                        "vehicle_k",
+                        int(env_cfg.get("vehicle_obs_k", 0)) if vehicle_obs_enable else 0,
+                    )
+                ),
                 "ego_layers": lf_cfg.get("ego_layers", [64, 64]),
-                "point_layers": lf_cfg.get("point_layers", [64, 64]),
+                "point_layers": point_layers,
+                "road_layers": lf_cfg.get("road_layers", point_layers),
+                "vehicle_layers": lf_cfg.get("vehicle_layers", point_layers),
                 "shared_layers": lf_cfg.get("shared_layers", [64]),
                 "last_layer_dim_pi": int(lf_cfg.get("last_layer_dim_pi", 64)),
                 "last_layer_dim_vf": int(lf_cfg.get("last_layer_dim_vf", 64)),
@@ -121,7 +162,7 @@ def train(exp_config: Box):
             env=env,
             device=exp_config.device,
             custom_objects=build_resume_custom_objects(env),
-            tensorboard_log=f"runs/{run_id}",
+            tensorboard_log=tensorboard_root,
         )
     else:
         model = PPO(
@@ -139,7 +180,7 @@ def train(exp_config: Box):
             verbose=exp_config.verbose,
             seed=exp_config.seed,
             device=exp_config.device,
-            tensorboard_log=f"runs/{run_id}",
+            tensorboard_log=tensorboard_root,
             policy_kwargs=policy_kwargs,
         )
 
@@ -186,4 +227,8 @@ if __name__ == "__main__":
         exp_config.resume_from = None
     if args.device is not None:
         exp_config.device = args.device
-    train(exp_config)
+    train(
+        exp_config,
+        run_id_override=args.run_id,
+        runs_root_override=args.runs_root,
+    )

@@ -1,0 +1,50 @@
+choco_config_path: "configs/curriculum_design/stage1_controlled_experiments/curriculum_stage1_oldmaps_current_strategy.yaml"
+
+device: "cuda:1"
+
+reward_type: "weighted_combination"
+collision_weight: 0.0
+goal_achieved_weight: 0.0
+off_road_weight: 0.0
+log_distance_weight: 0.0
+policy_type: "late_fusion"
+
+late_fusion:
+  ego_dim: 11
+  point_dim: 3
+  point_k: null
+  ego_layers: [64, 64]
+  point_layers: [64, 64]
+  shared_layers: [64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: "relu"
+  dropout: 0.0
+  pool: "max"
+
+seed: 42
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+vf_coef: 0.5
+n_steps: 128
+num_minibatches: 8
+verbose: 1
+total_timesteps: 4_000_000
+ent_coef: 0.0001
+lr: 0.0003
+n_epochs: 5
+
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: "runs/capture_stage1_oldmaps_current_strategy"
+render_during_training: false
+record_training_video: false
+video_fps: 30
+video_name_prefix: "ppo_stage1_oldmaps_current_strategy"
+video_keep_frames: false
+
+save_freq: 20000
+save_dir: "runs/checkpoints_stage1_oldmaps_current_strategy"
+save_prefix: "ppo_stage1_oldmaps_current_strategy"
+resume_from: null

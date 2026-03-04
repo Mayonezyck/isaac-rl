@@ -1,0 +1,116 @@
+study:
+  name: "stage1_currentmaps_old_strategy_evolution"
+  output_root: "runs/hparam_search/stage1_currentmaps_old_strategy_evolution"
+
+base:
+  ppo_config: "configs/curriculum_design/stage1_controlled_experiments/ppo_stage1_currentmaps_old_strategy.yaml"
+
+runner:
+  command_prefix: ["python", "-u"]
+  train_entry: "gpudrive_chocolate/baselines/ppo/ppo_sb3.py"
+
+resources:
+  max_parallel: 2
+  auto_expand_slots: true
+  slots:
+    - label: "gpu1_a"
+      device: "cuda:1"
+      active_gpu: 1
+      physics_gpu: 1
+    - label: "gpu1_b"
+      device: "cuda:1"
+      active_gpu: 1
+      physics_gpu: 1
+
+search:
+  random_seed: 42
+  generations: 3
+  population_size: 6
+  elite_count: 2
+  mutation_rate: 0.35
+  crossover_rate: 0.75
+  random_candidates_per_generation: 1
+  metric_window: 5
+  timesteps_per_trial: 32768
+  heartbeat_sec: 5
+
+scoring:
+  primary_metric: "rollout/success_rate"
+  missing_value: 0.0
+  weights:
+    rollout/success_rate: 100.0
+    rollout/goal_rate: 35.0
+    rollout/mean_dist_to_goal_m: -0.60
+    rollout/road_contact_done_rate: -25.0
+    rollout/vehicle_contact_done_rate: -10.0
+    rollout/below_min_z_rate: -50.0
+    rollout/mean_episode_len: 0.05
+
+space:
+  - name: "lr"
+    target: "ppo"
+    path: "lr"
+    type: "float"
+    min: 0.0001
+    max: 0.0008
+    scale: "log"
+  - name: "ent_coef"
+    target: "ppo"
+    path: "ent_coef"
+    type: "choice"
+    values: [0.0, 0.00005, 0.0001, 0.0003]
+  - name: "clip_range"
+    target: "ppo"
+    path: "clip_range"
+    type: "choice"
+    values: [0.10, 0.15, 0.20, 0.25]
+  - name: "gamma"
+    target: "ppo"
+    path: "gamma"
+    type: "choice"
+    values: [0.98, 0.99, 0.995]
+  - name: "gae_lambda"
+    target: "ppo"
+    path: "gae_lambda"
+    type: "choice"
+    values: [0.92, 0.95, 0.98]
+  - name: "n_steps"
+    target: "ppo"
+    path: "n_steps"
+    type: "choice"
+    values: [64, 128, 256]
+  - name: "num_minibatches"
+    target: "ppo"
+    path: "num_minibatches"
+    type: "choice"
+    values: [4, 8]
+  - name: "goal_achieved_weight"
+    target: "ppo"
+    path: "goal_achieved_weight"
+    type: "choice"
+    values: [0.5, 1.0, 2.0]
+  - name: "collision_weight"
+    target: "ppo"
+    path: "collision_weight"
+    type: "choice"
+    values: [0.0, -0.25, -0.5, -1.0]
+  - name: "reward_scale"
+    target: "curriculum"
+    path: "env.reward_scale"
+    type: "choice"
+    values: [1.0, 1.5, 2.0]
+  - name: "success_bonus"
+    target: "curriculum"
+    path: "env.success_bonus"
+    type: "choice"
+    values: [8.0, 12.0, 16.0, 20.0]
+  - name: "thr_clip_max"
+    target: "curriculum"
+    path: "control.thr_clip.1"
+    type: "choice"
+    values: [0.35, 0.40, 0.50, 0.60]
+  - name: "max_steps"
+    target: "curriculum"
+    path: "env.max_steps"
+    type: "choice"
+    values: [300, 400, 500]

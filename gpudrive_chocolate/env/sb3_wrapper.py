@@ -13,6 +13,16 @@ from gpudrive_chocolate.env.choco_world import ChocoWorldBuilder, load_config
 from gpudrive_chocolate.utils.obs_vis import save_obs_png
 
 
+def _safe_mean(values) -> float:
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.size == 0:
+        return 0.0
+    try:
+        return float(np.nanmean(arr))
+    except Exception:
+        return 0.0
+
+
 class ChocolateSB3MultiAgentEnv(VecEnv):
     """SB3 VecEnv wrapper for ChocolateEnv.
 
@@ -71,6 +81,21 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             lane_center_reward_enable=bool(cfg_env.get("lane_center_reward_enable", False)),
             lane_center_reward_type=cfg_env.get("lane_center_reward_type", 2),
             lane_center_reward_per_step=float(cfg_env.get("lane_center_reward_per_step", 0.05)),
+            geom_lane_reward_enable=bool(cfg_env.get("geom_lane_reward_enable", False)),
+            geom_lane_reward_per_step=float(cfg_env.get("geom_lane_reward_per_step", 0.0)),
+            geom_lane_tolerance_m=float(cfg_env.get("geom_lane_tolerance_m", 1.75)),
+            geom_lane_heading_weight=float(cfg_env.get("geom_lane_heading_weight", 0.5)),
+            geom_lane_min_alignment=float(cfg_env.get("geom_lane_min_alignment", 0.5)),
+            geom_route_progress_weight=float(cfg_env.get("geom_route_progress_weight", 0.0)),
+            geom_offroad_metrics_enable=bool(cfg_env.get("geom_offroad_metrics_enable", False)),
+            geom_offroad_lateral_threshold_m=float(
+                cfg_env.get("geom_offroad_lateral_threshold_m", 3.0)
+            ),
+            geom_offroad_distance_threshold_m=float(
+                cfg_env.get("geom_offroad_distance_threshold_m", 6.0)
+            ),
+            geom_lane_types=list(cfg_env.get("geom_lane_types", [1, 2])),
+            geom_road_edge_types=list(cfg_env.get("geom_road_edge_types", [15, 16])),
             survival_reward_per_step=float(cfg_env.get("survival_reward_per_step", 0.0)),
             idle_penalty_enable=bool(cfg_env.get("idle_penalty_enable", False)),
             idle_penalty_per_step=float(cfg_env.get("idle_penalty_per_step", 0.05)),
@@ -85,6 +110,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             road_points_radius_m=float(cfg_env["road_points_radius_m"]),
             road_points_type_norm=float(cfg_env["road_points_type_norm"]),
             road_points_mode=str(cfg_env.get("road_points_mode", "knn")),
+            road_points_include_dirs=bool(cfg_env.get("road_points_include_dirs", False)),
             vehicle_obs_enable=bool(cfg_env["vehicle_obs_enable"]),
             vehicle_obs_k=int(cfg_env["vehicle_obs_k"]),
             ttc_penalty_enable=bool(cfg_env.get("ttc_penalty_enable", False)),
@@ -97,6 +123,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             render=bool(cfg_env.get("render", False)),
             respawn_on_reset=bool(cfg_env.get("respawn_on_reset", False)),
             respawn_params={
+                "spawn_z_m": float(agents_cfg.get("spawn_z_m", 1.0)),
                 "parked_ground_z_m": float(agents_cfg.get("parked_ground_z_m", 0.0)),
                 "parked_chassis_size_m": tuple(
                     map(float, agents_cfg.get("parked_chassis_size_m", [4.0, 2.0, 1.0]))
@@ -121,6 +148,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     agents_cfg.get("vehicle_trigger_script_enable", True)
                 ),
                 "respawn_hold_radius_m": float(cfg_env.get("respawn_hold_radius_m", 3.0)),
+                "startup_below_min_z_preflight_steps": int(
+                    cfg_env.get("startup_below_min_z_preflight_steps", 0)
+                ),
             },
             verbose=bool(cfg_env.get("verbose", False)),
         )
@@ -133,6 +163,11 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.goal_achieved_weight = float(goal_achieved_weight)
         self.off_road_weight = float(off_road_weight)
         self.log_distance_weight = float(log_distance_weight)
+        self.auto_reset_done = bool(cfg_env.get("auto_reset_done", True))
+        self.auto_reset_timeout = bool(cfg_env.get("auto_reset_timeout", True))
+        self._spawned_episode_total = 0
+        self._pending_initial_spawn_count = 0
+        self.verbose = bool(cfg_env.get("verbose", False))
         self.obs_vis_enable = bool(cfg_env.get("obs_vis_enable", False))
         self.obs_vis_every_steps = max(1, int(cfg_env.get("obs_vis_every_steps", 2000)))
         self.obs_vis_out_dir = str(cfg_env.get("obs_vis_out_dir", "runs/obs_vis"))
@@ -155,6 +190,13 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.flat_key_indices: List[int] = []
 
         obs, mask, keys = self.choco_env.reset()
+        startup_preflight_steps = int(cfg_env.get("startup_below_min_z_preflight_steps", 0))
+        if startup_preflight_steps > 0:
+            offenders = self.choco_env.collect_startup_below_min_z_offenders(startup_preflight_steps)
+            if offenders:
+                self.choco_env.quarantine_agents(offenders)
+                print(f"[sb3] quarantined startup below_min_z agents: {offenders}")
+            obs, mask, keys = self.choco_env.reset()
         # TODO: swap in a richer observation builder and update obs_dim accordingly.
         self._rebuild_slot_mapping(keys)
 
@@ -237,6 +279,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         next_slot = [0 for _ in range(self.num_worlds)]
 
         for k in self._keys:
+            if hasattr(self.choco_env, "is_agent_quarantined") and self.choco_env.is_agent_quarantined(k):
+                continue
             wi = int(k.world_idx)
             if wi < 0 or wi >= self.num_worlds:
                 continue
@@ -261,6 +305,177 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 self.flat_slot_keys.append(k)
                 self.flat_key_indices.append(self._key_index[k])
 
+    def _build_info_dict(
+        self,
+        *,
+        info,
+        done: np.ndarray,
+        reward: np.ndarray,
+        base_reward: np.ndarray,
+        spawned_count_step: int = 0,
+    ) -> dict:
+        mask = np.asarray(getattr(info, "mask", np.zeros((0,), dtype=bool)), dtype=bool)
+        success = np.asarray(getattr(info, "success", np.zeros_like(mask)), dtype=bool)
+        newly_success = np.asarray(
+            getattr(info, "newly_success", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        road_contact_done = np.asarray(
+            getattr(info, "road_contact_done", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        vehicle_contact_done = np.asarray(
+            getattr(info, "vehicle_contact_done", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        collided = np.asarray(getattr(info, "collided", np.zeros_like(mask)), dtype=bool)
+        road_collided = np.asarray(
+            getattr(info, "road_collided", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        vehicle_collided = np.asarray(
+            getattr(info, "vehicle_collided", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        below_min_z = np.asarray(
+            getattr(info, "below_min_z", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        off_road = np.asarray(getattr(info, "off_road", np.zeros_like(mask)), dtype=bool)
+        lane_hit = np.asarray(getattr(info, "lane_hit", np.zeros_like(mask)), dtype=bool)
+        active = np.asarray(getattr(info, "active", np.zeros_like(mask)), dtype=bool)
+        pending = np.asarray(getattr(info, "pending", np.zeros_like(mask)), dtype=bool)
+        dist_m = np.asarray(
+            getattr(info, "dist_m", np.zeros(mask.shape, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        lane_error_m = np.asarray(
+            getattr(info, "lane_error_m", np.zeros(mask.shape, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        heading_alignment = np.asarray(
+            getattr(info, "heading_alignment", np.zeros(mask.shape, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        route_progress_m = np.asarray(
+            getattr(info, "route_progress_m", np.zeros(mask.shape, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        done = np.asarray(done, dtype=bool)
+        reward = np.asarray(reward, dtype=np.float32)
+        base_reward = np.asarray(base_reward, dtype=np.float32)
+
+        if mask.size and self.flat_key_indices:
+            sel = np.asarray(self.flat_key_indices, dtype=np.int64)
+            mask = mask[sel]
+            success = success[sel]
+            newly_success = newly_success[sel]
+            road_contact_done = road_contact_done[sel]
+            vehicle_contact_done = vehicle_contact_done[sel]
+            collided = collided[sel]
+            road_collided = road_collided[sel]
+            vehicle_collided = vehicle_collided[sel]
+            below_min_z = below_min_z[sel]
+            off_road = off_road[sel]
+            lane_hit = lane_hit[sel]
+            active = active[sel]
+            pending = pending[sel]
+            dist_m = dist_m[sel]
+            lane_error_m = lane_error_m[sel]
+            heading_alignment = heading_alignment[sel]
+            route_progress_m = route_progress_m[sel]
+            done = done[sel]
+            reward = reward[sel]
+            base_reward = base_reward[sel]
+
+        controlled_agents = int(len(self.flat_key_indices))
+        valid_agents = int(mask.sum())
+        active_agents = int(active.sum())
+        pending_agents = int(pending.sum())
+        done_count = int(done.sum())
+        new_success_count = int(newly_success.sum())
+        success_latched_count = int(success.sum())
+        road_contact_done_count = int(road_contact_done.sum())
+        vehicle_contact_done_count = int(vehicle_contact_done.sum())
+        off_road_count = int(off_road.sum())
+        lane_hit_count = int(lane_hit.sum())
+        collided_count = int(collided.sum())
+        road_collided_count = int(road_collided.sum())
+        vehicle_collided_count = int(vehicle_collided.sum())
+        below_min_z_count = int(below_min_z.sum())
+
+        active_dist = dist_m[active] if dist_m.size and active.any() else np.asarray([], dtype=np.float32)
+        valid_dist = dist_m[mask] if dist_m.size and mask.any() else np.asarray([], dtype=np.float32)
+        active_lane_error = (
+            lane_error_m[active] if lane_error_m.size and active.any() else np.asarray([], dtype=np.float32)
+        )
+        active_heading_alignment = (
+            heading_alignment[active]
+            if heading_alignment.size and active.any()
+            else np.asarray([], dtype=np.float32)
+        )
+        active_route_progress = (
+            route_progress_m[active]
+            if route_progress_m.size and active.any()
+            else np.asarray([], dtype=np.float32)
+        )
+
+        denom_controlled = max(1, controlled_agents)
+        denom_active = max(1, active_agents)
+        denom_done = max(1, done_count)
+
+        return {
+            "num_controlled_agents": controlled_agents,
+            "num_valid_agents": valid_agents,
+            "num_active_agents": active_agents,
+            "pending_respawn_count": pending_agents,
+            "spawned_count_step": int(spawned_count_step),
+            "spawned_episode_total": int(self._spawned_episode_total),
+            "done_count": done_count,
+            "goal_achieved": float(new_success_count),
+            "new_success_count": new_success_count,
+            "success_latched_count": success_latched_count,
+            "done_success_count": int(np.logical_and(done, success).sum()),
+            "road_contact_done_count": road_contact_done_count,
+            "vehicle_contact_done_count": vehicle_contact_done_count,
+            "truncated": float(bool(getattr(info, "timeout", False))),
+            "off_road": float(off_road_count),
+            "off_road_count": off_road_count,
+            "lane_hit_count": lane_hit_count,
+            "collided": float(collided_count),
+            "collided_count": collided_count,
+            "road_collided_count": road_collided_count,
+            "vehicle_collided_count": vehicle_collided_count,
+            "below_min_z_count": below_min_z_count,
+            "goal_rate_step": float(new_success_count) / float(denom_controlled),
+            "success_latched_rate_step": float(success_latched_count) / float(denom_controlled),
+            "road_contact_done_rate_step": float(road_contact_done_count) / float(denom_controlled),
+            "vehicle_contact_done_rate_step": float(vehicle_contact_done_count) / float(denom_controlled),
+            "off_road_rate_step": float(off_road_count) / float(denom_controlled),
+            "lane_hit_rate_step": float(lane_hit_count) / float(denom_controlled),
+            "collision_rate_step": float(collided_count) / float(denom_controlled),
+            "road_collision_rate_step": float(road_collided_count) / float(denom_controlled),
+            "vehicle_collision_rate_step": float(vehicle_collided_count) / float(denom_controlled),
+            "done_rate_step": float(done_count) / float(denom_controlled),
+            "success_given_done_rate_step": float(new_success_count) / float(denom_done),
+            "mean_dist_to_goal_m": _safe_mean(valid_dist),
+            "mean_active_dist_to_goal_m": _safe_mean(active_dist),
+            "min_active_dist_to_goal_m": float(np.min(active_dist)) if active_dist.size else 0.0,
+            "mean_lane_error_m": _safe_mean(active_lane_error),
+            "mean_heading_alignment": _safe_mean(active_heading_alignment),
+            "mean_route_progress_m": _safe_mean(active_route_progress),
+            "mean_reward_step": _safe_mean(reward),
+            "mean_base_reward_step": _safe_mean(base_reward),
+            "active_fraction": float(active_agents) / float(denom_controlled),
+            "pending_fraction": float(pending_agents) / float(denom_controlled),
+            "road_contact_done_given_active_rate_step": float(road_contact_done_count) / float(denom_active),
+            "vehicle_contact_done_given_active_rate_step": float(vehicle_contact_done_count) / float(denom_active),
+            "lane_hit_given_active_rate_step": float(lane_hit_count) / float(denom_active),
+            "off_road_given_active_rate_step": float(off_road_count) / float(denom_active),
+            "collision_given_active_rate_step": float(collided_count) / float(denom_active),
+            "t_env": int(getattr(info, "t_env", 0)),
+        }
+
     def reset(self, world_idx=None, seed=None):
         if world_idx is not None:
             # ChocolateEnv resets all agents; per-world reset is not implemented.
@@ -268,9 +483,13 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
         obs, mask, keys = self.choco_env.reset()
         self._rebuild_slot_mapping(keys)
+        initial_spawn_count = int(len(self.flat_key_indices))
+        self._spawned_episode_total += initial_spawn_count
+        self._pending_initial_spawn_count += initial_spawn_count
 
         obs_flat = obs[self.flat_key_indices]
-        print(f"[sb3] reset obs shape={tuple(obs_flat.shape)}")
+        if self.verbose:
+            print(f"[sb3] reset obs shape={tuple(obs_flat.shape)}")
         obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device)
 
         self.dead_agent_mask = ~self.controlled_agent_mask.clone()
@@ -303,6 +522,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
     def step(self, actions) -> VecEnvStepReturn:
         self._step_count += 1
+        spawned_count_step = int(self._pending_initial_spawn_count)
+        self._pending_initial_spawn_count = 0
         if torch.is_tensor(actions):
             actions_np = actions.detach().cpu().numpy()
         else:
@@ -319,8 +540,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 continue
             U[key_idx, :] = actions_np[env_idx, :]
 
-        obs, reward, done, info = self.choco_env.step(U)
-        reward = self._compute_rewards(obs, reward, done, info)
+        obs, base_reward, done, info = self.choco_env.step(U)
+        reward = self._compute_rewards(obs, base_reward, done, info)
 
         done_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
         success_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
@@ -347,29 +568,40 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.buf_dones = done_mask_t.to(torch.float32)
 
         if hasattr(info, "timeout") and info.timeout:
-            self.choco_env.reset_timeout()
-            obs, _, _ = self.choco_env._build_obs()
+            if self.auto_reset_timeout:
+                timeout_respawn_count = int(len(self.flat_key_indices))
+                self._spawned_episode_total += timeout_respawn_count
+                spawned_count_step += timeout_respawn_count
+                self.choco_env.reset_timeout()
+                obs, _, _ = self.choco_env._build_obs()
         elif np.any(done):
-            self.choco_env.reset_done(done)
-            obs, _, _ = self.choco_env._build_obs()
+            if self.auto_reset_done:
+                if self.flat_key_indices:
+                    sel = np.asarray(self.flat_key_indices, dtype=np.int64)
+                    done_respawn_count = int(np.asarray(done, dtype=bool)[sel].sum())
+                else:
+                    done_respawn_count = int(np.asarray(done, dtype=bool).sum())
+                self._spawned_episode_total += done_respawn_count
+                spawned_count_step += done_respawn_count
+                self.choco_env.reset_done(done)
+                obs, _, _ = self.choco_env._build_obs()
 
         obs_flat = obs[self.flat_key_indices]
-        print(f"[sb3] step obs shape={tuple(obs_flat.shape)}")
+        if self.verbose:
+            print(f"[sb3] step obs shape={tuple(obs_flat.shape)}")
         obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device)
         self.obs_alive = obs_t.clone()
 
         info_flat = [{} for _ in range(self.num_envs)]
 
         # Lightweight info summary for optional logging.
-        self.info_dict = {
-            "num_controlled_agents": int(self.controlled_agent_mask.sum().item()),
-            "goal_achieved": float(info.success.sum()) if hasattr(info, "success") else 0.0,
-            "done_count": float(done_mask.sum()),
-            "done_success_count": float(np.logical_and(done_mask, success_mask).sum()),
-            "truncated": float(info.timeout) if hasattr(info, "timeout") else 0.0,
-            "off_road": float(info.off_road.sum()) if hasattr(info, "off_road") else 0.0,
-            "collided": float(info.collided.sum()) if hasattr(info, "collided") else 0.0,
-        }
+        self.info_dict = self._build_info_dict(
+            info=info,
+            done=done,
+            reward=reward,
+            base_reward=base_reward,
+            spawned_count_step=spawned_count_step,
+        )
 
         mask_cpu = self.controlled_agent_mask.cpu()
         rewards_flat = (

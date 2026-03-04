@@ -404,6 +404,7 @@ class WaymoJsonMiniWorldBuilder:
         road = (cfg.get("road", {}) or {})
         polylines = road.get("polylines", []) or []
         road_points_all: List[Gf.Vec3f] = []
+        road_dirs_all: List[Gf.Vec3f] = []
         road_types_all: List[int] = []
 
         # compute scene center (for origin_mode="center")
@@ -486,6 +487,9 @@ class WaymoJsonMiniWorldBuilder:
                     seg_scales_py.append(scale)
                     proto_indices_py.append(0)
                     road_points_all.append(mid)
+                    road_dirs_all.append(
+                        Gf.Vec3f(float(dx / length), float(dy / length), 0.0)
+                    )
                     road_types_all.append(int(t))
                     if trigger_enable:
                         trigger_h = float(seg_height) if trigger_match_segment else float(trigger_height_m)
@@ -572,6 +576,7 @@ class WaymoJsonMiniWorldBuilder:
         if road_points_all:
             root_prim = self.stage.GetPrimAtPath(self.world_root)
             root_prim.SetCustomDataByKey("road_points_m", Vt.Vec3fArray(road_points_all))
+            root_prim.SetCustomDataByKey("road_point_dirs", Vt.Vec3fArray(road_dirs_all))
             root_prim.SetCustomDataByKey("road_point_types", Vt.IntArray(road_types_all))
 
     # -------- vehicles + parked cars --------
@@ -1024,6 +1029,7 @@ class WaymoJsonMiniWorldBuilder:
         start_yaw_deg: float,
         goal_local_m: Tuple[float, float, float],
         start_in_goal: bool,
+        spawn_z_m: float = 1.0,
         # parked-car knobs:
         parked_ground_z_m: float = 0.0,
         parked_chassis_size_m: Tuple[float, float, float] = (4.0, 2.0, 1.0),
@@ -1082,7 +1088,7 @@ class WaymoJsonMiniWorldBuilder:
         veh_parent = f"{agent_path}/Vehicle_Parent"
         veh_outer = self._spawn_vehicle_wizard_under(
             veh_parent,
-            position_m=(float(start_local_m[0]), float(start_local_m[1]), float(start_local_m[2])),
+            position_m=(float(start_local_m[0]), float(start_local_m[1]), float(spawn_z_m)),
             yaw_deg=float(start_yaw_deg),
         )
         if veh_outer is None:

@@ -1,0 +1,103 @@
+study:
+  name: "stage2_lane_safety_geom_smoke"
+  output_root: "runs/hparam_search/stage2_lane_safety_geom_smoke"
+
+base:
+  ppo_config: "configs/curriculum_design/navigation_geom_v1/ppo_stage2_lane_safety_geom.yaml"
+
+runner:
+  command_prefix: ["python", "-u"]
+  train_entry: "gpudrive_chocolate/baselines/ppo/ppo_sb3.py"
+
+resources:
+  max_parallel: 1
+  auto_expand_slots: true
+  slots:
+    - label: "gpu1_smoke"
+      device: "cuda:1"
+      active_gpu: 1
+      physics_gpu: 1
+
+search:
+  random_seed: 123
+  generations: 2
+  population_size: 3
+  elite_count: 1
+  mutation_rate: 0.35
+  crossover_rate: 0.75
+  random_candidates_per_generation: 1
+  metric_window: 3
+  timesteps_per_trial: 4096
+  heartbeat_sec: 5
+
+scoring:
+  primary_metric: "rollout/success_rate"
+  missing_value: 0.0
+  weights:
+    rollout/success_rate: 120.0
+    rollout/goal_rate: 35.0
+    rollout/mean_dist_to_goal_m: -0.75
+    rollout/mean_lane_error_m: -12.0
+    rollout/mean_heading_alignment: 15.0
+    rollout/mean_route_progress_m: 20.0
+    rollout/lane_hit_rate: 15.0
+    rollout/off_road_rate: -35.0
+    rollout/collision_rate: -45.0
+    rollout/vehicle_collision_rate: -45.0
+    rollout/road_contact_done_rate: -70.0
+    rollout/vehicle_contact_done_rate: -90.0
+    rollout/below_min_z_rate: -120.0
+
+space:
+  - name: "lr"
+    target: "ppo"
+    path: "lr"
+    type: "float"
+    min: 0.0001
+    max: 0.00035
+    scale: "log"
+  - name: "ent_coef"
+    target: "ppo"
+    path: "ent_coef"
+    type: "choice"
+    values: [0.0, 0.00005, 0.0001]
+  - name: "n_steps"
+    target: "ppo"
+    path: "n_steps"
+    type: "choice"
+    values: [64, 128]
+  - name: "num_minibatches"
+    target: "ppo"
+    path: "num_minibatches"
+    type: "choice"
+    values: [4, 8]
+  - name: "collision_weight"
+    target: "ppo"
+    path: "collision_weight"
+    type: "choice"
+    values: [0.0, -0.05, -0.10]
+  - name: "off_road_weight"
+    target: "ppo"
+    path: "off_road_weight"
+    type: "choice"
+    values: [0.0, -0.05, -0.10]
+  - name: "collision_penalty"
+    target: "curriculum"
+    path: "env.collision_penalty"
+    type: "choice"
+    values: [-0.1, -0.2, -0.4]
+  - name: "vehicle_contact_done_penalty"
+    target: "curriculum"
+    path: "env.vehicle_contact_done_penalty"
+    type: "choice"
+    values: [-4.0, -6.0, -8.0]
+  - name: "ttc_penalty_alpha"
+    target: "curriculum"
+    path: "env.ttc_penalty_alpha"
+    type: "choice"
+    values: [0.10, 0.15, 0.25]
+  - name: "geom_lane_reward_per_step"
+    target: "curriculum"
+    path: "env.geom_lane_reward_per_step"
+    type: "choice"
+    values: [0.08, 0.12, 0.16]

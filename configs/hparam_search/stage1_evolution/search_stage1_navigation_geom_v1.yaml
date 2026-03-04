@@ -1,0 +1,145 @@
+study:
+  name: "stage1_navigation_geom_v1_evolution"
+  output_root: "runs/hparam_search/stage1_navigation_geom_v1_evolution"
+
+base:
+  ppo_config: "configs/curriculum_design/navigation_geom_v1/ppo_stage1_goal_route_geom.yaml"
+
+runner:
+  command_prefix: ["python", "-u"]
+  train_entry: "gpudrive_chocolate/baselines/ppo/ppo_sb3.py"
+
+resources:
+  max_parallel: 12
+  auto_expand_slots: true
+  slots:
+    - label: "gpu1_a"
+      device: "cuda:1"
+      active_gpu: 1
+      physics_gpu: 1
+    - label: "gpu1_b"
+      device: "cuda:1"
+      active_gpu: 1
+      physics_gpu: 1
+
+search:
+  random_seed: 91
+  generations: 3
+  population_size: 12
+  elite_count: 3
+  mutation_rate: 0.35
+  crossover_rate: 0.75
+  random_candidates_per_generation: 2
+  metric_window: 5
+  timesteps_per_trial: 131072
+  heartbeat_sec: 5
+
+scoring:
+  primary_metric: "rollout/success_rate"
+  missing_value: 0.0
+  weights:
+    rollout/success_rate: 120.0
+    rollout/goal_rate: 45.0
+    rollout/mean_dist_to_goal_m: -0.80
+    rollout/mean_lane_error_m: -10.0
+    rollout/mean_heading_alignment: 18.0
+    rollout/mean_route_progress_m: 30.0
+    rollout/off_road_rate: -25.0
+    rollout/road_contact_done_rate: -50.0
+    rollout/vehicle_contact_done_rate: -75.0
+    rollout/below_min_z_rate: -100.0
+    rollout/mean_episode_len: 0.01
+
+space:
+  - name: "lr"
+    target: "ppo"
+    path: "lr"
+    type: "float"
+    min: 0.0001
+    max: 0.0005
+    scale: "log"
+  - name: "ent_coef"
+    target: "ppo"
+    path: "ent_coef"
+    type: "choice"
+    values: [0.0, 0.00005, 0.0001, 0.0003]
+  - name: "clip_range"
+    target: "ppo"
+    path: "clip_range"
+    type: "choice"
+    values: [0.10, 0.15, 0.20]
+  - name: "gamma"
+    target: "ppo"
+    path: "gamma"
+    type: "choice"
+    values: [0.99, 0.995]
+  - name: "gae_lambda"
+    target: "ppo"
+    path: "gae_lambda"
+    type: "choice"
+    values: [0.95, 0.98]
+  - name: "n_steps"
+    target: "ppo"
+    path: "n_steps"
+    type: "choice"
+    values: [64, 128]
+  - name: "num_minibatches"
+    target: "ppo"
+    path: "num_minibatches"
+    type: "choice"
+    values: [4, 8]
+  - name: "off_road_weight"
+    target: "ppo"
+    path: "off_road_weight"
+    type: "choice"
+    values: [0.0, -0.05, -0.10]
+  - name: "reward_scale"
+    target: "curriculum"
+    path: "env.reward_scale"
+    type: "choice"
+    values: [0.5, 0.75, 1.0, 1.25]
+  - name: "success_bonus"
+    target: "curriculum"
+    path: "env.success_bonus"
+    type: "choice"
+    values: [6.0, 8.0, 12.0]
+  - name: "thr_clip_max"
+    target: "curriculum"
+    path: "control.thr_clip.1"
+    type: "choice"
+    values: [0.35, 0.45, 0.55]
+  - name: "geom_lane_reward_per_step"
+    target: "curriculum"
+    path: "env.geom_lane_reward_per_step"
+    type: "choice"
+    values: [0.04, 0.08, 0.12]
+  - name: "geom_lane_tolerance_m"
+    target: "curriculum"
+    path: "env.geom_lane_tolerance_m"
+    type: "choice"
+    values: [1.5, 1.75, 2.25]
+  - name: "geom_lane_heading_weight"
+    target: "curriculum"
+    path: "env.geom_lane_heading_weight"
+    type: "choice"
+    values: [0.4, 0.6, 0.8]
+  - name: "geom_lane_min_alignment"
+    target: "curriculum"
+    path: "env.geom_lane_min_alignment"
+    type: "choice"
+    values: [0.2, 0.35, 0.5]
+  - name: "geom_route_progress_weight"
+    target: "curriculum"
+    path: "env.geom_route_progress_weight"
+    type: "choice"
+    values: [0.2, 0.35, 0.5]
+  - name: "idle_penalty_per_step"
+    target: "curriculum"
+    path: "env.idle_penalty_per_step"
+    type: "choice"
+    values: [0.0, 0.01, 0.02, 0.03]
+  - name: "max_steps"
+    target: "curriculum"
+    path: "env.max_steps"
+    type: "choice"
+    values: [300, 400, 500]

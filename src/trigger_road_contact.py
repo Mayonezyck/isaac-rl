@@ -1,3 +1,4 @@
+import os
 import sys
 from pxr import Usd, UsdGeom, UsdUtils, Vt
 
@@ -136,7 +137,8 @@ def main():
             a_agent_id = int(a_cd.get("agent_id", None))
         except Exception:
             a_agent_id = None
-        print(f"--------Triggered -------- A={a_agent_id} hit B={int(b_agent_id)}")
+        if os.environ.get("CHOCO_TRIGGER_DEBUG", "").strip() == "1":
+            print(f"--------Triggered -------- A={a_agent_id} hit B={int(b_agent_id)}")
     _update_vehicle_contact_list(a_veh_prim, int(b_agent_id), enter)
 
 

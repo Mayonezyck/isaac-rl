@@ -176,6 +176,10 @@ class ChocolateObsBuilder:
         road_is_sma,
         road_is_ogfc,
         (optional) road points ...
+        road points use either:
+          [rel_x, rel_y, road_type]
+        or, when road-point directions are enabled:
+          [rel_x, rel_y, road_type, dir_x_ego, dir_y_ego]
         (always) nearest vehicle features (63 * 6):
           [rel_x, rel_y, length, width, rel_yaw, speed]
       ]
@@ -187,24 +191,28 @@ class ChocolateObsBuilder:
     def _get_road_points_for_world(self, stage: Usd.Stage, world_root: str):
         prim = stage.GetPrimAtPath(world_root)
         if not prim.IsValid():
-            return None, None
+            return None, None, None
         try:
             cd = prim.GetCustomData()
         except Exception:
             cd = {}
         if not isinstance(cd, dict):
-            return None, None
+            return None, None, None
         pts = cd.get("road_points_m", None)
+        dirs = cd.get("road_point_dirs", None)
         types = cd.get("road_point_types", None)
         if pts is None or types is None:
-            return None, None
+            return None, None, None
         try:
             pts_np = np.asarray(pts, dtype=np.float32)
+            dirs_np = np.asarray(dirs, dtype=np.float32) if dirs is not None else None
             types_np = np.asarray(types, dtype=np.int32)
         except Exception:
-            return None, None
+            return None, None, None
         if pts_np.ndim != 2 or pts_np.shape[1] < 2:
-            return None, None
+            return None, None, None
+        if dirs_np is None or dirs_np.ndim != 2 or dirs_np.shape[0] != pts_np.shape[0] or dirs_np.shape[1] < 2:
+            dirs_np = np.zeros((pts_np.shape[0], 3), dtype=np.float32)
         mpu = _meters_per_unit(stage)
         # Stored road points are local to world_root; convert to world frame so they
         # are in the same frame as agent poses from ComputeLocalToWorldTransform.
@@ -222,7 +230,10 @@ class ChocolateObsBuilder:
         pts_np[:, :2] *= float(mpu)
         if pts_np.shape[1] >= 3:
             pts_np[:, 2] *= float(mpu)
-        return pts_np, types_np
+        dirs_xy = dirs_np[:, :2].astype(np.float32, copy=True)
+        norms = np.linalg.norm(dirs_xy, axis=1, keepdims=True)
+        dirs_xy = np.divide(dirs_xy, np.maximum(norms, 1e-6), out=np.zeros_like(dirs_xy), where=norms > 1e-6)
+        return pts_np, types_np, dirs_xy
 
     def _get_world_weather_context(self, stage: Usd.Stage, world_root: str) -> np.ndarray:
         prim = stage.GetPrimAtPath(world_root)
@@ -271,12 +282,13 @@ class ChocolateObsBuilder:
         road_points_radius_m: float,
         road_points_type_norm: float,
         road_points_mode: str = "knn",
+        road_points_include_dirs: bool = False,
         vehicle_obs_enable: bool,
         vehicle_obs_k: int,
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         """
         Returns:
-          obs:  (N, 11 + road_points + 63*6) float32
+          obs:  (N, 11 + road_points*(3|5) + vehicle_obs_k*6) float32
           mask: (N,) bool  (True if goal + pose valid)
           keys: length N (AgentKey list aligned with obs rows)
         """
@@ -284,10 +296,11 @@ class ChocolateObsBuilder:
         N = len(keys)
         mpu = _meters_per_unit(stage)
         base_dim = 7 + weather_context_dim()
+        road_point_feat_dim = 5 if road_points_include_dirs else 3
         vehicle_feat_dim = 6
         extra_dim = 0
         if road_points_enable:
-            extra_dim = int(road_points_k) * 3
+            extra_dim = int(road_points_k) * int(road_point_feat_dim)
         vehicle_dim = int(vehicle_obs_k) * int(vehicle_feat_dim) if vehicle_obs_enable else 0
         obs = np.zeros((N, base_dim + extra_dim), dtype=np.float32)
         if vehicle_dim > 0:
@@ -298,6 +311,7 @@ class ChocolateObsBuilder:
         world_count = ctrl.world_count if use_world_count_from_ctrl else max([k.world_idx for k in keys], default=-1) + 1
         goals_by_world: List[Dict[int, Tuple[float, float, float]]] = []
         weather_contexts_by_world: List[np.ndarray] = []
+        road_points_by_world: List[Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]] = []
         for wi in range(int(world_count)):
             world_root = f"{root_container}/{world_prefix}{wi:03d}"
             goals_root = f"{world_root}/Goals"
@@ -305,6 +319,10 @@ class ChocolateObsBuilder:
             weather_contexts_by_world.append(
                 self._get_world_weather_context(stage, world_root)
             )
+            if road_points_enable:
+                road_points_by_world.append(self._get_road_points_for_world(stage, world_root))
+            else:
+                road_points_by_world.append((None, None, None))
 
         # Precompute per-agent state for neighbor observations
         per_agent = {}
@@ -460,9 +478,12 @@ class ChocolateObsBuilder:
             )
             obs[i, 7:11] = weather_context
             if road_points_enable:
-                world_root = f"{root_container}/{world_prefix}{k.world_idx:03d}"
-                pts, types = self._get_road_points_for_world(stage, world_root)
-                if pts is not None and types is not None and pts.shape[0] > 0:
+                pts, types, dirs = (
+                    road_points_by_world[k.world_idx]
+                    if 0 <= k.world_idx < len(road_points_by_world)
+                    else (None, None, None)
+                )
+                if pts is not None and types is not None and dirs is not None and pts.shape[0] > 0:
                     dx_all = pts[:, 0] - px
                     dy_all = pts[:, 1] - py
                     dist2 = dx_all * dx_all + dy_all * dy_all
@@ -487,15 +508,26 @@ class ChocolateObsBuilder:
                             dx = float(dx_all[idx])
                             dy = float(dy_all[idx])
                             x_e, y_e = _world_to_ego_xy(dx, dy, yaw)
+                            dir_x_e, dir_y_e = _world_to_ego_xy(float(dirs[idx, 0]), float(dirs[idx, 1]), yaw)
                             norm = float(road_points_radius_m) if road_points_radius_m > 0 else 1.0
-                            obs[i, off + 3 * j + 0] = float(x_e / norm)
-                            obs[i, off + 3 * j + 1] = float(y_e / norm)
+                            base_idx = off + road_point_feat_dim * j
+                            obs[i, base_idx + 0] = float(x_e / norm)
+                            obs[i, base_idx + 1] = float(y_e / norm)
                             t_val = float(types[idx])
-                            obs[i, off + 3 * j + 2] = t_val / float(road_points_type_norm) if road_points_type_norm > 0 else t_val
+                            obs[i, base_idx + 2] = (
+                                t_val / float(road_points_type_norm)
+                                if road_points_type_norm > 0
+                                else t_val
+                            )
+                            if road_points_include_dirs:
+                                obs[i, base_idx + 3] = float(dir_x_e)
+                                obs[i, base_idx + 4] = float(dir_y_e)
 
             # Nearest vehicle features (always appended)
             if vehicle_obs_enable and vehicle_dim > 0 and i in per_agent:
-                off = base_dim + (int(road_points_k) * 3 if road_points_enable else 0)
+                off = base_dim + (
+                    int(road_points_k) * int(road_point_feat_dim) if road_points_enable else 0
+                )
                 world_idx, px_i, py_i, yaw_i, _vx_i, _vy_i, _len_i, _wid_i = per_agent[i]
                 candidates = []
                 for j in world_to_indices.get(world_idx, []):

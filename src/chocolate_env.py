@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import math
 import numpy as np
@@ -18,8 +18,20 @@ class StepInfo:
     mask: np.ndarray          # (N,) bool
     dist_m: np.ndarray        # (N,) float32  (note: your obs builder currently returns DIST IN METERS, not normalized)
     success: np.ndarray       # (N,) bool     (latched)
+    newly_success: np.ndarray # (N,) bool
+    road_contact_done: np.ndarray  # (N,) bool
+    vehicle_contact_done: np.ndarray  # (N,) bool
     collided: np.ndarray      # (N,) bool
+    road_collided: np.ndarray # (N,) bool
+    vehicle_collided: np.ndarray  # (N,) bool
+    below_min_z: np.ndarray   # (N,) bool
     off_road: np.ndarray      # (N,) bool
+    lane_hit: np.ndarray      # (N,) bool
+    lane_error_m: np.ndarray  # (N,) float32
+    heading_alignment: np.ndarray  # (N,) float32
+    route_progress_m: np.ndarray  # (N,) float32
+    active: np.ndarray        # (N,) bool
+    pending: np.ndarray       # (N,) bool
     timeout: bool
     t_env: int
 
@@ -29,6 +41,16 @@ def _yaw_from_xform(M: Gf.Matrix4d) -> float:
     fwd = M.TransformDir(Gf.Vec3d(1.0, 0.0, 0.0))
     fx, fy = float(fwd[0]), float(fwd[1])
     return math.atan2(fy, fx)
+
+
+def _wrap_pi(angle: float) -> float:
+    return math.atan2(math.sin(float(angle)), math.cos(float(angle)))
+
+
+def _ego_to_world_xy(x_ego: float, y_ego: float, yaw_world: float) -> Tuple[float, float]:
+    c = math.cos(float(yaw_world))
+    s = math.sin(float(yaw_world))
+    return (c * float(x_ego) - s * float(y_ego), s * float(x_ego) + c * float(y_ego))
 
 
 def _find_rigid_body_prim(start_prim: Usd.Prim) -> Optional[Usd.Prim]:
@@ -122,6 +144,17 @@ class ChocolateEnv:
         lane_center_reward_enable: bool = False,
         lane_center_reward_type: int = 2,
         lane_center_reward_per_step: float = 0.05,
+        geom_lane_reward_enable: bool = False,
+        geom_lane_reward_per_step: float = 0.0,
+        geom_lane_tolerance_m: float = 1.75,
+        geom_lane_heading_weight: float = 0.5,
+        geom_lane_min_alignment: float = 0.5,
+        geom_route_progress_weight: float = 0.0,
+        geom_offroad_metrics_enable: bool = False,
+        geom_offroad_lateral_threshold_m: float = 3.0,
+        geom_offroad_distance_threshold_m: float = 6.0,
+        geom_lane_types: Optional[List[int]] = None,
+        geom_road_edge_types: Optional[List[int]] = None,
         survival_reward_per_step: float = 0.0,
         idle_penalty_enable: bool = False,
         idle_penalty_per_step: float = 0.05,
@@ -136,6 +169,7 @@ class ChocolateEnv:
         road_points_radius_m: float = 50.0,
         road_points_type_norm: float = 1.0,
         road_points_mode: str = "knn",
+        road_points_include_dirs: bool = False,
         vehicle_obs_enable: bool = False,
         vehicle_obs_k: int = 63,
         ttc_penalty_enable: bool = False,
@@ -157,7 +191,6 @@ class ChocolateEnv:
         self.stage = stage
         self.ctrl = ctrl
         self.obs_builder = obs_builder
-        print('in constructor now')
         self.bounds_size_m = float(bounds_size_m)
         self.physics_dt = float(physics_dt)
         self.action_repeat = max(1, int(action_repeat))
@@ -181,6 +214,17 @@ class ChocolateEnv:
         else:
             self.lane_center_reward_types = {int(lane_center_reward_type)}
         self.lane_center_reward_per_step = float(lane_center_reward_per_step)
+        self.geom_lane_reward_enable = bool(geom_lane_reward_enable)
+        self.geom_lane_reward_per_step = float(geom_lane_reward_per_step)
+        self.geom_lane_tolerance_m = max(1e-3, float(geom_lane_tolerance_m))
+        self.geom_lane_heading_weight = float(np.clip(geom_lane_heading_weight, 0.0, 1.0))
+        self.geom_lane_min_alignment = float(np.clip(geom_lane_min_alignment, -1.0, 1.0))
+        self.geom_route_progress_weight = float(geom_route_progress_weight)
+        self.geom_offroad_metrics_enable = bool(geom_offroad_metrics_enable)
+        self.geom_offroad_lateral_threshold_m = max(1e-3, float(geom_offroad_lateral_threshold_m))
+        self.geom_offroad_distance_threshold_m = max(1e-3, float(geom_offroad_distance_threshold_m))
+        self.geom_lane_types = set(int(x) for x in (geom_lane_types or [1, 2]))
+        self.geom_road_edge_types = set(int(x) for x in (geom_road_edge_types or [15, 16]))
         self.survival_reward_per_step = float(survival_reward_per_step)
         self.idle_penalty_enable = bool(idle_penalty_enable)
         self.idle_penalty_per_step = float(idle_penalty_per_step)
@@ -195,6 +239,8 @@ class ChocolateEnv:
         self.road_points_radius_m = float(road_points_radius_m)
         self.road_points_type_norm = float(road_points_type_norm)
         self.road_points_mode = str(road_points_mode)
+        self.road_points_include_dirs = bool(road_points_include_dirs)
+        self.road_point_feat_dim = 5 if self.road_points_include_dirs else 3
         self.vehicle_obs_enable = bool(vehicle_obs_enable)
         self.vehicle_obs_k = int(vehicle_obs_k)
         self.ttc_penalty_enable = bool(ttc_penalty_enable)
@@ -212,6 +258,11 @@ class ChocolateEnv:
         self.respawn_on_reset = bool(respawn_on_reset)
         self.respawn_params = respawn_params or {}
         self.respawn_hold_radius_m = float(self.respawn_params.get("respawn_hold_radius_m", 3.0))
+        self.respawn_spawn_z_m = float(self.respawn_params.get("spawn_z_m", 1.0))
+        self.startup_below_min_z_preflight_steps = max(
+            0,
+            int(self.respawn_params.get("startup_below_min_z_preflight_steps", 0)),
+        )
         self.verbose = bool(verbose)
 
         # --- episode state (per "row" = per AgentKey) ---
@@ -230,6 +281,9 @@ class ChocolateEnv:
         self._spawn_pos_units: dict = {}   # key -> (x_u, y_u, z_u)
         self._spawn_quat: dict = {}        # key -> (w, x, y, z)  (world orientation)
         self._pending_respawns: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self._quarantined_tokens: Set[Tuple[int, int]] = set()
+        self._prev_world_xy_m: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        self._world_road_geometry: Dict[int, Dict[str, np.ndarray]] = {}
         self._mpu = float(getattr(self.sim, "meters_per_unit", 1.0))  # IsaacSim usually has this
         self._collision_tracker = None
         if self.collision_penalty_types or self.collision_debug:
@@ -266,6 +320,183 @@ class ChocolateEnv:
         if v is None:
             return 0.0, 0.0, 0.0
         return float(v[0]), float(v[1]), float(v[2])
+
+    def _get_agent_world_pose(self, h) -> Optional[Tuple[float, float, float, float]]:
+        if h is None:
+            return None
+        try:
+            start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
+            if start_prim is None:
+                start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
+            if start_prim is None:
+                return None
+            rb_prim = _find_rigid_body_prim(start_prim)
+            if rb_prim is not None:
+                M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            else:
+                M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            p = M.ExtractTranslation()
+            return (
+                float(p[0]) * self._mpu,
+                float(p[1]) * self._mpu,
+                float(p[2]) * self._mpu,
+                float(_yaw_from_xform(M)),
+            )
+        except Exception:
+            return None
+
+    def _get_world_road_geometry(self, world_idx: int) -> Optional[Dict[str, np.ndarray]]:
+        wi = int(world_idx)
+        cached = self._world_road_geometry.get(wi, None)
+        if cached is not None:
+            return cached
+
+        world_root = f"{self.root_container}/{self.world_prefix}{wi:03d}"
+        prim = self.stage.GetPrimAtPath(world_root)
+        if not prim.IsValid():
+            return None
+        try:
+            cd = prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return None
+
+        pts = cd.get("road_points_m", None)
+        types = cd.get("road_point_types", None)
+        dirs = cd.get("road_point_dirs", None)
+        if pts is None or types is None:
+            return None
+
+        try:
+            pts_np = np.asarray(pts, dtype=np.float32)
+            types_np = np.asarray(types, dtype=np.int32)
+            dirs_np = np.asarray(dirs, dtype=np.float32) if dirs is not None else None
+        except Exception:
+            return None
+
+        if pts_np.ndim != 2 or pts_np.shape[1] < 2 or types_np.ndim != 1:
+            return None
+
+        if dirs_np is None or dirs_np.ndim != 2 or dirs_np.shape[0] != pts_np.shape[0] or dirs_np.shape[1] < 2:
+            dirs_np = np.zeros((pts_np.shape[0], 3), dtype=np.float32)
+
+        try:
+            M = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            t = M.ExtractTranslation()
+            pts_np = pts_np.copy()
+            pts_np[:, 0] += float(t[0])
+            pts_np[:, 1] += float(t[1])
+            if pts_np.shape[1] >= 3:
+                pts_np[:, 2] += float(t[2])
+        except Exception:
+            pts_np = pts_np.copy()
+
+        pts_xy_m = pts_np[:, :2] * float(self._mpu)
+        dirs_xy = dirs_np[:, :2].astype(np.float32, copy=True)
+        norms = np.linalg.norm(dirs_xy, axis=1, keepdims=True)
+        dirs_xy = np.divide(
+            dirs_xy,
+            np.maximum(norms, 1e-6),
+            out=np.zeros_like(dirs_xy),
+            where=norms > 1e-6,
+        )
+
+        geom = {
+            "points_xy_m": pts_xy_m.astype(np.float32, copy=False),
+            "dirs_xy": dirs_xy.astype(np.float32, copy=False),
+            "types": types_np.astype(np.int32, copy=False),
+        }
+        self._world_road_geometry[wi] = geom
+        return geom
+
+    def _compute_geometric_lane_features(
+        self,
+        keys: List[object],
+        obs: np.ndarray,
+        active: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        n = len(keys)
+        lane_hit = np.zeros((n,), dtype=bool)
+        off_road = np.zeros((n,), dtype=bool)
+        lane_error_m = np.zeros((n,), dtype=np.float32)
+        heading_alignment = np.zeros((n,), dtype=np.float32)
+        route_progress_m = np.zeros((n,), dtype=np.float32)
+
+        if not (
+            self.geom_lane_reward_enable
+            or self.geom_offroad_metrics_enable
+            or self.geom_route_progress_weight != 0.0
+        ):
+            return lane_hit, off_road, lane_error_m, heading_alignment, route_progress_m
+
+        for i, k in enumerate(keys):
+            if not active[i]:
+                continue
+            h = self.ctrl.get(k.world_idx, k.agent_id)
+            pose = self._get_agent_world_pose(h)
+            if pose is None:
+                continue
+            px_m, py_m, _pz_m, yaw = pose
+            geom = self._get_world_road_geometry(k.world_idx)
+            if geom is None:
+                continue
+
+            types = geom["types"]
+            lane_mask = np.isin(types, list(self.geom_lane_types))
+            if not np.any(lane_mask):
+                continue
+            lane_points = geom["points_xy_m"][lane_mask]
+            lane_dirs = geom["dirs_xy"][lane_mask]
+            if lane_points.shape[0] == 0:
+                continue
+
+            pos = np.asarray([px_m, py_m], dtype=np.float32)
+            deltas = lane_points - pos[None, :]
+            dist2 = np.einsum("ij,ij->i", deltas, deltas)
+            idx = int(np.argmin(dist2))
+
+            nearest_point = lane_points[idx]
+            tangent = lane_dirs[idx].astype(np.float32, copy=True)
+            tangent_norm = float(np.linalg.norm(tangent))
+            if tangent_norm <= 1e-6:
+                continue
+            tangent /= tangent_norm
+
+            goal_x_ego = float(obs[i, 0]) * float(self.bounds_size_m)
+            goal_y_ego = float(obs[i, 1]) * float(self.bounds_size_m)
+            goal_dx_w, goal_dy_w = _ego_to_world_xy(goal_x_ego, goal_y_ego, yaw)
+            if goal_dx_w * tangent[0] + goal_dy_w * tangent[1] < 0.0:
+                tangent *= -1.0
+
+            normal = np.asarray([-tangent[1], tangent[0]], dtype=np.float32)
+            rel = pos - nearest_point
+            lateral = abs(float(np.dot(rel, normal)))
+            nearest_dist = math.sqrt(max(0.0, float(dist2[idx])))
+            tangent_yaw = math.atan2(float(tangent[1]), float(tangent[0]))
+            align = max(0.0, math.cos(_wrap_pi(yaw - tangent_yaw)))
+            quality = math.exp(-((lateral / self.geom_lane_tolerance_m) ** 2))
+            quality *= (1.0 - self.geom_lane_heading_weight) + self.geom_lane_heading_weight * align
+
+            lane_hit[i] = lateral <= self.geom_lane_tolerance_m and align >= self.geom_lane_min_alignment
+            off_road[i] = (
+                lateral > self.geom_offroad_lateral_threshold_m
+                or nearest_dist > self.geom_offroad_distance_threshold_m
+            )
+            lane_error_m[i] = float(lateral)
+            heading_alignment[i] = float(align)
+
+            token = self._agent_token_from_key(k)
+            prev_xy = self._prev_world_xy_m.get(token, None)
+            if prev_xy is not None:
+                step_delta = pos - np.asarray(prev_xy, dtype=np.float32)
+                route_progress_m[i] = float(np.dot(step_delta, tangent))
+            self._prev_world_xy_m[token] = (float(px_m), float(py_m))
+
+            if self.geom_lane_reward_enable:
+                lane_error_m[i] = float(lateral)
+
+        return lane_hit, off_road, lane_error_m, heading_alignment, route_progress_m
 
     def _collect_all_vehicle_states(self):
         world_count = int(getattr(self.ctrl, "world_count", 0))
@@ -466,6 +697,7 @@ class ChocolateEnv:
             road_points_radius_m=self.road_points_radius_m,
             road_points_type_norm=self.road_points_type_norm,
             road_points_mode=self.road_points_mode,
+            road_points_include_dirs=self.road_points_include_dirs,
             vehicle_obs_enable=self.vehicle_obs_enable,
             vehicle_obs_k=self.vehicle_obs_k,
         )
@@ -554,11 +786,14 @@ class ChocolateEnv:
             base = 7 + weather_context_dim()
             k = int(self.road_points_k)
             radius = float(self.road_points_radius_m)
+            feat = int(self.road_point_feat_dim)
             for j in range(k):
-                off = base + 3 * j
+                off = base + feat * j
                 rx = float(obs_vec[off + 0]) * radius
                 ry = float(obs_vec[off + 1]) * radius
                 t = float(obs_vec[off + 2])
+                dir_x = float(obs_vec[off + 3]) if feat >= 5 else 0.0
+                dir_y = float(obs_vec[off + 4]) if feat >= 5 else 0.0
                 if rx == 0.0 and ry == 0.0 and t == 0.0:
                     continue
                 s = UsdGeom.Sphere.Define(stage, f"{agent_root}/RoadPoints/P{j:03d}")
@@ -567,12 +802,26 @@ class ChocolateEnv:
                 sx.SetTranslate(Gf.Vec3d(rx / mpu, ry / mpu, 0.2 / mpu))
                 color = Gf.Vec3f(0.2, 0.4 + 0.6 * max(0.0, min(1.0, t)), 1.0)
                 UsdGeom.Gprim(s.GetPrim()).CreateDisplayColorAttr().Set([color])
+                if abs(dir_x) > 1e-4 or abs(dir_y) > 1e-4:
+                    a = UsdGeom.Cube.Define(stage, f"{agent_root}/RoadPoints/P{j:03d}_Dir")
+                    a.GetSizeAttr().Set(1.0)
+                    ax = UsdGeom.XformCommonAPI(a)
+                    yaw_deg = math.degrees(math.atan2(dir_y, dir_x))
+                    ax.SetTranslate(Gf.Vec3d(rx / mpu, ry / mpu, 0.35 / mpu))
+                    ax.SetRotate(
+                        Gf.Vec3f(0.0, 0.0, float(yaw_deg)),
+                        UsdGeom.XformCommonAPI.RotationOrderXYZ,
+                    )
+                    ax.SetScale(Gf.Vec3f(1.2 / mpu, 0.08 / mpu, 0.08 / mpu))
+                    UsdGeom.Gprim(a.GetPrim()).CreateDisplayColorAttr().Set([color])
 
         # Vehicle observations visualization
         if self.vehicle_obs_enable:
             veh_root = UsdGeom.Xform.Define(stage, f"{agent_root}/Vehicles")
             base = 7 + weather_context_dim() + (
-                int(self.road_points_k) * 3 if self.road_points_enable else 0
+                int(self.road_points_k) * int(self.road_point_feat_dim)
+                if self.road_points_enable
+                else 0
             )
             k = int(self.vehicle_obs_k)
             feat = 6
@@ -607,6 +856,56 @@ class ChocolateEnv:
             if h is None:
                 continue
             self._cache_spawn_pose(k, h)
+
+    def is_agent_quarantined(self, key: object) -> bool:
+        return self._agent_token_from_key(key) in self._quarantined_tokens
+
+    def quarantine_agents(self, tokens: List[Tuple[int, int]]) -> None:
+        if not tokens:
+            return
+        token_set = {self._agent_token(world_idx, agent_id) for world_idx, agent_id in tokens}
+        for token in token_set:
+            if token in self._quarantined_tokens:
+                continue
+            self._quarantined_tokens.add(token)
+            self._pending_respawns.pop(token, None)
+            world_idx, agent_id = token
+            h = self._get_agent_handle(world_idx, agent_id)
+            if h is not None:
+                self._reset_agent_contact_state(h)
+                self._set_agent_collision_enabled(h, False)
+                self._set_agent_visible(h, False)
+            for key in self._keys:
+                if self._agent_token_from_key(key) != token:
+                    continue
+                self._move_agent_to_respawn_hold(key)
+                break
+
+        if self._done.shape[0] == len(self._keys):
+            for i, key in enumerate(self._keys):
+                if self._agent_token_from_key(key) in token_set:
+                    self._done[i] = False
+                    self._success_latched[i] = False
+
+    def collect_startup_below_min_z_offenders(self, steps: int) -> List[Tuple[int, int]]:
+        if steps <= 0 or self.min_vehicle_z_m is None or not self._keys:
+            return []
+
+        offenders: Set[Tuple[int, int]] = set()
+        zero_actions = np.zeros((len(self._keys), 2), dtype=np.float32)
+
+        for _ in range(int(steps)):
+            _, _, done, info = self.step(zero_actions)
+            for key, flag in zip(info.keys, info.below_min_z):
+                if bool(flag):
+                    offenders.add(self._agent_token_from_key(key))
+
+            if getattr(info, "timeout", False):
+                self.reset_timeout()
+            elif np.any(done):
+                self.reset_done(done)
+
+        return sorted(offenders)
 
     def _agent_token(self, world_idx: int, agent_id: int) -> Tuple[int, int]:
         return (int(world_idx), int(agent_id))
@@ -727,23 +1026,10 @@ class ChocolateEnv:
         return True
 
     def _get_agent_world_xy_m(self, h) -> Optional[Tuple[float, float]]:
-        if h is None:
+        pose = self._get_agent_world_pose(h)
+        if pose is None:
             return None
-        try:
-            start_prim = h.xform.GetPrim() if hasattr(h.xform, "GetPrim") else None
-            if start_prim is None:
-                start_prim = h.pose_prim if hasattr(h, "pose_prim") else None
-            if start_prim is None:
-                return None
-            rb_prim = _find_rigid_body_prim(start_prim)
-            if rb_prim is not None:
-                M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            else:
-                M = h.xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            p = M.ExtractTranslation()
-            return (float(p[0]) * self._mpu, float(p[1]) * self._mpu)
-        except Exception:
-            return None
+        return (float(pose[0]), float(pose[1]))
 
     def _teleport_agent_to_spawn(self, key: object) -> bool:
         self._cache_spawn_if_missing()
@@ -792,7 +1078,11 @@ class ChocolateEnv:
         for state in states:
             other_agent_id = int(state.get("agent_id", -1))
             other_token = self._agent_token(world_idx, other_agent_id)
-            if other_token == token or other_token in self._pending_respawns:
+            if (
+                other_token == token
+                or other_token in self._pending_respawns
+                or other_token in self._quarantined_tokens
+            ):
                 continue
             pos = state.get("pos", None)
             if pos is None or len(pos) < 2:
@@ -834,6 +1124,8 @@ class ChocolateEnv:
 
         released: List[Tuple[int, int]] = []
         for token, pending in list(self._pending_respawns.items()):
+            if token in self._quarantined_tokens:
+                continue
             radius_m = float(pending.get("radius_m", self.respawn_hold_radius_m))
             if not self._spawn_area_is_clear(token, radius_m):
                 continue
@@ -888,10 +1180,14 @@ class ChocolateEnv:
                 _zero_rb_vel(rb_prim)
 
     def _pending_mask_for_keys(self, keys: List[object]) -> np.ndarray:
-        if not self._pending_respawns:
+        if not self._pending_respawns and not self._quarantined_tokens:
             return np.zeros((len(keys),), dtype=bool)
         return np.asarray(
-            [self._agent_token_from_key(k) in self._pending_respawns for k in keys],
+            [
+                (self._agent_token_from_key(k) in self._pending_respawns)
+                or (self._agent_token_from_key(k) in self._quarantined_tokens)
+                for k in keys
+            ],
             dtype=bool,
         )
 
@@ -1048,6 +1344,7 @@ class ChocolateEnv:
             start_yaw_deg=float(start_yaw_deg),
             goal_local_m=(float(goal_local[0]), float(goal_local[1]), float(goal_local[2])),
             start_in_goal=bool(start_in_goal),
+            spawn_z_m=float(self.respawn_params.get("spawn_z_m", self.respawn_spawn_z_m)),
             parked_ground_z_m=float(self.respawn_params.get("parked_ground_z_m", 0.0)),
             parked_chassis_size_m=tuple(self.respawn_params.get("parked_chassis_size_m", (4.0, 2.0, 1.0))),
             parked_wheel_radius_m=float(self.respawn_params.get("parked_wheel_radius_m", 0.35)),
@@ -1081,13 +1378,22 @@ class ChocolateEnv:
 
         if self.respawn_on_reset:
             used_builder_respawn = False
+            builder_respawn_keys: List[object] = []
             for i in idx:
                 k = self._keys[i]
                 if not self._queue_respawn(k):
-                    self._respawn_agent_from_metadata(k.world_idx, k.agent_id)
-                    used_builder_respawn = True
+                    if self._respawn_agent_from_metadata(k.world_idx, k.agent_id):
+                        builder_respawn_keys.append(k)
+                        used_builder_respawn = True
             if used_builder_respawn:
                 self.ctrl.refresh()
+                for k in builder_respawn_keys:
+                    self._start_local_translate.pop(k, None)
+                    self._start_local_yaw_deg.pop(k, None)
+                    self._start_world_xy_m.pop(k, None)
+                    h = self.ctrl.get(k.world_idx, k.agent_id)
+                    if h is not None:
+                        self._cache_spawn_pose(k, h)
             self._release_pending_respawns()
             self._done[idx] = False
             self._success_latched[idx] = False
@@ -1098,6 +1404,12 @@ class ChocolateEnv:
             dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
             self._mask = mask.copy()
             self._prev_dist_m[idx] = dist_m[idx]
+            for i in idx:
+                token = self._agent_token_from_key(self._keys[i])
+                h = self.ctrl.get(self._keys[i].world_idx, self._keys[i].agent_id)
+                xy_m = self._get_agent_world_xy_m(h)
+                if xy_m is not None:
+                    self._prev_world_xy_m[token] = xy_m
             return
 
         # make sure spawn cache exists
@@ -1127,6 +1439,12 @@ class ChocolateEnv:
         dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
         self._mask = mask.copy()
         self._prev_dist_m[idx] = dist_m[idx]
+        for i in idx:
+            token = self._agent_token_from_key(self._keys[i])
+            h = self.ctrl.get(self._keys[i].world_idx, self._keys[i].agent_id)
+            xy_m = self._get_agent_world_xy_m(h)
+            if xy_m is not None:
+                self._prev_world_xy_m[token] = xy_m
 
     def reset_timeout(self) -> None:
         if self.respawn_on_reset and self._keys:
@@ -1143,6 +1461,7 @@ class ChocolateEnv:
     def reset(self) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         self.t = 0
         self._pending_respawns.clear()
+        self._prev_world_xy_m.clear()
 
         # Refresh controller registry
         self.ctrl.refresh()
@@ -1170,6 +1489,11 @@ class ChocolateEnv:
         dist_n = obs[:, 4].astype(np.float32)
         dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
         self._prev_dist_m = dist_m.copy()
+        for key in keys:
+            h = self.ctrl.get(key.world_idx, key.agent_id)
+            xy_m = self._get_agent_world_xy_m(h)
+            if xy_m is not None:
+                self._prev_world_xy_m[self._agent_token_from_key(key)] = xy_m
 
 
         if self.verbose:
@@ -1242,7 +1566,15 @@ class ChocolateEnv:
             N = len(keys2)
             self._done = np.zeros((N,), dtype=bool)
             self._success_latched = np.zeros((N,), dtype=bool)
-            self._prev_dist_m = obs[:, 4].astype(np.float32).copy()
+            self._prev_dist_m = (
+                obs[:, 4].astype(np.float32) * (self.bounds_size_m * math.sqrt(2.0))
+            )
+            self._prev_world_xy_m.clear()
+            for key in keys2:
+                h = self.ctrl.get(key.world_idx, key.agent_id)
+                xy_m = self._get_agent_world_xy_m(h)
+                if xy_m is not None:
+                    self._prev_world_xy_m[self._agent_token_from_key(key)] = xy_m
             keys = keys2
 
         dist_n = obs[:, 4].astype(np.float32)  # normalized
@@ -1325,9 +1657,9 @@ class ChocolateEnv:
                     reward[below_min_z] += float(self.collision_penalty)
                 self._done[below_min_z] = True
 
+        road_contact_done = np.zeros((N,), dtype=bool)
         # Road-contact termination based on trigger contact list
         if self.road_contact_done_types:
-            hit_contact = np.zeros((N,), dtype=bool)
             for i, k in enumerate(keys):
                 if not active[i]:
                     continue
@@ -1336,13 +1668,13 @@ class ChocolateEnv:
                     continue
                 contact_types = self._get_contact_types(h)
                 if any(t in self.road_contact_done_types for t in contact_types):
-                    hit_contact[i] = True
-            if hit_contact.any():
-                reward[hit_contact] += float(self.road_contact_done_penalty)
-                self._done[hit_contact] = True
+                    road_contact_done[i] = True
+            if road_contact_done.any():
+                reward[road_contact_done] += float(self.road_contact_done_penalty)
+                self._done[road_contact_done] = True
 
-        # Lane-center per-step reward (based on road contact types)
-        lane_hit = np.zeros((N,), dtype=bool)
+        # Lane-center per-step reward (contact-type proxy, legacy path)
+        lane_hit_contact = np.zeros((N,), dtype=bool)
         if self.lane_center_reward_enable:
             for i, k in enumerate(keys):
                 if not active[i]:
@@ -1352,13 +1684,32 @@ class ChocolateEnv:
                     continue
                 contact_types = self._get_contact_types(h)
                 if any(t in self.lane_center_reward_types for t in contact_types):
-                    lane_hit[i] = True
-            if lane_hit.any():
-                reward[lane_hit] += float(self.lane_center_reward_per_step)
+                    lane_hit_contact[i] = True
+            if lane_hit_contact.any():
+                reward[lane_hit_contact] += float(self.lane_center_reward_per_step)
 
+        geom_lane_hit, geom_off_road, lane_error_m, heading_alignment, route_progress_m = (
+            self._compute_geometric_lane_features(keys, obs, active)
+        )
+        if self.geom_lane_reward_enable:
+            lane_quality = np.exp(
+                -np.square(lane_error_m / max(self.geom_lane_tolerance_m, 1e-3))
+            ).astype(np.float32)
+            lane_quality *= (
+                (1.0 - self.geom_lane_heading_weight)
+                + self.geom_lane_heading_weight * heading_alignment
+            ).astype(np.float32)
+            reward[active] += float(self.geom_lane_reward_per_step) * lane_quality[active]
+        if self.geom_route_progress_weight != 0.0:
+            reward[active] += float(self.geom_route_progress_weight) * np.clip(
+                route_progress_m[active],
+                -2.0,
+                2.0,
+            )
+
+        vehicle_contact_done = np.zeros((N,), dtype=bool)
         # Vehicle-trigger termination based on vehicle contact list
         if self.vehicle_contact_done:
-            hit_contact = np.zeros((N,), dtype=bool)
             agent_id_to_idx = {int(k.agent_id): i for i, k in enumerate(keys)}
             for i, k in enumerate(keys):
                 if not active[i]:
@@ -1369,15 +1720,15 @@ class ChocolateEnv:
                 contact_ids = self._get_vehicle_contact_ids(h)
                 if not contact_ids:
                     continue
-                hit_contact[i] = True
+                vehicle_contact_done[i] = True
                 if self.vehicle_contact_done_mark_both:
                     for other_id in contact_ids:
                         j = agent_id_to_idx.get(int(other_id))
                         if j is not None:
-                            hit_contact[j] = True
-            if hit_contact.any():
-                reward[hit_contact] += float(self.vehicle_contact_done_penalty)
-                self._done[hit_contact] = True
+                            vehicle_contact_done[j] = True
+            if vehicle_contact_done.any():
+                reward[vehicle_contact_done] += float(self.vehicle_contact_done_penalty)
+                self._done[vehicle_contact_done] = True
 
         # Collision flags (for reward shaping / logging)
         vehicle_collided = np.zeros((N,), dtype=bool)
@@ -1400,16 +1751,22 @@ class ChocolateEnv:
         if timeout:
             done[active] = True
         done |= (~mask)  # consistent with your old env logic :contentReference[oaicite:9]{index=9}
-        if self.t % 10 == 0:
+        if self.verbose and self.t % 10 == 0:
             print(f"[env] t={self.t} timeout={timeout} done_any={done.any()} active={active.sum()}")
 
         # update prev dist for next step
         self._prev_dist_m = dist_m.copy()
         self._mask = mask.copy()
 
+        lane_hit = lane_hit_contact.copy()
         off_road = np.zeros((N,), dtype=bool)
-        if self.lane_center_reward_enable:
-            off_road = active & (~lane_hit)
+        if self.geom_lane_reward_enable or self.geom_offroad_metrics_enable or self.geom_route_progress_weight != 0.0:
+            lane_hit = geom_lane_hit.copy()
+            if self.geom_offroad_metrics_enable:
+                off_road = geom_off_road.copy()
+        elif self.lane_center_reward_enable:
+            lane_hit = lane_hit_contact.copy()
+            off_road = active & (~lane_hit_contact)
 
         if self.road_contact_debug and (self.t % self.road_contact_debug_every == 0):
             # Print one example agent's contact types and off_road flag
@@ -1433,8 +1790,20 @@ class ChocolateEnv:
             mask=mask,
             dist_m=dist_m,                  # kept name for compatibility with your prints
             success=self._success_latched.copy(),
+            newly_success=newly_success.copy(),
+            road_contact_done=road_contact_done.copy(),
+            vehicle_contact_done=vehicle_contact_done.copy(),
             collided=collided_flags.copy(),
+            road_collided=road_collided.copy(),
+            vehicle_collided=vehicle_collided.copy(),
+            below_min_z=below_min_z.copy(),
             off_road=off_road,
+            lane_hit=lane_hit.copy(),
+            lane_error_m=lane_error_m.copy(),
+            heading_alignment=heading_alignment.copy(),
+            route_progress_m=route_progress_m.copy(),
+            active=active.copy(),
+            pending=pending_mask.copy(),
             timeout=bool(timeout),
             t_env=int(self.t),
         )

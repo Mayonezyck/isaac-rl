@@ -37,7 +37,84 @@ def ensure_world_default_prim(stage) -> None:
         stage.SetDefaultPrim(root)
 
 
-def ensure_physics_scene(stage, scene_path: str = "/World/PhysicsScene") -> str:
+def _safe_get_physx_attr(api, getter_names: Sequence[str]):
+    for getter_name in getter_names:
+        getter = getattr(api, getter_name, None)
+        if callable(getter):
+            try:
+                attr = getter()
+                if attr and attr.IsValid():
+                    return attr.Get()
+            except Exception:
+                continue
+    return None
+
+
+def _safe_set_physx_attr(api, creator_names: Sequence[str], value) -> bool:
+    for creator_name in creator_names:
+        creator = getattr(api, creator_name, None)
+        if callable(creator):
+            try:
+                attr = creator()
+                if attr and attr.IsValid():
+                    attr.Set(value)
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def get_physx_scene_status(stage, scene_path: str = "/World/PhysicsScene") -> Dict[str, Any]:
+    status: Dict[str, Any] = {
+        "scene_path": str(scene_path),
+        "physx_scene_api_available": False,
+        "enable_gpu_dynamics": None,
+        "broadphase_type": None,
+        "enable_ccd": None,
+        "enable_contact_report": None,
+    }
+
+    scene_prim = stage.GetPrimAtPath(scene_path)
+    if not scene_prim.IsValid():
+        return status
+
+    try:
+        from pxr import PhysxSchema
+    except Exception:
+        return status
+
+    try:
+        physx_scene = PhysxSchema.PhysxSceneAPI.Apply(scene_prim)
+    except Exception:
+        return status
+
+    status["physx_scene_api_available"] = True
+    status["enable_gpu_dynamics"] = _safe_get_physx_attr(
+        physx_scene,
+        ("GetEnableGPUDynamicsAttr",),
+    )
+    status["broadphase_type"] = _safe_get_physx_attr(
+        physx_scene,
+        ("GetBroadphaseTypeAttr",),
+    )
+    status["enable_ccd"] = _safe_get_physx_attr(
+        physx_scene,
+        ("GetEnableCCDAttr",),
+    )
+    status["enable_contact_report"] = _safe_get_physx_attr(
+        physx_scene,
+        ("GetEnableContactReportAttr",),
+    )
+    return status
+
+
+def ensure_physics_scene(
+    stage,
+    scene_path: str = "/World/PhysicsScene",
+    *,
+    physics_cfg: Dict[str, Any] | None = None,
+    app_cfg: Dict[str, Any] | None = None,
+) -> str:
     from pxr import Gf, UsdPhysics
     try:
         from pxr import PhysxSchema
@@ -49,12 +126,54 @@ def ensure_physics_scene(stage, scene_path: str = "/World/PhysicsScene") -> str:
         scene = UsdPhysics.Scene.Define(stage, scene_path)
         scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
         scene.CreateGravityMagnitudeAttr().Set(9.81)
-        if PhysxSchema is not None:
-            try:
-                physx_scene = PhysxSchema.PhysxSceneAPI.Apply(scene.GetPrim())
-                physx_scene.CreateEnableContactReportAttr(True)
-            except Exception:
-                pass
+        scene_prim = scene.GetPrim()
+
+    if PhysxSchema is not None:
+        try:
+            physx_scene = PhysxSchema.PhysxSceneAPI.Apply(scene_prim)
+            _safe_set_physx_attr(
+                physx_scene,
+                ("CreateEnableContactReportAttr",),
+                True,
+            )
+
+            physics_cfg = physics_cfg or {}
+            if physics_cfg.get("enable_gpu_dynamics", None) is not None:
+                _safe_set_physx_attr(
+                    physx_scene,
+                    ("CreateEnableGPUDynamicsAttr",),
+                    bool(physics_cfg["enable_gpu_dynamics"]),
+                )
+            if physics_cfg.get("broadphase_type", None) is not None:
+                _safe_set_physx_attr(
+                    physx_scene,
+                    ("CreateBroadphaseTypeAttr",),
+                    physics_cfg["broadphase_type"],
+                )
+            if physics_cfg.get("enable_ccd", None) is not None:
+                _safe_set_physx_attr(
+                    physx_scene,
+                    ("CreateEnableCCDAttr",),
+                    bool(physics_cfg["enable_ccd"]),
+                )
+        except Exception:
+            pass
+
+    physics_cfg = physics_cfg or {}
+    if bool(physics_cfg.get("report_gpu_dynamics_once", False)):
+        status = get_physx_scene_status(stage, scene_path)
+        requested_active_gpu = None if app_cfg is None else app_cfg.get("active_gpu", None)
+        requested_physics_gpu = None if app_cfg is None else app_cfg.get("physics_gpu", None)
+        print(
+            "[physx] "
+            f"scene={status['scene_path']} "
+            f"enable_gpu_dynamics={status['enable_gpu_dynamics']} "
+            f"broadphase_type={status['broadphase_type']} "
+            f"enable_ccd={status['enable_ccd']} "
+            f"enable_contact_report={status['enable_contact_report']} "
+            f"app_active_gpu={requested_active_gpu} "
+            f"app_physics_gpu={requested_physics_gpu}"
+        )
     return scene_path
 
 
@@ -933,12 +1052,14 @@ class ChocoWorldBuilder:
         from isaacsim import SimulationApp
 
         app_cfg = self.cfg.get("app", {})
-        self.simulation_app = SimulationApp(
-            {
-                "headless": bool(app_cfg.get("headless", True)),
-                "renderer": str(app_cfg.get("renderer", "RayTracedLighting")),
-            }
-        )
+        sim_app_cfg = {
+            "headless": bool(app_cfg.get("headless", True)),
+            "renderer": str(app_cfg.get("renderer", "RayTracedLighting")),
+        }
+        for key in ("active_gpu", "physics_gpu", "multi_gpu", "max_gpu_count"):
+            if key in app_cfg:
+                sim_app_cfg[key] = app_cfg[key]
+        self.simulation_app = SimulationApp(sim_app_cfg)
 
         import omni.usd
         from isaacsim.core.api import SimulationContext
@@ -958,12 +1079,18 @@ class ChocoWorldBuilder:
         usd_ctx.new_stage()
         self.stage = usd_ctx.get_stage()
         ensure_world_default_prim(self.stage)
-        ensure_physics_scene(self.stage, "/World/PhysicsScene")
+        ensure_physics_scene(
+            self.stage,
+            "/World/PhysicsScene",
+            physics_cfg=self.cfg.get("physics", {}),
+            app_cfg=app_cfg,
+        )
 
         world_specs = prepare_stage_world_specs(self.cfg)
         json_paths = [spec.scene_json_path for spec in world_specs]
 
         wcfg = self.cfg["world"]
+        env_cfg = self.cfg.get("env", {})
         layout = GridLayout(
             world_size_m=tuple(map(float, wcfg["world_size_m"])),
             padding_m=float(wcfg["padding_m"]),
@@ -1163,7 +1290,7 @@ class ChocoWorldBuilder:
                 root_container=str(wcfg["root_container"]),
                 world_count=int(wcfg["world_count"]),
                 ctrl_suffix=suf,
-                verbose=True,
+                verbose=bool(env_cfg.get("verbose", False)),
             )
             _ctrl.refresh()
             if len(_ctrl.keys()) > 0:
