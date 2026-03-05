@@ -612,22 +612,31 @@ def _write_candidate_configs(
     return ppo_path, curriculum_path, paths["log_file"], candidate_id
 
 
-def _train_command(study_cfg: dict[str, Any], ppo_config_path: Path, candidate_id: str, study_root: Path) -> list[str]:
+def _train_command(
+    study_cfg: dict[str, Any],
+    ppo_config_path: Path,
+    candidate_id: str,
+    study_root: Path,
+    *,
+    preserve_resume_from: bool,
+) -> list[str]:
     runner_cfg = study_cfg.get("runner", {})
     command_prefix = list(runner_cfg.get("command_prefix", []))
     if not command_prefix:
         command_prefix = [sys.executable, "-u"]
     train_entry = str(runner_cfg.get("train_entry", "gpudrive_chocolate/baselines/ppo/ppo_sb3.py"))
-    return command_prefix + [
+    command = command_prefix + [
         train_entry,
         "--config",
         str(ppo_config_path),
-        "--fresh",
         "--run-id",
         candidate_id,
         "--runs-root",
         str(study_root / "tensorboard"),
     ]
+    if not preserve_resume_from:
+        command.append("--fresh")
+    return command
 
 
 def _svg_escape(text: Any) -> str:
@@ -947,7 +956,13 @@ def _launch_generation(
                 continue
 
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            command = _train_command(study_cfg, ppo_path, candidate_id, study_root)
+            command = _train_command(
+                study_cfg,
+                ppo_path,
+                candidate_id,
+                study_root,
+                preserve_resume_from=preserve_resume_from,
+            )
             log_handle = log_path.open("w", encoding="utf-8")
             log_handle.write("COMMAND: " + " ".join(command) + "\n\n")
             log_handle.flush()
