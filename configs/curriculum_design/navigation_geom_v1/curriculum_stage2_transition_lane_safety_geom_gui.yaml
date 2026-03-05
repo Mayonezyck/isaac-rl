@@ -144,57 +144,57 @@ control:
   speed_scale_mps: 10.0
 
 env:
-  max_steps: 450
+  max_steps: 550
   clear_on_done: true
   respawn_on_reset: true
   respawn_hold_radius_m: 4.0
   startup_below_min_z_preflight_steps: 4
-  render: false
+  render: true
   goal_success_dist_m: 3.0
-  reward_scale: 0.6
+  reward_scale: 1.0
   success_bonus: 10.0
   action_l2_penalty: 0.0
   collision_penalty: -0.2
   min_vehicle_z_m: -0.2
   collision_penalty_types: [7, 8, 11, 12, 13]
   collision_debug: false
-  road_contact_done_types: [14, 15, 16]
-  road_contact_done_penalty: -4.0
+  road_contact_done_types: []
+  road_contact_done_penalty: 0.0
   lane_center_reward_enable: false
   lane_center_reward_type: [1, 2]
   lane_center_reward_per_step: 0.0
   geom_lane_reward_enable: true
-  geom_lane_reward_per_step: 0.12
-  geom_lane_tolerance_m: 1.5
-  geom_lane_heading_weight: 0.7
+  geom_lane_reward_per_step: 0.08
+  geom_lane_tolerance_m: 1.75
+  geom_lane_heading_weight: 0.65
   geom_lane_min_alignment: 0.45
-  geom_route_progress_weight: 0.40
+  geom_route_progress_weight: 0.45
   geom_offroad_metrics_enable: true
-  geom_offroad_lateral_threshold_m: 2.8
-  geom_offroad_distance_threshold_m: 5.0
+  geom_offroad_lateral_threshold_m: 3.25
+  geom_offroad_distance_threshold_m: 6.0
   geom_lane_types: [1, 2]
   geom_road_edge_types: [15, 16]
   survival_reward_per_step: 0.0
   idle_penalty_enable: true
   idle_penalty_per_step: 0.03
   idle_speed_threshold_mps: 0.5
-  vehicle_contact_done: true
-  vehicle_contact_done_penalty: -4.0
-  vehicle_contact_done_mark_both: true
+  vehicle_contact_done: false
+  vehicle_contact_done_penalty: 0.0
+  vehicle_contact_done_mark_both: false
   road_contact_debug: false
   road_contact_debug_every: 100
   road_points_enable: true
-  road_points_k: 160
+  road_points_k: 128
   road_points_mode: "road-running"
   road_points_include_dirs: true
   road_points_radius_m: 40.0
   road_points_type_norm: 20.0
   vehicle_obs_enable: true
-  vehicle_obs_k: 32
+  vehicle_obs_k: 24
   ttc_penalty_enable: true
-  ttc_penalty_alpha: 0.15
-  ttc_penalty_max: 0.50
-  ttc_penalty_min_ttc: 0.5
+  ttc_penalty_alpha: 0.10
+  ttc_penalty_max: 0.40
+  ttc_penalty_min_ttc: 0.4
   ttc_use_vehicle_size: true
   ttc_vehicle_radius_scale: 0.75
   ttc_vehicle_radius_margin_m: 0.20

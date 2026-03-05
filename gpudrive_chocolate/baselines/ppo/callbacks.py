@@ -61,6 +61,7 @@ class RolloutCaptureCallback(BaseCallback):
         self._rollout_collision_sum = 0.0
         self._rollout_road_collision_sum = 0.0
         self._rollout_vehicle_collision_sum = 0.0
+        self._rollout_vehicle_collided_sum = 0.0
         self._rollout_below_min_z_sum = 0.0
         self._rollout_agent_steps = 0.0
         self._rollout_valid_agent_steps = 0.0
@@ -210,7 +211,10 @@ class RolloutCaptureCallback(BaseCallback):
                 self._rollout_lane_hit_sum += float(info.get("lane_hit_count", 0.0))
                 self._rollout_collision_sum += float(info.get("collided", 0.0))
                 self._rollout_road_collision_sum += float(info.get("road_collided_count", 0.0))
-                self._rollout_vehicle_collision_sum += float(info.get("vehicle_collided_count", 0.0))
+                # Done-conditioned vehicle collision numerator.
+                self._rollout_vehicle_collision_sum += float(info.get("vehicle_contact_done_count", 0.0))
+                # Legacy controlled-conditioned vehicle collision count (debug only).
+                self._rollout_vehicle_collided_sum += float(info.get("vehicle_collided_count", 0.0))
                 self._rollout_below_min_z_sum += float(info.get("below_min_z_count", 0.0))
                 self._rollout_done_count += float(info.get("done_count", 0.0))
                 self._rollout_done_success_count += float(info.get("done_success_count", 0.0))
@@ -292,6 +296,10 @@ class RolloutCaptureCallback(BaseCallback):
                 self.logger.record("choco/collision_rate_step", float(info.get("collision_rate_step", 0.0)))
                 self.logger.record("choco/road_collision_rate_step", float(info.get("road_collision_rate_step", 0.0)))
                 self.logger.record("choco/vehicle_collision_rate_step", float(info.get("vehicle_collision_rate_step", 0.0)))
+                self.logger.record(
+                    "choco/vehicle_collision_rate_step_per_controlled",
+                    float(info.get("vehicle_collision_rate_step_per_controlled", 0.0)),
+                )
                 self.logger.record("choco/done_rate_step", float(info.get("done_rate_step", 0.0)))
                 self.logger.record(
                     "choco/success_given_done_rate_step",
@@ -418,8 +426,8 @@ class RolloutCaptureCallback(BaseCallback):
                     self._rollout_road_collision_sum / self._rollout_agent_steps,
                 )
                 self.logger.record(
-                    "rollout/vehicle_collision_rate",
-                    self._rollout_vehicle_collision_sum / self._rollout_agent_steps,
+                    "rollout/vehicle_collision_rate_per_controlled_agent_step",
+                    self._rollout_vehicle_collided_sum / self._rollout_agent_steps,
                 )
                 self.logger.record(
                     "rollout/below_min_z_rate",
@@ -508,6 +516,10 @@ class RolloutCaptureCallback(BaseCallback):
                     self._rollout_agent_steps / rollout_duration,
                 )
             if self._rollout_done_count > 0:
+                self.logger.record(
+                    "rollout/vehicle_collision_rate",
+                    self._rollout_vehicle_collision_sum / self._rollout_done_count,
+                )
                 self.logger.record(
                     "rollout/mean_episode_len",
                     self._rollout_agent_steps / self._rollout_done_count,

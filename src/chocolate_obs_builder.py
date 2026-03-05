@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from pxr import Usd, UsdGeom, Gf
 from pxr import UsdPhysics
 
 from src.trfc import encode_weather_context, weather_context_dim
+
+
+_FALLBACK_WARNED_KEYS: Set[str] = set()
+
+
+def _warn_fallback_once(key: str, message: str) -> None:
+    if key in _FALLBACK_WARNED_KEYS:
+        return
+    _FALLBACK_WARNED_KEYS.add(key)
+    print(f"[warn][fallback] {message}")
 
 
 # ----------------------------
@@ -47,16 +57,30 @@ def _get_rb_linear_velocity_world(rb_prim: Usd.Prim, tc: Usd.TimeCode) -> Tuple[
     rb = UsdPhysics.RigidBodyAPI(rb_prim)
     v_attr = rb.GetVelocityAttr()
     if not v_attr or not v_attr.IsValid():
+        _warn_fallback_once(
+            "obs_velocity_missing_attr",
+            "Observation velocity fallback: RigidBody velocity attr missing; using zero velocity.",
+        )
         return 0.0, 0.0, 0.0
     v = v_attr.Get(tc)
     if v is None:
+        _warn_fallback_once(
+            "obs_velocity_none_value",
+            "Observation velocity fallback: RigidBody velocity value is None; using zero velocity.",
+        )
         return 0.0, 0.0, 0.0
     return float(v[0]), float(v[1]), float(v[2])
 
 
 def _meters_per_unit(stage: Usd.Stage) -> float:
     mpu = UsdGeom.GetStageMetersPerUnit(stage)
-    return float(mpu) if mpu and float(mpu) > 0 else 0.01
+    if mpu and float(mpu) > 0:
+        return float(mpu)
+    _warn_fallback_once(
+        "obs_meters_per_unit_default",
+        "Stage meters-per-unit missing/invalid; falling back to 0.01.",
+    )
+    return 0.01
 
 def _get_vehicle_size_local(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache) -> Tuple[float, float]:
     # Returns (length_x, width_y) in stage units from local bounds.
@@ -67,7 +91,11 @@ def _get_vehicle_size_local(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache) -> Tu
         rng = box.GetRange()
         size = rng.GetSize()
         return abs(float(size[0])), abs(float(size[1]))
-    except Exception:
+    except Exception as exc:
+        _warn_fallback_once(
+            "obs_vehicle_bbox_error",
+            f"Vehicle local bbox query failed ({exc}); returning zero size fallback.",
+        )
         return 0.0, 0.0
 
 def _pick_vehicle_size_prim(stage: Usd.Stage, start_prim: Usd.Prim) -> Optional[Usd.Prim]:
@@ -77,8 +105,15 @@ def _pick_vehicle_size_prim(stage: Usd.Stage, start_prim: Usd.Prim) -> Optional[
         child = stage.GetPrimAtPath(f"{start_prim.GetPath()}/Vehicle")
         if child.IsValid():
             return child
-    except Exception:
-        pass
+    except Exception as exc:
+        _warn_fallback_once(
+            "obs_vehicle_size_child_query_error",
+            f"Failed to query '/Vehicle' child prim for size ({exc}); using start prim fallback.",
+        )
+    _warn_fallback_once(
+        "obs_vehicle_size_use_start_prim",
+        "Vehicle '/Vehicle' child prim missing; using start prim for size fallback.",
+    )
     return start_prim
 
 def _find_rigid_body_prim(start_prim: Usd.Prim) -> Optional[Usd.Prim]:
@@ -501,6 +536,10 @@ class ChocolateObsBuilder:
                             pass
                         else:
                             # Fallback for unknown mode.
+                            _warn_fallback_once(
+                                f"obs_road_points_mode::{mode}",
+                                f"Unknown road_points_mode='{road_points_mode}'; falling back to 'knn'.",
+                            )
                             idxs = idxs[np.argsort(dist2[idxs])]
                         idxs = idxs[: int(road_points_k)]
                         off = base_dim

@@ -3,6 +3,7 @@
 This folder contains search presets for the geometric stage-2 safety task:
 
 - [ppo_stage2_lane_safety_geom.yaml](/home/yz8733/Github/isaac-rl/configs/curriculum_design/navigation_geom_v1/ppo_stage2_lane_safety_geom.yaml)
+- [ppo_stage2_lane_safety_geom_warmstart.yaml](/home/yz8733/Github/isaac-rl/configs/curriculum_design/navigation_geom_v1/ppo_stage2_lane_safety_geom_warmstart.yaml)
 
 This stage is the right surface for crash avoidance tuning because it already has:
 
@@ -23,6 +24,20 @@ Real study:
 ```bash
 python -u gpudrive_chocolate/baselines/ppo/evolve_hparams.py \
   --study configs/hparam_search/stage2_evolution/search_stage2_lane_safety_geom.yaml
+```
+
+Warm-start smoke study from the stage-1 checkpoint:
+
+```bash
+python -u gpudrive_chocolate/baselines/ppo/evolve_hparams.py \
+  --study configs/hparam_search/stage2_evolution/search_stage2_lane_safety_geom_warmstart_smoke.yaml
+```
+
+Warm-start real study from the stage-1 checkpoint:
+
+```bash
+python -u gpudrive_chocolate/baselines/ppo/evolve_hparams.py \
+  --study configs/hparam_search/stage2_evolution/search_stage2_lane_safety_geom_warmstart.yaml
 ```
 
 The default real preset is intentionally broader than the stage-1 search:

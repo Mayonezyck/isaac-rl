@@ -469,9 +469,29 @@ def _resolve_resource_slots(study_cfg: dict[str, Any]) -> list[ResourceSlot]:
 def _load_scalar_summary(log_dir: Path, tags: list[str], window: int) -> dict[str, float]:
     from tensorboard.backend.event_processing import event_accumulator
 
-    event_dir = log_dir / "PPO_1"
-    if not event_dir.exists():
-        raise FileNotFoundError(f"TensorBoard directory not found: {event_dir}")
+    candidate_event_dirs = sorted(
+        [
+            path
+            for path in log_dir.iterdir()
+            if path.is_dir() and path.name.startswith("PPO_")
+        ],
+        key=lambda path: path.name,
+    )
+    if not candidate_event_dirs:
+        if log_dir.exists():
+            candidate_event_dirs = [log_dir]
+        else:
+            raise FileNotFoundError(f"TensorBoard directory not found: {log_dir}")
+
+    event_dir = None
+    for candidate_dir in sorted(candidate_event_dirs, key=lambda path: path.name, reverse=True):
+        event_files = sorted(candidate_dir.glob("events.out.tfevents.*"))
+        if event_files:
+            event_dir = candidate_dir
+            break
+    if event_dir is None:
+        raise FileNotFoundError(f"No TensorBoard event files found under: {log_dir}")
+
     accumulator = event_accumulator.EventAccumulator(
         str(event_dir),
         size_guidance={event_accumulator.SCALARS: 0},
@@ -539,6 +559,7 @@ def _write_candidate_configs(
     base_curriculum: dict[str, Any],
     slot: ResourceSlot,
     trial_timesteps: int,
+    preserve_resume_from: bool,
 ) -> tuple[Path, Path, Path, str]:
     paths = _candidate_paths(study_root, generation, index)
     candidate_id = f"g{generation:03d}_c{index:03d}"
@@ -560,7 +581,8 @@ def _write_candidate_configs(
 
     ppo_cfg["choco_config_path"] = str(curriculum_path)
     ppo_cfg["device"] = slot.device
-    ppo_cfg["resume_from"] = None
+    if not preserve_resume_from:
+        ppo_cfg["resume_from"] = None
     ppo_cfg["total_timesteps"] = int(trial_timesteps)
     ppo_cfg["render_during_training"] = False
     ppo_cfg["record_training_video"] = False
@@ -862,6 +884,7 @@ def _launch_generation(
         tags.append(str(scoring_cfg["primary_metric"]))
     tags = sorted(set(tags))
     primary_metric = str(scoring_cfg.get("primary_metric", "")) or None
+    preserve_resume_from = bool(search_cfg.get("preserve_resume_from", False))
 
     max_parallel = int(resources_cfg.get("max_parallel", max(1, len(slots))))
     auto_expand_slots = bool(resources_cfg.get("auto_expand_slots", True))
@@ -886,6 +909,7 @@ def _launch_generation(
                 base_curriculum=base_curriculum,
                 slot=slot,
                 trial_timesteps=trial_timesteps,
+                preserve_resume_from=preserve_resume_from,
             )
             result = CandidateResult(
                 candidate_id=candidate_id,

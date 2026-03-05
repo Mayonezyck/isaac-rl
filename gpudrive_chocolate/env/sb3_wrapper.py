@@ -117,6 +117,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             ttc_penalty_alpha=float(cfg_env.get("ttc_penalty_alpha", 1.0)),
             ttc_penalty_max=float(cfg_env.get("ttc_penalty_max", 1.0)),
             ttc_penalty_min_ttc=float(cfg_env.get("ttc_penalty_min_ttc", 0.2)),
+            ttc_use_vehicle_size=bool(cfg_env.get("ttc_use_vehicle_size", True)),
+            ttc_vehicle_radius_scale=float(cfg_env.get("ttc_vehicle_radius_scale", 0.75)),
+            ttc_vehicle_radius_margin_m=float(cfg_env.get("ttc_vehicle_radius_margin_m", 0.20)),
             obs_viz_enable=bool(cfg_env.get("obs_viz_enable", False)),
             obs_viz_world_idx=int(cfg_env.get("obs_viz_world_idx", 0)),
             obs_viz_agent_rank=int(cfg_env.get("obs_viz_agent_rank", 0)),
@@ -455,7 +458,11 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             "lane_hit_rate_step": float(lane_hit_count) / float(denom_controlled),
             "collision_rate_step": float(collided_count) / float(denom_controlled),
             "road_collision_rate_step": float(road_collided_count) / float(denom_controlled),
-            "vehicle_collision_rate_step": float(vehicle_collided_count) / float(denom_controlled),
+            # Done-conditioned: among agents set done this step, how many are vehicle-contact done.
+            "vehicle_collision_rate_step": float(vehicle_contact_done_count) / float(denom_done),
+            # Legacy controlled-conditioned vehicle collision incidence (kept for debugging).
+            "vehicle_collision_rate_step_per_controlled": float(vehicle_collided_count)
+            / float(denom_controlled),
             "done_rate_step": float(done_count) / float(denom_controlled),
             "success_given_done_rate_step": float(new_success_count) / float(denom_done),
             "mean_dist_to_goal_m": _safe_mean(valid_dist),

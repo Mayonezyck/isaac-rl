@@ -1,6 +1,8 @@
 import argparse
+import json
 import os
 import sys
+import zipfile
 import yaml
 from box import Box
 from datetime import datetime
@@ -74,11 +76,91 @@ def build_resume_custom_objects(env: ChocolateSB3MultiAgentEnv) -> dict[str, obj
     }
 
 
+def _load_checkpoint_data(checkpoint_path: str) -> dict:
+    with zipfile.ZipFile(checkpoint_path, "r") as zf:
+        raw = zf.read("data")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Failed to parse checkpoint metadata from {checkpoint_path}: {exc}") from exc
+
+
+def _align_curriculum_obs_to_resume(exp_config: Box) -> dict | None:
+    resume_from = getattr(exp_config, "resume_from", None)
+    if not resume_from:
+        return None
+    if str(getattr(exp_config, "policy_type", "mlp")) != "late_fusion":
+        return None
+    if not bool(getattr(exp_config, "align_obs_with_resume", True)):
+        return None
+
+    ckpt_data = _load_checkpoint_data(str(resume_from))
+    ckpt_pk = ckpt_data.get("policy_kwargs", {}) if isinstance(ckpt_data, dict) else {}
+    if not isinstance(ckpt_pk, dict):
+        ckpt_pk = {}
+
+    ckpt_road_k = ckpt_pk.get("road_point_k", None)
+    ckpt_vehicle_k = ckpt_pk.get("vehicle_k", None)
+    ckpt_road_dim = ckpt_pk.get("road_point_dim", None)
+
+    if ckpt_road_k is None and ckpt_vehicle_k is None and ckpt_road_dim is None:
+        return ckpt_pk
+
+    with open(str(exp_config.choco_config_path), "r", encoding="utf-8") as f:
+        choco_cfg = yaml.safe_load(f)
+    if not isinstance(choco_cfg, dict):
+        raise RuntimeError(f"Invalid curriculum YAML at {exp_config.choco_config_path}")
+
+    env_cfg = choco_cfg.setdefault("env", {})
+    if not isinstance(env_cfg, dict):
+        env_cfg = {}
+        choco_cfg["env"] = env_cfg
+
+    changed = False
+    if ckpt_road_k is not None:
+        cur_road_k = int(env_cfg.get("road_points_k", 0))
+        if int(ckpt_road_k) != cur_road_k:
+            env_cfg["road_points_k"] = int(ckpt_road_k)
+            changed = True
+    if ckpt_vehicle_k is not None:
+        cur_vehicle_k = int(env_cfg.get("vehicle_obs_k", 0))
+        if int(ckpt_vehicle_k) != cur_vehicle_k:
+            env_cfg["vehicle_obs_k"] = int(ckpt_vehicle_k)
+            changed = True
+    if ckpt_road_dim in (3, 5):
+        want_dirs = bool(int(ckpt_road_dim) == 5)
+        cur_dirs = bool(env_cfg.get("road_points_include_dirs", False))
+        if cur_dirs != want_dirs:
+            env_cfg["road_points_include_dirs"] = want_dirs
+            changed = True
+
+    if changed:
+        os.makedirs("runs/autofix_curriculum", exist_ok=True)
+        src_name = os.path.basename(str(exp_config.choco_config_path))
+        stem = src_name[:-5] if src_name.endswith(".yaml") else src_name
+        ts = datetime.now().strftime("%m_%d_%H_%M_%S_%f")
+        out_path = os.path.join("runs/autofix_curriculum", f"{stem}.resume_aligned.{ts}.yaml")
+        with open(out_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(choco_cfg, f, sort_keys=False)
+        exp_config.choco_config_path = out_path
+        print(
+            f"[train] aligned curriculum obs layout to resume checkpoint: "
+            f"road_points_k={env_cfg.get('road_points_k')} "
+            f"vehicle_obs_k={env_cfg.get('vehicle_obs_k')} "
+            f"road_points_include_dirs={env_cfg.get('road_points_include_dirs')} "
+            f"path={out_path}",
+            flush=True,
+        )
+    return ckpt_pk
+
+
 def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_override: str | None = None):
     if isinstance(exp_config.device, str) and exp_config.device.startswith("cuda") and ":" not in exp_config.device:
         exp_config.device = "cuda:0"
     if isinstance(exp_config.device, str) and exp_config.device.startswith("cuda"):
         torch.cuda.set_device(exp_config.device)
+
+    ckpt_policy_kwargs = _align_curriculum_obs_to_resume(exp_config)
 
     env = ChocolateSB3MultiAgentEnv(
         choco_config_path=exp_config.choco_config_path,
@@ -153,6 +235,20 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
                 "pool": str(lf_cfg.get("pool", "max")),
             }
         )
+        if ckpt_policy_kwargs is not None:
+            keys = ["road_point_dim", "road_point_k", "vehicle_dim", "vehicle_k", "ego_dim"]
+            mismatches = []
+            for key in keys:
+                ck = ckpt_policy_kwargs.get(key, None)
+                cur = policy_kwargs.get(key, None)
+                if ck is not None and cur is not None and int(ck) != int(cur):
+                    mismatches.append((key, ck, cur))
+            if mismatches:
+                details = ", ".join([f"{k}: checkpoint={a} current={b}" for k, a, b in mismatches])
+                raise RuntimeError(
+                    "Resume checkpoint policy layout is incompatible with current late-fusion layout after "
+                    f"alignment attempt. {details}"
+                )
     else:
         raise ValueError(f"Unknown policy_type: {policy_type}")
 

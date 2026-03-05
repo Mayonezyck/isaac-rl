@@ -176,6 +176,9 @@ class ChocolateEnv:
         ttc_penalty_alpha: float = 1.0,
         ttc_penalty_max: float = 1.0,
         ttc_penalty_min_ttc: float = 0.2,
+        ttc_use_vehicle_size: bool = True,
+        ttc_vehicle_radius_scale: float = 0.75,
+        ttc_vehicle_radius_margin_m: float = 0.20,
         obs_viz_enable: bool = False,
         obs_viz_world_idx: int = 0,
         obs_viz_agent_rank: int = 0,
@@ -247,6 +250,9 @@ class ChocolateEnv:
         self.ttc_penalty_alpha = float(ttc_penalty_alpha)
         self.ttc_penalty_max = float(ttc_penalty_max)
         self.ttc_penalty_min_ttc = float(ttc_penalty_min_ttc)
+        self.ttc_use_vehicle_size = bool(ttc_use_vehicle_size)
+        self.ttc_vehicle_radius_scale = max(0.0, float(ttc_vehicle_radius_scale))
+        self.ttc_vehicle_radius_margin_m = max(0.0, float(ttc_vehicle_radius_margin_m))
         self.obs_viz_enable = bool(obs_viz_enable)
         self.obs_viz_world_idx = int(obs_viz_world_idx)
         self.obs_viz_agent_rank = int(obs_viz_agent_rank)
@@ -264,6 +270,8 @@ class ChocolateEnv:
             int(self.respawn_params.get("startup_below_min_z_preflight_steps", 0)),
         )
         self.verbose = bool(verbose)
+        self._fallback_warn_counts: Dict[str, int] = {}
+        self._fallback_warn_limit = 3
 
         # --- episode state (per "row" = per AgentKey) ---
         self.t = 0
@@ -284,6 +292,8 @@ class ChocolateEnv:
         self._quarantined_tokens: Set[Tuple[int, int]] = set()
         self._prev_world_xy_m: Dict[Tuple[int, int], Tuple[float, float]] = {}
         self._world_road_geometry: Dict[int, Dict[str, np.ndarray]] = {}
+        self._vehicle_radius_u_cache: Dict[Tuple[int, int], float] = {}
+        self._bbox_cache = None
         self._mpu = float(getattr(self.sim, "meters_per_unit", 1.0))  # IsaacSim usually has this
         self._collision_tracker = None
         if self.collision_penalty_types or self.collision_debug:
@@ -294,6 +304,13 @@ class ChocolateEnv:
     # -------------------------
     # Internal helpers
     # -------------------------
+
+    def _warn_fallback(self, key: str, message: str) -> None:
+        count = int(self._fallback_warn_counts.get(key, 0))
+        if count < self._fallback_warn_limit:
+            suffix = " [further repeats suppressed]" if (count + 1) == self._fallback_warn_limit else ""
+            print(f"[warn][fallback] {message}{suffix}")
+        self._fallback_warn_counts[key] = count + 1
 
 
 
@@ -498,6 +515,114 @@ class ChocolateEnv:
 
         return lane_hit, off_road, lane_error_m, heading_alignment, route_progress_m
 
+    def _pick_vehicle_size_prim(self, vehicle_prim: Usd.Prim) -> Optional[Usd.Prim]:
+        if vehicle_prim is None or not vehicle_prim.IsValid():
+            return None
+        try:
+            child = self.stage.GetPrimAtPath(f"{vehicle_prim.GetPath()}/Vehicle")
+            if child.IsValid():
+                return child
+        except Exception as exc:
+            self._warn_fallback(
+                "ttc_vehicle_size_child_query_error",
+                f"Failed to query child '/Vehicle' prim for TTC size ({exc}); using vehicle root prim.",
+            )
+        self._warn_fallback(
+            "ttc_vehicle_size_use_root",
+            "Vehicle '/Vehicle' child prim missing for TTC size; using vehicle root prim.",
+        )
+        return vehicle_prim
+
+    def _vehicle_radius_u_for_state(
+        self,
+        *,
+        world_idx: int,
+        agent_id: int,
+        vehicle_prim: Usd.Prim,
+        custom_data: Dict[str, Any],
+    ) -> float:
+        if not self.ttc_use_vehicle_size:
+            return 0.0
+
+        token = self._agent_token(world_idx, agent_id)
+        cached = self._vehicle_radius_u_cache.get(token, None)
+        if cached is not None:
+            return float(cached)
+
+        mpu = max(float(self._mpu), 1e-6)
+        length_u = 0.0
+        width_u = 0.0
+
+        # Optional direct metadata path if available in future builders.
+        try:
+            if isinstance(custom_data, dict):
+                if "vehicle_size_m" in custom_data:
+                    sz = custom_data.get("vehicle_size_m", None)
+                    if isinstance(sz, (list, tuple)) and len(sz) >= 2:
+                        length_u = float(sz[0]) / mpu
+                        width_u = float(sz[1]) / mpu
+                if length_u <= 0.0 and width_u <= 0.0:
+                    lm = custom_data.get("vehicle_length_m", custom_data.get("length_m", None))
+                    wm = custom_data.get("vehicle_width_m", custom_data.get("width_m", None))
+                    if lm is not None and wm is not None:
+                        length_u = float(lm) / mpu
+                        width_u = float(wm) / mpu
+        except Exception as exc:
+            self._warn_fallback(
+                "ttc_vehicle_size_metadata_error",
+                f"Vehicle size metadata parsing failed ({exc}); falling back to bbox/nominal size.",
+            )
+            length_u = 0.0
+            width_u = 0.0
+
+        # Fallback to local bbox size.
+        if length_u <= 0.0 or width_u <= 0.0:
+            self._warn_fallback(
+                "ttc_vehicle_size_bbox_fallback",
+                "Missing explicit vehicle size metadata for TTC; falling back to local bbox size.",
+            )
+            size_prim = self._pick_vehicle_size_prim(vehicle_prim)
+            if size_prim is not None and size_prim.IsValid():
+                try:
+                    if self._bbox_cache is None:
+                        self._bbox_cache = UsdGeom.BBoxCache(
+                            Usd.TimeCode.Default(),
+                            [UsdGeom.Tokens.default_],
+                            useExtentsHint=True,
+                        )
+                    box = self._bbox_cache.ComputeLocalBound(size_prim)
+                    rng = box.GetRange()
+                    size = rng.GetSize()
+                    length_u = abs(float(size[0]))
+                    width_u = abs(float(size[1]))
+                except Exception as exc:
+                    self._warn_fallback(
+                        "ttc_vehicle_size_bbox_error",
+                        f"Local bbox size query failed ({exc}); falling back to nominal vehicle dimensions.",
+                    )
+                    length_u = 0.0
+                    width_u = 0.0
+
+        # Final fallback to nominal sedan-like dimensions.
+        if length_u <= 0.0:
+            self._warn_fallback(
+                "ttc_vehicle_size_nominal_length",
+                "TTC size fallback: using nominal vehicle length 4.0m.",
+            )
+            length_u = 4.0 / mpu
+        if width_u <= 0.0:
+            self._warn_fallback(
+                "ttc_vehicle_size_nominal_width",
+                "TTC size fallback: using nominal vehicle width 2.0m.",
+            )
+            width_u = 2.0 / mpu
+
+        base_radius_u = 0.5 * math.sqrt(length_u * length_u + width_u * width_u)
+        margin_u = float(self.ttc_vehicle_radius_margin_m) / mpu
+        radius_u = max(0.0, float(self.ttc_vehicle_radius_scale) * base_radius_u + margin_u)
+        self._vehicle_radius_u_cache[token] = float(radius_u)
+        return float(radius_u)
+
     def _collect_all_vehicle_states(self):
         world_count = int(getattr(self.ctrl, "world_count", 0))
         out = {}
@@ -534,6 +659,7 @@ class ChocolateEnv:
                 if agent_id is None:
                     continue
                 controllable = bool(cd.get("controllable", False))
+                token = self._agent_token(wi, int(agent_id))
 
                 xform = UsdGeom.Xformable(vehicle_prim)
                 try:
@@ -550,12 +676,25 @@ class ChocolateEnv:
                         rb_prim = self._find_rb_prim(h.pose_prim)
                         if rb_prim is not None:
                             vx, vy, _ = self._get_rb_linear_velocity_world(rb_prim)
+                        else:
+                            self._warn_fallback(
+                                "ttc_velocity_missing_rb",
+                                "TTC velocity fallback: rigid-body prim not found; using zero velocity.",
+                            )
+                radius_u = self._vehicle_radius_u_for_state(
+                    world_idx=wi,
+                    agent_id=int(agent_id),
+                    vehicle_prim=vehicle_prim,
+                    custom_data=cd,
+                )
 
                 states.append(
                     {
                         "agent_id": int(agent_id),
+                        "token": token,
                         "pos": (px, py),
                         "vel": (vx, vy),
+                        "radius_u": radius_u,
                         "controllable": controllable,
                     }
                 )
@@ -566,6 +705,11 @@ class ChocolateEnv:
     def _compute_ttc_penalty(self, keys: List[object], active: np.ndarray) -> np.ndarray:
         if not self.ttc_penalty_enable:
             return np.zeros((len(keys),), dtype=np.float32)
+        if not self.ttc_use_vehicle_size:
+            self._warn_fallback(
+                "ttc_point_agent_mode",
+                "TTC fallback mode active: ttc_use_vehicle_size=false, so vehicle radii are ignored.",
+            )
 
         states_by_world = self._collect_all_vehicle_states()
         penalties = np.zeros((len(keys),), dtype=np.float32)
@@ -585,9 +729,13 @@ class ChocolateEnv:
                 continue
             ex, ey = ego_state["pos"]
             evx, evy = ego_state["vel"]
+            ego_r = float(ego_state.get("radius_u", 0.0)) if self.ttc_use_vehicle_size else 0.0
             min_ttc = None
+            excluded_tokens = set(self._pending_respawns.keys()) | set(self._quarantined_tokens)
             for s in states_by_world[wi]:
                 if s["agent_id"] == int(k.agent_id):
+                    continue
+                if s.get("token", None) in excluded_tokens:
                     continue
                 ox, oy = s["pos"]
                 ovx, ovy = s["vel"]
@@ -599,14 +747,50 @@ class ChocolateEnv:
                 if v2 < 1e-6:
                     continue
                 rdotv = rx * rvx + ry * rvy
-                if rdotv >= 0.0:
-                    continue
-                ttc = -rdotv / v2
-                if ttc <= 0.0:
-                    continue
+                r2 = rx * rx + ry * ry
+
+                other_r = float(s.get("radius_u", 0.0)) if self.ttc_use_vehicle_size else 0.0
+                combined_r = max(0.0, ego_r + other_r)
+
+                ttc = None
+                if r2 <= combined_r * combined_r:
+                    ttc = 0.0
+                else:
+                    # Exact first time-of-overlap for 2D discs under constant velocity.
+                    # ||r + rv t||^2 = R^2 -> a t^2 + b t + c = 0
+                    a = v2
+                    b = 2.0 * rdotv
+                    c = r2 - combined_r * combined_r
+                    disc = b * b - 4.0 * a * c
+                    if disc >= 0.0:
+                        sqrt_disc = math.sqrt(disc)
+                        t_enter = (-b - sqrt_disc) / (2.0 * a)
+                        t_exit = (-b + sqrt_disc) / (2.0 * a)
+                        if t_exit >= 0.0:
+                            ttc = max(0.0, t_enter)
+
+                # Continuous fallback for near-collision closing motion.
+                if ttc is None:
+                    if rdotv >= 0.0:
+                        continue
+                    dist = math.sqrt(max(r2, 1e-9))
+                    closing_speed = -rdotv / max(dist, 1e-6)
+                    if closing_speed <= 1e-6:
+                        continue
+                    clearance = max(0.0, dist - combined_r)
+                    ttc = clearance / closing_speed
+                    self._warn_fallback(
+                        "ttc_continuous_fallback",
+                        "Quadratic TTC root unavailable for a pair; using continuous closing-speed TTC fallback.",
+                    )
+
                 if min_ttc is None or ttc < min_ttc:
                     min_ttc = ttc
             if min_ttc is None:
+                continue
+            # Hard safety clamp: imminent risk (<0.5 s TTC) gets maximum penalty.
+            if float(min_ttc) < 0.5:
+                penalties[i] = -float(self.ttc_penalty_max)
                 continue
             denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
             penalty = float(self.ttc_penalty_alpha) / denom
@@ -634,7 +818,6 @@ class ChocolateEnv:
         from pxr import Gf
 
         rb_path = rb_prim.GetPath().pathString
-        print('hererer')
         # PhysX sim interface name differs slightly across Isaac Sim builds,
         # so we try common variants.
         sim_iface = None
@@ -642,36 +825,39 @@ class ChocolateEnv:
             sim_iface = omni.physx.get_physx_simulation_interface()
         elif hasattr(omni.physx, "get_physx_interface"):
             sim_iface = omni.physx.get_physx_interface()
+            self._warn_fallback(
+                "physx_legacy_interface",
+                "Using legacy omni.physx.get_physx_interface() fallback for teleport.",
+            )
         if sim_iface is None:
-            print('no omni??')
             raise RuntimeError("No omni.physx simulation interface found.")
-        print('passed?')
         px, py, pz = pos_units
         w, x, y, z = quat_wxyz
 
         # build Gf types (float versions)
         p = Gf.Vec3f(float(px), float(py), float(pz))
         q = Gf.Quatf(float(w), Gf.Vec3f(float(x), float(y), float(z)))
-        print('passed?')
         # --- pose setters (try a few common names) ---
         pose_setters = [
-            "set_rigid_body_pose",
-            "setRigidBodyPose",
-            "set_rigid_body_global_pose",
-            "setRigidBodyGlobalPose",
+            ("set_rigid_body_pose", False),
+            ("setRigidBodyPose", True),
+            ("set_rigid_body_global_pose", True),
+            ("setRigidBodyGlobalPose", True),
         ]
         ok = False
-        for fn in pose_setters:
+        for fn, is_fallback in pose_setters:
             if hasattr(sim_iface, fn):
                 getattr(sim_iface, fn)(rb_path, p, q)
+                if is_fallback:
+                    self._warn_fallback(
+                        f"physx_pose_setter::{fn}",
+                        f"Using fallback PhysX pose setter '{fn}'.",
+                    )
                 ok = True
                 break
         if not ok:
-            # help you debug quickly
-            print('not OK')
             cand = [m for m in dir(sim_iface) if ("rigid" in m.lower() and "pose" in m.lower())]
             raise RuntimeError(f"Couldn't find pose setter on physx iface. Candidates: {cand[:30]}")
-        print('passed? WOW')
         # --- zero velocities (again try common names) ---
         vel_fns = [
             ("set_rigid_body_linear_velocity", "setRigidBodyLinearVelocity"),
@@ -682,6 +868,10 @@ class ChocolateEnv:
                 getattr(sim_iface, a)(rb_path, Gf.Vec3f(0.0, 0.0, 0.0))
             elif hasattr(sim_iface, b):
                 getattr(sim_iface, b)(rb_path, Gf.Vec3f(0.0, 0.0, 0.0))
+                self._warn_fallback(
+                    f"physx_velocity_setter::{b}",
+                    f"Using fallback PhysX velocity setter '{b}'.",
+                )
 
 
     def _build_obs(self) -> Tuple[np.ndarray, np.ndarray, List[object]]:
@@ -1831,12 +2021,18 @@ class _RoadCollisionTracker:
 
             if hasattr(omni.physx, "get_physx_simulation_interface"):
                 sim_iface = omni.physx.get_physx_simulation_interface()
-            else:
+            elif hasattr(omni.physx, "get_physx_interface"):
                 sim_iface = omni.physx.get_physx_interface()
+                print(
+                    "[warn][fallback] RoadCollisionTracker using legacy "
+                    "omni.physx.get_physx_interface() fallback."
+                )
+            else:
+                sim_iface = None
 
-            if hasattr(sim_iface, "subscribe_contact_report_events"):
+            if sim_iface is not None and hasattr(sim_iface, "subscribe_contact_report_events"):
                 self._sub = sim_iface.subscribe_contact_report_events(self._on_contact)
-            if hasattr(sim_iface, "subscribe_trigger_report_events"):
+            if sim_iface is not None and hasattr(sim_iface, "subscribe_trigger_report_events"):
                 self._sub_trigger = sim_iface.subscribe_trigger_report_events(self._on_trigger)
         except Exception:
             self._sub = None
