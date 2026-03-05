@@ -859,6 +859,52 @@ def create_dome_light(
     return prim
 
 
+def create_distant_light(
+    stage,
+    path="/World/__DistantLight",
+    intensity=40000.0,
+    exposure=0.0,
+    angle=0.53,
+    color=(1.0, 1.0, 1.0),
+    rotation_deg_xyz=(60.0, 0.0, 45.0),
+):
+    from pxr import Gf, UsdLux, UsdGeom
+
+    light = UsdLux.DistantLight.Define(stage, path)
+    prim = light.GetPrim()
+
+    light.CreateIntensityAttr(float(intensity))
+    light.CreateExposureAttr(float(exposure))
+    light.CreateAngleAttr(float(angle))
+    try:
+        if isinstance(color, (list, tuple)) and len(color) >= 3:
+            light.CreateColorAttr().Set(
+                Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))
+            )
+    except Exception:
+        pass
+
+    try:
+        rx, ry, rz = (
+            float(rotation_deg_xyz[0]),
+            float(rotation_deg_xyz[1]),
+            float(rotation_deg_xyz[2]),
+        )
+    except Exception:
+        rx, ry, rz = 60.0, 0.0, 45.0
+
+    xform = UsdGeom.Xformable(prim)
+    xform.ClearXformOpOrder()
+    rot = xform.AddRotateXYZOp()
+    rot.Set(Gf.Vec3f(rx, ry, rz))
+
+    print(
+        f"[light] created distant light {path} intensity={intensity} "
+        f"exposure={exposure} angle={angle} rot=({rx},{ry},{rz})"
+    )
+    return prim
+
+
 def _set_camera_world_matrix(cam_prim, M_world_units):
     from pxr import UsdGeom
 
@@ -1213,14 +1259,26 @@ class ChocoWorldBuilder:
 
         light_cfg = self.cfg.get("light", {}) or {}
         if bool(light_cfg.get("enable", True)):
-            create_dome_light(
-                self.stage,
-                path=str(light_cfg.get("path", "/World/__DomeLight")),
-                intensity=float(light_cfg.get("intensity", 3000.0)),
-                exposure=float(light_cfg.get("exposure", 0.0)),
-                texture_file=light_cfg.get("texture_file", None),
-                rotation_deg_y=float(light_cfg.get("rotation_deg_y", 0.0)),
-            )
+            light_type = str(light_cfg.get("type", "dome")).strip().lower()
+            if light_type == "distant":
+                create_distant_light(
+                    self.stage,
+                    path=str(light_cfg.get("path", "/World/__DistantLight")),
+                    intensity=float(light_cfg.get("intensity", 40000.0)),
+                    exposure=float(light_cfg.get("exposure", 0.0)),
+                    angle=float(light_cfg.get("angle", 0.53)),
+                    color=light_cfg.get("color", (1.0, 1.0, 1.0)),
+                    rotation_deg_xyz=light_cfg.get("rotation_deg_xyz", (60.0, 0.0, 45.0)),
+                )
+            else:
+                create_dome_light(
+                    self.stage,
+                    path=str(light_cfg.get("path", "/World/__DomeLight")),
+                    intensity=float(light_cfg.get("intensity", 3000.0)),
+                    exposure=float(light_cfg.get("exposure", 0.0)),
+                    texture_file=light_cfg.get("texture_file", None),
+                    rotation_deg_y=float(light_cfg.get("rotation_deg_y", 0.0)),
+                )
 
         cam_cfg = self.cfg.get("camera", {}) or {}
         cam_mode = str(cam_cfg.get("mode", "bbox"))

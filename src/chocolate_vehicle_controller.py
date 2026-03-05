@@ -31,7 +31,7 @@ class AgentHandle:
     xform: UsdGeom.Xformable
     accel: Usd.Attribute
     steer: Optional[Usd.Attribute]
-    brake: Optional[Usd.Attribute]
+    brake_attrs: List[Usd.Attribute]
 
 
 class ChocolateWorldVehicleController:
@@ -138,7 +138,23 @@ class ChocolateWorldVehicleController:
                     continue
 
                 steer = ctrl_prim.GetAttribute(self.steer_attr)
-                brake = ctrl_prim.GetAttribute(self.brake_attr)
+                brake_attrs: List[Usd.Attribute] = []
+                for attr in ctrl_prim.GetAttributes():
+                    try:
+                        name = attr.GetName()
+                    except Exception:
+                        continue
+                    if not isinstance(name, str):
+                        continue
+                    if name.startswith("physxVehicleController:brake") and attr.IsValid():
+                        brake_attrs.append(attr)
+
+                # Backward-compatible fallback: always try configured brake attr.
+                configured_brake = ctrl_prim.GetAttribute(self.brake_attr)
+                if configured_brake.IsValid() and all(
+                    b.GetName() != configured_brake.GetName() for b in brake_attrs
+                ):
+                    brake_attrs.append(configured_brake)
 
                 key = AgentKey(world_idx=wi, agent_id=int(agent_id))
                 handle = AgentHandle(
@@ -151,7 +167,7 @@ class ChocolateWorldVehicleController:
                     xform=UsdGeom.Xformable(pose_prim),
                     accel=accel,
                     steer=steer if steer.IsValid() else None,
-                    brake=brake if brake.IsValid() else None,
+                    brake_attrs=brake_attrs,
                 )
 
                 self._handles[key] = handle
@@ -231,8 +247,8 @@ class ChocolateWorldVehicleController:
             h.accel.Set(float(thr))
             if h.steer is not None:
                 h.steer.Set(float(steer))
-            if h.brake is not None:
-                h.brake.Set(float(brake))
+            for b in h.brake_attrs:
+                b.Set(float(brake))
             return True
         except Exception:
             return False

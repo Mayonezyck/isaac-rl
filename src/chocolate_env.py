@@ -187,6 +187,7 @@ class ChocolateEnv:
         world_prefix: str = "world_",
         warmup_on_reset_steps: int = 1,
         respawn_on_reset: bool = False,
+        respawn_mode: str = "rebuild",
         respawn_params: Optional[Dict[str, Any]] = None,
         verbose: bool = False,
     ):
@@ -262,8 +263,22 @@ class ChocolateEnv:
         self.world_prefix = str(world_prefix)
         self.warmup_on_reset_steps = max(0, int(warmup_on_reset_steps))
         self.respawn_on_reset = bool(respawn_on_reset)
+        mode = str(respawn_mode).strip().lower()
+        if mode not in {"hybrid", "rebuild"}:
+            print(
+                f"[warn][fallback] Unknown respawn_mode='{respawn_mode}', falling back to 'rebuild'."
+            )
+            mode = "rebuild"
+        self.respawn_mode = mode
         self.respawn_params = respawn_params or {}
         self.respawn_hold_radius_m = float(self.respawn_params.get("respawn_hold_radius_m", 3.0))
+        self.respawn_clear_ignore_non_controllable = bool(
+            self.respawn_params.get("respawn_clear_ignore_non_controllable", True)
+        )
+        self.respawn_release_max_wait_steps = max(
+            0,
+            int(self.respawn_params.get("respawn_release_max_wait_steps", 2)),
+        )
         self.respawn_spawn_z_m = float(self.respawn_params.get("spawn_z_m", 1.0))
         self.startup_below_min_z_preflight_steps = max(
             0,
@@ -272,6 +287,18 @@ class ChocolateEnv:
         self.verbose = bool(verbose)
         self._fallback_warn_counts: Dict[str, int] = {}
         self._fallback_warn_limit = 3
+        self._respawn_friction_debug_logged = False
+        self._respawn_rebuild_count = 0
+        self.respawn_friction_debug_every = max(
+            0, int(self.respawn_params.get("respawn_friction_debug_every", 0))
+        )
+        self.respawn_rebuild_flush_steps_before_create = max(
+            0, int(self.respawn_params.get("respawn_rebuild_flush_steps_before_create", 1))
+        )
+        self.respawn_rebuild_flush_steps_after_create = max(
+            0, int(self.respawn_params.get("respawn_rebuild_flush_steps_after_create", 1))
+        )
+        self._respawn_shared_snapshot_debug_logged = False
 
         # --- episode state (per "row" = per AgentKey) ---
         self.t = 0
@@ -311,6 +338,188 @@ class ChocolateEnv:
             suffix = " [further repeats suppressed]" if (count + 1) == self._fallback_warn_limit else ""
             print(f"[warn][fallback] {message}{suffix}")
         self._fallback_warn_counts[key] = count + 1
+
+    def _world_root_path(self, world_idx: int) -> str:
+        return f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
+
+    def _world_ground_material_path(self, world_idx: int) -> str:
+        return f"{self._world_root_path(world_idx)}/Materials/GroundSurface"
+
+    def _world_ground_friction_value(self, world_idx: int) -> Optional[float]:
+        world_prim = self.stage.GetPrimAtPath(self._world_root_path(world_idx))
+        if not world_prim.IsValid():
+            return None
+        try:
+            cd = world_prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            return None
+        mu = cd.get("ground_friction", None)
+        if mu is None:
+            return None
+        try:
+            return float(mu)
+        except Exception:
+            return None
+
+    def _collect_shared_friction_table_snapshot(
+        self,
+        *,
+        shared_root_path: str = "/World/VehicleShared",
+    ) -> Dict[str, Dict[str, Any]]:
+        try:
+            from pxr import PhysxSchema
+        except Exception as exc:
+            self._warn_fallback(
+                "respawn_friction_debug_import",
+                f"Failed importing PhysxSchema for friction debug ({exc}).",
+            )
+            return {}
+
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for name in ("SummerTireFrictionTable", "AllSeasonFrictionTable", "SlickTireFrictionTable"):
+            table_path = f"{shared_root_path}/{name}"
+            prim = self.stage.GetPrimAtPath(table_path)
+            if not prim.IsValid():
+                continue
+            try:
+                table = PhysxSchema.PhysxVehicleTireFrictionTable.Get(self.stage, table_path)
+            except Exception:
+                table = None
+            if not table:
+                continue
+
+            try:
+                rel = table.GetGroundMaterialsRel()
+                targets = [p.pathString for p in list(rel.GetTargets() or [])]
+            except Exception:
+                targets = []
+            try:
+                values = [float(v) for v in list(table.GetFrictionValuesAttr().Get() or [])]
+            except Exception:
+                values = []
+
+            snapshot[name] = {
+                "targets": targets,
+                "values": values,
+            }
+        return snapshot
+
+    def _log_shared_friction_table_snapshot(
+        self,
+        *,
+        tag: str,
+        material_path: Optional[str] = None,
+        shared_root_path: str = "/World/VehicleShared",
+    ) -> None:
+        snapshot = self._collect_shared_friction_table_snapshot(shared_root_path=shared_root_path)
+        if not snapshot:
+            print(f"[respawn][friction-debug] {tag} no tire friction tables found")
+            return
+
+        print(f"[respawn][friction-debug] {tag} tables={len(snapshot)} material={material_path}")
+        for name in sorted(snapshot.keys()):
+            info = snapshot[name]
+            targets = list(info.get("targets", []) or [])
+            values = list(info.get("values", []) or [])
+            if material_path and material_path in targets:
+                idx = int(targets.index(material_path))
+                val = values[idx] if idx < len(values) else None
+                print(
+                    f"[respawn][friction-debug] {tag} table={name} "
+                    f"material_idx={idx} material_value={val} targets={len(targets)} values={len(values)}"
+                )
+            else:
+                print(
+                    f"[respawn][friction-debug] {tag} table={name} "
+                    f"material_absent targets={len(targets)} values={len(values)}"
+                )
+
+    def _reapply_world_friction_patch(self, world_idx: int) -> bool:
+        try:
+            from gpudrive_chocolate.env.choco_world import patch_vehicle_shared_friction_tables
+        except Exception as exc:
+            self._warn_fallback(
+                "respawn_friction_patch_import",
+                f"Failed importing tire friction patch helper ({exc}).",
+            )
+            return False
+
+        material_path = self._world_ground_material_path(world_idx)
+        if not self.stage.GetPrimAtPath(material_path).IsValid():
+            self._warn_fallback(
+                "respawn_friction_patch_material_missing",
+                f"Ground material missing for friction re-patch world={int(world_idx)} path={material_path}.",
+            )
+            return False
+
+        mu_eff = self._world_ground_friction_value(world_idx)
+        if mu_eff is None or not np.isfinite(mu_eff):
+            self._warn_fallback(
+                "respawn_friction_patch_mu_missing",
+                f"Ground friction value missing/invalid for world={int(world_idx)}.",
+            )
+            return False
+
+        try:
+            patch_vehicle_shared_friction_tables(
+                self.stage,
+                shared_root_path="/World/VehicleShared",
+                material_path=material_path,
+                friction_value=float(mu_eff),
+            )
+            return True
+        except Exception as exc:
+            self._warn_fallback(
+                "respawn_friction_patch_apply",
+                f"Failed applying friction re-patch world={int(world_idx)} mu={float(mu_eff):.4f} ({exc}).",
+            )
+            return False
+
+    def _collect_prim_attr_snapshot(self, root_path: str) -> Dict[str, str]:
+        root = self.stage.GetPrimAtPath(str(root_path))
+        if not root.IsValid():
+            return {}
+        snap: Dict[str, str] = {}
+        for prim in Usd.PrimRange(root):
+            p = prim.GetPath().pathString
+            for attr in prim.GetAttributes():
+                if not attr.IsValid():
+                    continue
+                try:
+                    val = attr.Get(Usd.TimeCode.Default())
+                except Exception:
+                    continue
+                if val is None:
+                    continue
+                try:
+                    key = f"{p}.{attr.GetName()}"
+                except Exception:
+                    continue
+                try:
+                    snap[key] = repr(val)
+                except Exception:
+                    snap[key] = str(val)
+        return snap
+
+    def _log_snapshot_diff(self, *, tag: str, before: Dict[str, str], after: Dict[str, str]) -> None:
+        before_keys = set(before.keys())
+        after_keys = set(after.keys())
+        added = sorted(after_keys - before_keys)
+        removed = sorted(before_keys - after_keys)
+        changed = sorted(k for k in (before_keys & after_keys) if before.get(k) != after.get(k))
+        print(
+            f"[respawn][shared-debug] {tag} "
+            f"added={len(added)} removed={len(removed)} changed={len(changed)}"
+        )
+        preview_n = 8
+        if added:
+            print(f"[respawn][shared-debug] {tag} added_preview={added[:preview_n]}")
+        if removed:
+            print(f"[respawn][shared-debug] {tag} removed_preview={removed[:preview_n]}")
+        if changed:
+            print(f"[respawn][shared-debug] {tag} changed_preview={changed[:preview_n]}")
 
 
 
@@ -1212,7 +1421,27 @@ class ChocolateEnv:
         if pose_prim is not None and pose_prim.IsValid():
             rb_prim = _find_rigid_body_prim(pose_prim)
             if rb_prim is not None:
-                _zero_rb_vel(rb_prim)
+                try:
+                    M = UsdGeom.Xformable(rb_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                    p = M.ExtractTranslation()
+                    q = M.ExtractRotationQuat()
+                    q_im = q.GetImaginary()
+                    self._physx_teleport_rb(
+                        rb_prim,
+                        (float(p[0]), float(p[1]), float(p[2])),
+                        (
+                            float(q.GetReal()),
+                            float(q_im[0]),
+                            float(q_im[1]),
+                            float(q_im[2]),
+                        ),
+                    )
+                except Exception as exc:
+                    self._warn_fallback(
+                        "respawn_physx_teleport_failed",
+                        f"PhysX teleport failed during respawn pose set ({exc}); using USD pose + velocity-zero fallback.",
+                    )
+                    _zero_rb_vel(rb_prim)
         return True
 
     def _get_agent_world_xy_m(self, h) -> Optional[Tuple[float, float]]:
@@ -1268,6 +1497,8 @@ class ChocolateEnv:
         for state in states:
             other_agent_id = int(state.get("agent_id", -1))
             other_token = self._agent_token(world_idx, other_agent_id)
+            if self.respawn_clear_ignore_non_controllable and (not bool(state.get("controllable", False))):
+                continue
             if (
                 other_token == token
                 or other_token in self._pending_respawns
@@ -1305,6 +1536,7 @@ class ChocolateEnv:
             "key": key,
             "radius_m": float(self.respawn_hold_radius_m),
             "spawn_xy_m": spawn_xy,
+            "queued_step": int(self.t),
         }
         return True
 
@@ -1317,8 +1549,21 @@ class ChocolateEnv:
             if token in self._quarantined_tokens:
                 continue
             radius_m = float(pending.get("radius_m", self.respawn_hold_radius_m))
-            if not self._spawn_area_is_clear(token, radius_m):
+            is_clear = self._spawn_area_is_clear(token, radius_m)
+            queued_step = int(pending.get("queued_step", self.t))
+            waited_steps = max(0, int(self.t - queued_step))
+            force_release = (
+                self.respawn_release_max_wait_steps > 0
+                and waited_steps >= self.respawn_release_max_wait_steps
+            )
+            if not is_clear and not force_release:
                 continue
+            if force_release and not is_clear:
+                self._warn_fallback(
+                    "respawn_force_release",
+                    "Respawn release timeout reached; forcing release despite blocked spawn area. "
+                    f"world={token[0]} agent={token[1]} waited_steps={waited_steps}",
+                )
             world_idx, agent_id = token
             h = self._get_agent_handle(world_idx, agent_id)
             if h is None:
@@ -1511,11 +1756,26 @@ class ChocolateEnv:
             return False
 
         world_root = f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
+        material_path = self._world_ground_material_path(world_idx)
+        self._respawn_rebuild_count += 1
+        should_log_snapshot = (not self._respawn_friction_debug_logged) or (
+            self.respawn_friction_debug_every > 0
+            and (self._respawn_rebuild_count % self.respawn_friction_debug_every) == 0
+        )
+        if should_log_snapshot:
+            self._log_shared_friction_table_snapshot(
+                tag=f"before_rebuild_respawn_{self._respawn_rebuild_count}",
+                material_path=material_path,
+            )
         bounds = LocalBounds(
             width_m=float(self.bounds_size_m),
             length_m=float(self.bounds_size_m),
             origin_xy=(0.0, 0.0),
         )
+        shared_before: Dict[str, str] = {}
+        if not self._respawn_shared_snapshot_debug_logged:
+            shared_before = self._collect_prim_attr_snapshot("/World/VehicleShared")
+
         builder = WaymoJsonMiniWorldBuilder(
             stage=self.stage,
             world_root=world_root,
@@ -1526,6 +1786,8 @@ class ChocolateEnv:
         goal_path = f"{world_root}/Goals/Goal_{kept_idx:04d}_id{int(agent_id)}"
         self.stage.RemovePrim(goal_path)
         self.stage.RemovePrim(agent_path)
+        for _ in range(self.respawn_rebuild_flush_steps_before_create):
+            self.sim.step(render=False)
 
         builder.respawn_agent_with_goal(
             kept_idx=int(kept_idx),
@@ -1557,6 +1819,31 @@ class ChocolateEnv:
                 self.respawn_params.get("vehicle_trigger_script_enable", True)
             ),
         )
+        for _ in range(self.respawn_rebuild_flush_steps_after_create):
+            self.sim.step(render=False)
+
+        if not self._reapply_world_friction_patch(int(world_idx)):
+            self._warn_fallback(
+                "respawn_friction_patch_missing",
+                f"Rebuild respawn finished without confirmed friction re-patch world={int(world_idx)} agent={int(agent_id)}.",
+            )
+
+        if not self._respawn_shared_snapshot_debug_logged:
+            shared_after = self._collect_prim_attr_snapshot("/World/VehicleShared")
+            self._log_snapshot_diff(
+                tag="vehicle_shared_first_rebuild_respawn",
+                before=shared_before,
+                after=shared_after,
+            )
+            self._respawn_shared_snapshot_debug_logged = True
+
+        if should_log_snapshot:
+            self._log_shared_friction_table_snapshot(
+                tag=f"after_rebuild_respawn_{self._respawn_rebuild_count}",
+                material_path=material_path,
+            )
+            if not self._respawn_friction_debug_logged:
+                self._respawn_friction_debug_logged = True
 
         return True
 
@@ -1565,16 +1852,33 @@ class ChocolateEnv:
             return
 
         idx = np.where(done_mask)[0]
+        done_tokens = [self._agent_token_from_key(self._keys[i]) for i in idx]
+        key_by_token = {self._agent_token_from_key(self._keys[i]): self._keys[i] for i in idx}
 
         if self.respawn_on_reset:
             used_builder_respawn = False
             builder_respawn_keys: List[object] = []
-            for i in idx:
-                k = self._keys[i]
-                if not self._queue_respawn(k):
-                    if self._respawn_agent_from_metadata(k.world_idx, k.agent_id):
+            for token in done_tokens:
+                k = key_by_token.get(token)
+                if k is None:
+                    continue
+                world_idx, agent_id = token
+                if self.respawn_mode == "rebuild":
+                    if self._respawn_agent_from_metadata(world_idx, agent_id):
                         builder_respawn_keys.append(k)
                         used_builder_respawn = True
+                        self._pending_respawns.pop(token, None)
+                    else:
+                        if self._queue_respawn(k):
+                            continue
+                        if self._respawn_agent_from_metadata(world_idx, agent_id):
+                            builder_respawn_keys.append(k)
+                            used_builder_respawn = True
+                else:
+                    if not self._queue_respawn(k):
+                        if self._respawn_agent_from_metadata(world_idx, agent_id):
+                            builder_respawn_keys.append(k)
+                            used_builder_respawn = True
             if used_builder_respawn:
                 self.ctrl.refresh()
                 for k in builder_respawn_keys:
@@ -1585,21 +1889,34 @@ class ChocolateEnv:
                     if h is not None:
                         self._cache_spawn_pose(k, h)
             self._release_pending_respawns()
-            self._done[idx] = False
-            self._success_latched[idx] = False
             self.sim.step(render=False)
             obs, mask, keys2 = self._build_obs()
             self._keys = keys2
             dist_n = obs[:, 4].astype(np.float32)
             dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
             self._mask = mask.copy()
-            self._prev_dist_m[idx] = dist_m[idx]
-            for i in idx:
-                token = self._agent_token_from_key(self._keys[i])
-                h = self.ctrl.get(self._keys[i].world_idx, self._keys[i].agent_id)
+            if self._done.shape[0] != len(self._keys):
+                self._done = np.zeros((len(self._keys),), dtype=bool)
+                self._success_latched = np.zeros((len(self._keys),), dtype=bool)
+                self._prev_dist_m = dist_m.copy()
+            token_to_new_idx = {
+                self._agent_token_from_key(k): i for i, k in enumerate(self._keys)
+            }
+            reset_idx = [token_to_new_idx[tok] for tok in done_tokens if tok in token_to_new_idx]
+            if reset_idx:
+                reset_idx_arr = np.asarray(reset_idx, dtype=np.int64)
+                self._done[reset_idx_arr] = False
+                self._success_latched[reset_idx_arr] = False
+                self._prev_dist_m[reset_idx_arr] = dist_m[reset_idx_arr]
+            for tok in done_tokens:
+                j = token_to_new_idx.get(tok, None)
+                if j is None:
+                    continue
+                key = self._keys[j]
+                h = self.ctrl.get(key.world_idx, key.agent_id)
                 xy_m = self._get_agent_world_xy_m(h)
                 if xy_m is not None:
-                    self._prev_world_xy_m[token] = xy_m
+                    self._prev_world_xy_m[tok] = xy_m
             return
 
         # make sure spawn cache exists
@@ -1656,7 +1973,6 @@ class ChocolateEnv:
         # Refresh controller registry
         self.ctrl.refresh()
         keys = self.ctrl.keys()
-        print('after ctrl refresh')
         # Warmup step helps IsaacSim settle controller prims (you already do similar). :contentReference[oaicite:8]{index=8}
         for _ in range(self.warmup_on_reset_steps):
             self.sim.step(render=False)
@@ -1671,7 +1987,6 @@ class ChocolateEnv:
 
         # cache start poses once
         self._cache_start_pose_for_keys(keys)
-        print('then it must be you')
         # init per-agent episode state
         self._done = np.zeros((N,), dtype=bool)
         self._success_latched = np.zeros((N,), dtype=bool)

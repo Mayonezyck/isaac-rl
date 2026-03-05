@@ -150,6 +150,7 @@ control:
 env:
   clear_on_done: true
   respawn_on_reset: true
+  respawn_mode: "rebuild"
   respawn_hold_radius_m: 3.0
   render: true
   collision_penalty: 0.0

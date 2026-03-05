@@ -146,6 +146,7 @@ env:
   max_steps: 400
   clear_on_done: true
   respawn_on_reset: true
+  respawn_mode: "rebuild"
   respawn_hold_radius_m: 4.0
   startup_below_min_z_preflight_steps: 4
   render: false

@@ -1,0 +1,52 @@
+choco_config_path: "configs/curriculum_design/navigation_geom_v1/curriculum_stage2_lane_safety_geom_capture_preview.yaml"
+
+device: "cuda:1"
+
+reward_type: "weighted_combination"
+collision_weight: -0.05
+goal_achieved_weight: 0.0
+off_road_weight: -0.1
+log_distance_weight: 0.0
+policy_type: "late_fusion"
+align_obs_with_resume: true
+
+late_fusion:
+  ego_dim: 11
+  road_point_dim: 5
+  vehicle_dim: 6
+  ego_layers: [64, 64]
+  road_layers: [96, 96]
+  vehicle_layers: [96, 96]
+  shared_layers: [128, 64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: "relu"
+  dropout: 0.0
+  pool: "max"
+
+seed: 42
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+vf_coef: 0.5
+n_steps: 128
+num_minibatches: 8
+verbose: 1
+total_timesteps: 100_000_000
+ent_coef: 0.00005
+lr: 0.00016750675066584306
+n_epochs: 5
+
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: "runs/capture_stage2_lane_safety_geom_capture_preview"
+render_during_training: true
+record_training_video: true
+video_fps: 30
+video_name_prefix: "ppo_stage2_lane_safety_geom_capture_preview"
+video_keep_frames: true
+
+save_freq: 512
+save_dir: "runs/checkpoints_stage2_lane_safety_geom_capture_preview"
+save_prefix: "ppo_stage2_lane_safety_geom_capture_preview"
+resume_from: "runs/checkpoints_stage2_transition_lane_safety_geom_from_stage1_3m/ppo_stage2_transition_lane_safety_geom_from_stage1_3m_566848_steps.zip"

@@ -125,6 +125,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             obs_viz_agent_rank=int(cfg_env.get("obs_viz_agent_rank", 0)),
             render=bool(cfg_env.get("render", False)),
             respawn_on_reset=bool(cfg_env.get("respawn_on_reset", False)),
+            respawn_mode=str(cfg_env.get("respawn_mode", "rebuild")),
             respawn_params={
                 "spawn_z_m": float(agents_cfg.get("spawn_z_m", 1.0)),
                 "parked_ground_z_m": float(agents_cfg.get("parked_ground_z_m", 0.0)),
@@ -151,6 +152,21 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     agents_cfg.get("vehicle_trigger_script_enable", True)
                 ),
                 "respawn_hold_radius_m": float(cfg_env.get("respawn_hold_radius_m", 3.0)),
+                "respawn_clear_ignore_non_controllable": bool(
+                    cfg_env.get("respawn_clear_ignore_non_controllable", True)
+                ),
+                "respawn_release_max_wait_steps": int(
+                    cfg_env.get("respawn_release_max_wait_steps", 2)
+                ),
+                "respawn_friction_debug_every": int(
+                    cfg_env.get("respawn_friction_debug_every", 0)
+                ),
+                "respawn_rebuild_flush_steps_before_create": int(
+                    cfg_env.get("respawn_rebuild_flush_steps_before_create", 1)
+                ),
+                "respawn_rebuild_flush_steps_after_create": int(
+                    cfg_env.get("respawn_rebuild_flush_steps_after_create", 1)
+                ),
                 "startup_below_min_z_preflight_steps": int(
                     cfg_env.get("startup_below_min_z_preflight_steps", 0)
                 ),

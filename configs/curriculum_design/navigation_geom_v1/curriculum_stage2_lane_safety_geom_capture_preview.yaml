@@ -1,50 +1,32 @@
 app:
-  headless: false   # viewport capture needs GUI
-  renderer: "RayTracedLighting"  # or "PathTracing" / "Hydra" depending on your setup
+  headless: true
+  renderer: "RayTracedLighting"
+  active_gpu: 1
+  physics_gpu: 1
 
 io:
   scene_json_dir: "/home/yz8733/Github/isaac-rl/data/processed/waymo_scenes_json"
   out_dir: "/home/yz8733/Github/isaac-rl/_captures_300"
-  take_first_k_scenes: 10
+  take_first_k_scenes: 120
   image_prefix: "frame_"
   image_ext: "png"
 
 world:
   root_container: "/World/MiniWorlds"
-  world_count: 4
-  grid_cols: 2            # W=2
-  rows: 1                 # L=5 (informational; derived from world_count/grid_cols)
+  world_count: 2
+  grid_cols: 2
+  rows: 1
   world_size_m: [200.0, 200.0]
   padding_m: 20.0
   base_z_m: 0.0
   bounds_size_m: 200.0
   origin_mode: "center"
-  max_agents_per_world: 30
+  max_agents_per_world: 8
   assignments:
-    - scene_json: "scene_000004.json"
-      friction:
-        road_type: "AC"
-        precip_type: "rain"
-        precip_intensity_mmph: 8.0
-        water_film_mm: 0.400
-    - scene_json: "scene_000005.json"
-      friction:
-        road_type: "AC"
-        precip_type: "rain"
-        precip_intensity_mmph: 12.0
-        water_film_mm: 0.600
-    - scene_json: "scene_000006.json"
-      friction:
-        road_type: "SMA"
-        precip_type: "rain"
-        precip_intensity_mmph: 8.0
-        water_film_mm: 0.400
-    - scene_json: "scene_000007.json"
-      friction:
-        road_type: "OGFC"
-        precip_type: "rain"
-        precip_intensity_mmph: 8.0
-        water_film_mm: 0.400
+    - scene_json: "scene_000098.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000085.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
 
 road:
   jump_break_m: 3.0
@@ -64,7 +46,7 @@ road:
   trigger_script_enable: true
 
 agents:
-  spawn_z_m: .7
+  spawn_z_m: 0.6
   goal_radius_m: 3.0
   parked_if_start_in_goal: true
   skip_if_start_in_goal: true
@@ -88,6 +70,10 @@ physics:
   warmup_frames: 30
   capture_frames: 6000
   physics_substeps_per_frame: 1
+  enable_gpu_dynamics: true
+  broadphase_type: "GPU"
+  enable_ccd: false
+  report_gpu_dynamics_once: true
 
 ground:
   enable: true
@@ -95,8 +81,8 @@ ground:
   size_m: [200.0, 200.0]
   thickness_m: 0.2
   z_m: 0.0
-  invisible: false
-  friction_values: [0.50]  # legacy fallback when friction_pipeline is disabled
+  invisible: true
+  friction_values: [0.50]
   friction_pipeline:
     enable: true
     defaults:
@@ -106,7 +92,7 @@ ground:
       s_ref_dynamic: 0.8
       mu_eff_mode: "static"
   label:
-    enable: true
+    enable: false
     format: "{value:.2f}"
     corner: "top_right"
     margin_m: 8.0
@@ -115,18 +101,20 @@ ground:
 
 light:
   enable: true
-  path: "/World/__DomeLight"
-  intensity: 3000.0
+  type: "distant"
+  path: "/World/__DistantLight"
+  intensity: 50000.0
   exposure: 0.0
-  texture_file: null
-  rotation_deg_y: 0.0
+  angle: 0.53
+  color: [1.0, 1.0, 1.0]
+  rotation_deg_xyz: [60.0, 0.0, 45.0]
 
 camera:
   prim_path: "/World/CaptureCam"
   mode: pose
   pose:
-    pos_units: [26.428,-1.383,319.049]
-    rot_axis: [0.021,-0.027,1]
+    pos_units: [26.428, -1.383, 319.049]
+    rot_axis: [0.021, -0.027, 1]
     rot_deg: 269.109
   print_every_n: 10
   height_m: 120.0
@@ -137,53 +125,80 @@ camera:
 
 control:
   enable: true
-  action_repeat: 10          # apply new action every 4 physics steps
-  thr_clip: [0.0, 0.6]
+  action_repeat: 8
+  thr_clip: [0.0, 0.55]
   steer_clip: [-1.0, 1.0]
   k_steer: 2.0
   k_thr: 0.8
-  goal_success_dist_norm: 0.01   # normalized dist threshold (0.01 * diag)
+  goal_success_dist_norm: 0.01
   speed_scale_mps: 10.0
 
 env:
+  max_steps: 450
   clear_on_done: true
   respawn_on_reset: true
   respawn_mode: "rebuild"
-  respawn_hold_radius_m: 3.0
+  respawn_hold_radius_m: 4.0
+  respawn_clear_ignore_non_controllable: true
+  respawn_release_max_wait_steps: 2
+  respawn_friction_debug_every: 50
+  respawn_rebuild_flush_steps_before_create: 1
+  respawn_rebuild_flush_steps_after_create: 1
+  startup_below_min_z_preflight_steps: 4
   render: true
-  collision_penalty: -0.1 #this changed on 2/14/12/16
+  goal_success_dist_m: 3.0
+  reward_scale: 0.6
+  success_bonus: 10.0
+  action_l2_penalty: 0.0
+  collision_penalty: -0.2
   min_vehicle_z_m: -0.2
-  collision_penalty_types: [5,6,7,8,9,10,11,12,13]
-  collision_debug: true
-  road_contact_done_types: [14,15,16]
-  road_contact_done_penalty: -10.0
-  lane_center_reward_enable: true
-  lane_center_reward_type: [1,2]
-  lane_center_reward_per_step: 0.05 # first trial reward 0.05 (2/12/22/27) | second trial 0.1 (2/13/18/29)
-  survival_reward_per_step: 0.01
+  collision_penalty_types: [7, 8, 11, 12, 13]
+  collision_debug: false
+  road_contact_done_types: [14, 15, 16]
+  road_contact_done_penalty: -4.0
+  lane_center_reward_enable: false
+  lane_center_reward_type: [1, 2]
+  lane_center_reward_per_step: 0.0
+  geom_lane_reward_enable: true
+  geom_lane_reward_per_step: 0.12
+  geom_lane_tolerance_m: 1.5
+  geom_lane_heading_weight: 0.7
+  geom_lane_min_alignment: 0.45
+  geom_route_progress_weight: 0.40
+  geom_offroad_metrics_enable: true
+  geom_offroad_lateral_threshold_m: 2.8
+  geom_offroad_distance_threshold_m: 5.0
+  geom_lane_types: [1, 2]
+  geom_road_edge_types: [15, 16]
+  survival_reward_per_step: 0.0
   idle_penalty_enable: true
-  idle_penalty_per_step: 0.05
+  idle_penalty_per_step: 0.03
   idle_speed_threshold_mps: 0.5
   vehicle_contact_done: true
-  vehicle_contact_done_penalty: -20.0
+  vehicle_contact_done_penalty: -4.0
   vehicle_contact_done_mark_both: true
   road_contact_debug: false
   road_contact_debug_every: 100
   road_points_enable: true
-  road_points_k: 200
-  road_points_mode: "road-running"   # "knn" or "road-running"
-  road_points_radius_m: 20.0
+  road_points_k: 160
+  road_points_mode: "road-running"
+  road_points_include_dirs: true
+  road_points_radius_m: 40.0
   road_points_type_norm: 20.0
   vehicle_obs_enable: true
-  vehicle_obs_k: 63
+  vehicle_obs_k: 32
   ttc_penalty_enable: true
-  ttc_penalty_alpha: 1.0
-  ttc_penalty_max: 1.0
-  ttc_penalty_min_ttc: 0.2
+  ttc_penalty_alpha: 0.15
+  ttc_penalty_max: 0.50
+  ttc_penalty_min_ttc: 0.5
+  ttc_use_vehicle_size: true
+  ttc_vehicle_radius_scale: 0.75
+  ttc_vehicle_radius_margin_m: 0.20
   obs_vis_enable: false
   obs_vis_every_steps: 2000
   obs_vis_out_dir: "runs/obs_vis"
   obs_vis_agent_index: 0
-  obs_viz_enable: true #THIS ONE TURNS ON the on map visualization
+  obs_viz_enable: false
   obs_viz_world_idx: 0
   obs_viz_agent_rank: 0
+  verbose: false

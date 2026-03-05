@@ -114,6 +114,7 @@ control:
 env:
   clear_on_done: true
   respawn_on_reset: true
+  respawn_mode: "rebuild"
   render: true
   collision_penalty: -1.0
   min_vehicle_z_m: -0.2
