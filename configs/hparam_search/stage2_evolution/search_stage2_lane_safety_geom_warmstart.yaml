@@ -173,6 +173,26 @@ space:
     path: "env.ttc_penalty_min_ttc"
     type: "choice"
     values: [0.4, 0.5, 0.7]
+  - name: "ttc_delta_penalty_enable"
+    target: "curriculum"
+    path: "env.ttc_delta_penalty_enable"
+    type: "choice"
+    values: [false, true]
+  - name: "ttc_delta_penalty_alpha"
+    target: "curriculum"
+    path: "env.ttc_delta_penalty_alpha"
+    type: "choice"
+    values: [0.0, 0.05, 0.10, 0.20]
+  - name: "ttc_delta_penalty_max"
+    target: "curriculum"
+    path: "env.ttc_delta_penalty_max"
+    type: "choice"
+    values: [0.25, 0.5, 0.75]
+  - name: "ttc_delta_penalty_normalize_by_dt"
+    target: "curriculum"
+    path: "env.ttc_delta_penalty_normalize_by_dt"
+    type: "choice"
+    values: [false, true]
   - name: "max_steps"
     target: "curriculum"
     path: "env.max_steps"

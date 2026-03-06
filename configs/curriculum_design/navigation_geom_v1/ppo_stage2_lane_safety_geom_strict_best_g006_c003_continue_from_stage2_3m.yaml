@@ -1,0 +1,56 @@
+choco_config_path: /home/yz8733/Github/isaac-rl/runs/hparam_search/stage2_lane_safety_geom_strict_deep_evolution/generation_006/candidate_003/curriculum.yaml
+device: cuda:1
+reward_type: weighted_combination
+collision_weight: -0.1
+goal_achieved_weight: 0.0
+off_road_weight: -0.1
+log_distance_weight: 0.0
+policy_type: late_fusion
+align_obs_with_resume: true
+late_fusion:
+  ego_dim: 11
+  road_point_dim: 5
+  vehicle_dim: 6
+  ego_layers:
+  - 64
+  - 64
+  road_layers:
+  - 96
+  - 96
+  vehicle_layers:
+  - 96
+  - 96
+  shared_layers:
+  - 128
+  - 64
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: relu
+  dropout: 0.0
+  pool: max
+seed: 42
+gamma: 0.99
+gae_lambda: 0.98
+clip_range: 0.15
+vf_coef: 0.5
+n_steps: 128
+num_minibatches: 16
+verbose: 1
+total_timesteps: 3000000
+ent_coef: 3.0e-05
+lr: 0.00020924001030314093
+n_epochs: 5
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: runs/capture_stage2_lane_safety_geom_strict_from_transition_stage1_3m_566848
+render_during_training: false
+record_training_video: false
+video_fps: 30
+video_name_prefix: ppo_stage2_lane_safety_geom_strict_best_g006_c003_continue_from_stage2_3m
+video_keep_frames: false
+save_freq: 2000
+save_dir: runs/checkpoints_stage2_strict_best_g006_c003_continue_from_stage2_3m
+save_prefix: ppo_stage2_strict_best_g006_c003_continue_from_stage2_3m
+resume_from: /home/yz8733/Github/isaac-rl/runs/checkpoints_stage2_strict_best_g002_c006_from_stage1_3m/ppo_stage2_strict_best_g002_c006_from_stage1_3m_2992000_steps.zip
+runs_root: runs
+run_id: stage2_strict_best_g006_c003_continue_from_stage2_3m

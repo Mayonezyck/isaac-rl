@@ -196,6 +196,10 @@ env:
   ttc_penalty_alpha: 0.10
   ttc_penalty_max: 0.40
   ttc_penalty_min_ttc: 0.4
+  ttc_delta_penalty_enable: false
+  ttc_delta_penalty_alpha: 0.0
+  ttc_delta_penalty_max: 0.5
+  ttc_delta_penalty_normalize_by_dt: false
   ttc_use_vehicle_size: true
   ttc_vehicle_radius_scale: 0.75
   ttc_vehicle_radius_margin_m: 0.20

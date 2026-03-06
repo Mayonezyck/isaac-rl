@@ -204,6 +204,10 @@ env:
   ttc_penalty_alpha: 0.20
   ttc_penalty_max: 0.60
   ttc_penalty_min_ttc: 0.5
+  ttc_delta_penalty_enable: false
+  ttc_delta_penalty_alpha: 0.0
+  ttc_delta_penalty_max: 0.5
+  ttc_delta_penalty_normalize_by_dt: false
   obs_vis_enable: false
   obs_vis_every_steps: 2000
   obs_vis_out_dir: "runs/obs_vis"

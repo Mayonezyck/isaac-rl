@@ -105,16 +105,65 @@ def _pick_vehicle_size_prim(stage: Usd.Stage, start_prim: Usd.Prim) -> Optional[
         child = stage.GetPrimAtPath(f"{start_prim.GetPath()}/Vehicle")
         if child.IsValid():
             return child
-    except Exception as exc:
-        _warn_fallback_once(
-            "obs_vehicle_size_child_query_error",
-            f"Failed to query '/Vehicle' child prim for size ({exc}); using start prim fallback.",
-        )
-    _warn_fallback_once(
-        "obs_vehicle_size_use_start_prim",
-        "Vehicle '/Vehicle' child prim missing; using start prim for size fallback.",
-    )
+    except Exception:
+        pass
     return start_prim
+
+
+def _get_vehicle_size_metadata_m(stage: Usd.Stage, start_prim: Usd.Prim) -> Tuple[float, float]:
+    if start_prim is None or not start_prim.IsValid():
+        return 0.0, 0.0
+
+    prims: List[Usd.Prim] = [start_prim]
+    parent = start_prim.GetParent()
+    if parent is not None and parent.IsValid():
+        prims.append(parent)
+    # Common hierarchy in this pipeline: .../Vehicle_Parent/Vehicle/Vehicle
+    # metadata is attached on .../Vehicle_Parent/Vehicle.
+    for p in list(prims):
+        try:
+            child = stage.GetPrimAtPath(f"{p.GetPath()}/Vehicle")
+            if child.IsValid():
+                prims.append(child)
+        except Exception:
+            pass
+
+    seen = set()
+    for prim in prims:
+        try:
+            pstr = prim.GetPath().pathString
+        except Exception:
+            continue
+        if pstr in seen:
+            continue
+        seen.add(pstr)
+        try:
+            cd = prim.GetCustomData()
+        except Exception:
+            cd = {}
+        if not isinstance(cd, dict):
+            continue
+
+        try:
+            sz = cd.get("vehicle_size_m", None)
+            if isinstance(sz, (list, tuple)) and len(sz) >= 2:
+                lx = float(sz[0])
+                wy = float(sz[1])
+                if lx > 0.0 and wy > 0.0:
+                    return lx, wy
+        except Exception:
+            pass
+        try:
+            lm = cd.get("vehicle_length_m", cd.get("length_m", None))
+            wm = cd.get("vehicle_width_m", cd.get("width_m", None))
+            if lm is not None and wm is not None:
+                lx = float(lm)
+                wy = float(wm)
+                if lx > 0.0 and wy > 0.0:
+                    return lx, wy
+        except Exception:
+            pass
+    return 0.0, 0.0
 
 def _find_rigid_body_prim(start_prim: Usd.Prim) -> Optional[Usd.Prim]:
     """
@@ -399,12 +448,15 @@ class ChocolateObsBuilder:
 
                 length_m, width_m = 0.0, 0.0
                 try:
-                    size_prim = _pick_vehicle_size_prim(stage, start_prim) if start_prim is not None else None
-                    length_m, width_m = _get_vehicle_size_local(size_prim, bbox_cache)
+                    if start_prim is not None:
+                        length_m, width_m = _get_vehicle_size_metadata_m(stage, start_prim)
+                    if length_m <= 0.0 or width_m <= 0.0:
+                        size_prim = _pick_vehicle_size_prim(stage, start_prim) if start_prim is not None else None
+                        length_m, width_m = _get_vehicle_size_local(size_prim, bbox_cache)
+                        length_m *= float(mpu)
+                        width_m *= float(mpu)
                 except Exception:
                     length_m, width_m = 0.0, 0.0
-                length_m *= float(mpu)
-                width_m *= float(mpu)
 
                 if length_m <= 0.0:
                     length_m = 4.0

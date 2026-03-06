@@ -613,6 +613,67 @@ class WaymoJsonMiniWorldBuilder:
 
         return vehicle_data.rootVehiclePath
 
+    def _infer_vehicle_size_m(
+        self,
+        vehicle_root_path: str,
+        *,
+        default_size_m: Tuple[float, float, float] = (4.0, 2.0, 1.0),
+    ) -> Tuple[float, float, float]:
+        stage = self.stage
+        mpu = _meters_per_unit(stage)
+        tc = Usd.TimeCode.Default()
+        bbox_cache = UsdGeom.BBoxCache(tc, [UsdGeom.Tokens.default_], useExtentsHint=True)
+
+        candidates = [
+            f"{vehicle_root_path}/Vehicle",
+            vehicle_root_path,
+        ]
+        best = None
+        best_score = -1.0
+        for path in candidates:
+            prim = stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                continue
+            try:
+                box = bbox_cache.ComputeLocalBound(prim)
+                rng = box.GetRange()
+                size = rng.GetSize()
+                lx = abs(float(size[0])) * mpu
+                wy = abs(float(size[1])) * mpu
+                hz = abs(float(size[2])) * mpu
+                if lx <= 1e-3 or wy <= 1e-3:
+                    continue
+                score = lx * wy * max(hz, 1e-3)
+                if score > best_score:
+                    best = (lx, wy, hz)
+                    best_score = score
+            except Exception:
+                continue
+
+        if best is None:
+            return (
+                float(default_size_m[0]),
+                float(default_size_m[1]),
+                float(default_size_m[2]),
+            )
+        return best
+
+    def _set_vehicle_size_metadata(
+        self,
+        vehicle_prim: Usd.Prim,
+        *,
+        size_m: Tuple[float, float, float],
+    ) -> None:
+        if vehicle_prim is None or not vehicle_prim.IsValid():
+            return
+        lx = float(size_m[0])
+        wy = float(size_m[1])
+        hz = float(size_m[2])
+        vehicle_prim.SetCustomDataByKey("vehicle_size_m", (lx, wy, hz))
+        vehicle_prim.SetCustomDataByKey("vehicle_length_m", lx)
+        vehicle_prim.SetCustomDataByKey("vehicle_width_m", wy)
+        vehicle_prim.SetCustomDataByKey("vehicle_height_m", hz)
+
     def _spawn_parked_car_visual(
         self,
         path: str,
@@ -953,6 +1014,14 @@ class WaymoJsonMiniWorldBuilder:
                 prim_outer.SetCustomDataByKey("track_idx", int(_safe_int(a.get("track_idx", kept), kept)))
                 prim_outer.SetCustomDataByKey("start_in_goal", True)
                 prim_outer.SetCustomDataByKey("controllable", False)
+                self._set_vehicle_size_metadata(
+                    prim_outer,
+                    size_m=(
+                        float(parked_chassis_size_m[0]),
+                        float(parked_chassis_size_m[1]),
+                        float(parked_chassis_size_m[2]),
+                    ),
+                )
 
                 kept += 1
                 continue
@@ -974,6 +1043,10 @@ class WaymoJsonMiniWorldBuilder:
             prim_outer.SetCustomDataByKey("track_idx", int(_safe_int(a.get("track_idx", kept), kept)))
             prim_outer.SetCustomDataByKey("start_in_goal", False)
             prim_outer.SetCustomDataByKey("controllable", True)
+            self._set_vehicle_size_metadata(
+                prim_outer,
+                size_m=self._infer_vehicle_size_m(veh_outer),
+            )
             prim_outer.SetCustomDataByKey("road_contact_types", Vt.IntArray())
             prim_outer.SetCustomDataByKey("vehicle_contact_ids", Vt.IntArray())
             prim_outer.SetCustomDataByKey("vehicle_collided", False)
@@ -1083,6 +1156,14 @@ class WaymoJsonMiniWorldBuilder:
             prim_outer.SetCustomDataByKey("agent_id", int(agent_id))
             prim_outer.SetCustomDataByKey("start_in_goal", True)
             prim_outer.SetCustomDataByKey("controllable", False)
+            self._set_vehicle_size_metadata(
+                prim_outer,
+                size_m=(
+                    float(parked_chassis_size_m[0]),
+                    float(parked_chassis_size_m[1]),
+                    float(parked_chassis_size_m[2]),
+                ),
+            )
             return
 
         veh_parent = f"{agent_path}/Vehicle_Parent"
@@ -1098,6 +1179,10 @@ class WaymoJsonMiniWorldBuilder:
         prim_outer.SetCustomDataByKey("agent_id", int(agent_id))
         prim_outer.SetCustomDataByKey("start_in_goal", False)
         prim_outer.SetCustomDataByKey("controllable", True)
+        self._set_vehicle_size_metadata(
+            prim_outer,
+            size_m=self._infer_vehicle_size_m(veh_outer),
+        )
         prim_outer.SetCustomDataByKey("road_contact_types", Vt.IntArray())
         prim_outer.SetCustomDataByKey("vehicle_contact_ids", Vt.IntArray())
         prim_outer.SetCustomDataByKey("vehicle_collided", False)

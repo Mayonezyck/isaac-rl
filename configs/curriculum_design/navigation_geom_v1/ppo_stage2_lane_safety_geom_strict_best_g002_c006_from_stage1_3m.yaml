@@ -36,7 +36,7 @@ vf_coef: 0.5
 n_steps: 64
 num_minibatches: 4
 verbose: 1
-total_timesteps: 262144
+total_timesteps: 3000000
 ent_coef: 0.0001
 lr: 0.00018311540894012067
 n_epochs: 5
@@ -48,9 +48,9 @@ record_training_video: false
 video_fps: 30
 video_name_prefix: ppo_stage2_lane_safety_geom_strict_from_transition_stage1_3m_566848
 video_keep_frames: false
-save_freq: 262145
+save_freq: 2000
 save_dir: runs/checkpoints_stage2_strict_best_g002_c006_from_stage1_3m
 save_prefix: ppo_stage2_strict_best_g002_c006_from_stage1_3m
-resume_from: /home/yz8733/Github/isaac-rl/runs/checkpoints_stage1_goal_route_geom_best/ppo_stage1_goal_route_geom_best_cont0_3000000_steps.zip
+resume_from: /home/yz8733/Github/isaac-rl/runs/checkpoints_stage2_lane_safety_geom_strict_from_transition_stage1_3m_566848/ppo_stage2_lane_safety_geom_strict_from_transition_stage1_3m_566848_425136_steps.zip
 runs_root: runs
 run_id: stage2_strict_best_g002_c006_from_stage1_3m

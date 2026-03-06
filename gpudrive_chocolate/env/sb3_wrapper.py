@@ -68,6 +68,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             action_repeat=int(ctx["action_repeat"]),
             max_steps=int(cfg_env.get("max_steps", 300)),
             clear_on_done=bool(cfg_env.get("clear_on_done", False)),
+            hard_remove_done_agents=bool(cfg_env.get("hard_remove_done_agents", False)),
             goal_success_dist_m=float(cfg_env.get("goal_success_dist_m", 2.0)),
             reward_scale=float(cfg_env.get("reward_scale", 1.0)),
             success_bonus=float(cfg_env.get("success_bonus", 10.0)),
@@ -117,6 +118,12 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             ttc_penalty_alpha=float(cfg_env.get("ttc_penalty_alpha", 1.0)),
             ttc_penalty_max=float(cfg_env.get("ttc_penalty_max", 1.0)),
             ttc_penalty_min_ttc=float(cfg_env.get("ttc_penalty_min_ttc", 0.2)),
+            ttc_delta_penalty_enable=bool(cfg_env.get("ttc_delta_penalty_enable", False)),
+            ttc_delta_penalty_alpha=float(cfg_env.get("ttc_delta_penalty_alpha", 0.0)),
+            ttc_delta_penalty_max=float(cfg_env.get("ttc_delta_penalty_max", 0.5)),
+            ttc_delta_penalty_normalize_by_dt=bool(
+                cfg_env.get("ttc_delta_penalty_normalize_by_dt", False)
+            ),
             ttc_use_vehicle_size=bool(cfg_env.get("ttc_use_vehicle_size", True)),
             ttc_vehicle_radius_scale=float(cfg_env.get("ttc_vehicle_radius_scale", 0.75)),
             ttc_vehicle_radius_margin_m=float(cfg_env.get("ttc_vehicle_radius_margin_m", 0.20)),
@@ -184,6 +191,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.log_distance_weight = float(log_distance_weight)
         self.auto_reset_done = bool(cfg_env.get("auto_reset_done", True))
         self.auto_reset_timeout = bool(cfg_env.get("auto_reset_timeout", True))
+        self.hard_remove_done_agents = bool(cfg_env.get("hard_remove_done_agents", False))
+        self._dynamic_key_mapping = bool(self.hard_remove_done_agents)
         self._spawned_episode_total = 0
         self._pending_initial_spawn_count = 0
         self.verbose = bool(cfg_env.get("verbose", False))
@@ -323,6 +332,27 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     continue
                 self.flat_slot_keys.append(k)
                 self.flat_key_indices.append(self._key_index[k])
+        self.num_envs = int(len(self.flat_key_indices))
+
+    @staticmethod
+    def _keys_signature(keys: Sequence[object]) -> tuple:
+        return tuple((int(k.world_idx), int(k.agent_id)) for k in keys)
+
+    def _sync_slot_mapping_from_env(self) -> bool:
+        env_keys = list(getattr(self.choco_env, "_keys", []) or [])
+        if self._keys_signature(env_keys) == self._keys_signature(self._keys):
+            return False
+        self._rebuild_slot_mapping(env_keys)
+        if hasattr(self, "obs_dim"):
+            self.obs_alive = torch.full(
+                (self.num_envs, self.obs_dim), fill_value=float("nan"), device=self.device
+            )
+        if self.verbose:
+            print(
+                "[sb3] remapped keys from env "
+                f"num_envs={self.num_envs} keys={len(self._keys)}"
+            )
+        return True
 
     def _build_info_dict(
         self,
@@ -547,6 +577,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self._step_count += 1
         spawned_count_step = int(self._pending_initial_spawn_count)
         self._pending_initial_spawn_count = 0
+        if self._dynamic_key_mapping:
+            self._sync_slot_mapping_from_env()
         if torch.is_tensor(actions):
             actions_np = actions.detach().cpu().numpy()
         else:
@@ -554,6 +586,22 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
         if actions_np.ndim == 1:
             actions_np = actions_np.reshape(-1, self.action_dim)
+
+        if self._dynamic_key_mapping:
+            expected_envs = int(len(self.flat_slot_keys))
+            input_rows = int(actions_np.shape[0])
+            if actions_np.shape[0] != expected_envs:
+                if actions_np.shape[0] > expected_envs:
+                    actions_np = actions_np[:expected_envs, :]
+                else:
+                    pad = np.zeros((expected_envs - actions_np.shape[0], self.action_dim), dtype=np.float32)
+                    actions_np = np.concatenate([actions_np, pad], axis=0)
+                if self.verbose:
+                    print(
+                        "[sb3] adjusted action batch to current env size "
+                        f"got={input_rows} "
+                        f"expected={expected_envs}"
+                    )
 
         U = np.zeros((len(self._keys), self.action_dim), dtype=np.float32)
 

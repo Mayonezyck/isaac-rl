@@ -96,6 +96,16 @@ space:
     path: "env.ttc_penalty_alpha"
     type: "choice"
     values: [0.10, 0.15, 0.25]
+  - name: "ttc_delta_penalty_enable"
+    target: "curriculum"
+    path: "env.ttc_delta_penalty_enable"
+    type: "choice"
+    values: [false, true]
+  - name: "ttc_delta_penalty_alpha"
+    target: "curriculum"
+    path: "env.ttc_delta_penalty_alpha"
+    type: "choice"
+    values: [0.0, 0.10]
   - name: "geom_lane_reward_per_step"
     target: "curriculum"
     path: "env.geom_lane_reward_per_step"

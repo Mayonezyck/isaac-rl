@@ -40,6 +40,13 @@ python -u gpudrive_chocolate/baselines/ppo/evolve_hparams.py \
   --study configs/hparam_search/stage2_evolution/search_stage2_lane_safety_geom_warmstart.yaml
 ```
 
+Quick TTC-fix study (warm-start from stage1 `cont0` 3M checkpoint):
+
+```bash
+python -u gpudrive_chocolate/baselines/ppo/evolve_hparams.py \
+  --study configs/hparam_search/stage2_evolution/search_stage2_lane_safety_geom_ttcfix_quick_from_stage1_3m.yaml
+```
+
 Strict-phase deep overnight study (keeps strict resume checkpoint, longer trials, larger population):
 
 ```bash

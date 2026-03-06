@@ -1,16 +1,16 @@
 study:
-  name: "stage2_lane_safety_geom_evolution"
-  output_root: "runs/hparam_search/stage2_lane_safety_geom_evolution"
+  name: "stage2_lane_safety_geom_ttcfix_quick_from_stage1_3m"
+  output_root: "runs/hparam_search/stage2_lane_safety_geom_ttcfix_quick_from_stage1_3m"
 
 base:
-  ppo_config: "configs/curriculum_design/navigation_geom_v1/ppo_stage2_lane_safety_geom.yaml"
+  ppo_config: "configs/curriculum_design/navigation_geom_v1/ppo_stage2_lane_safety_geom_ttcfix_search_from_stage1_3m.yaml"
 
 runner:
   command_prefix: ["python", "-u"]
   train_entry: "gpudrive_chocolate/baselines/ppo/ppo_sb3.py"
 
 resources:
-  max_parallel: 12
+  max_parallel: 8
   auto_expand_slots: true
   slots:
     - label: "gpu1_a"
@@ -24,34 +24,35 @@ resources:
 
 search:
   random_seed: 123
-  generations: 5
+  preserve_resume_from: true
+  generations: 3
   population_size: 12
-  elite_count: 3
-  mutation_rate: 0.40
-  crossover_rate: 0.75
-  random_candidates_per_generation: 3
-  metric_window: 5
-  timesteps_per_trial: 131072
-  heartbeat_sec: 5
+  elite_count: 4
+  mutation_rate: 0.35
+  crossover_rate: 0.80
+  random_candidates_per_generation: 4
+  metric_window: 6
+  timesteps_per_trial: 196608
+  heartbeat_sec: 8
 
 scoring:
   primary_metric: "rollout/success_rate"
   missing_value: 0.0
   weights:
-    rollout/success_rate: 120.0
-    rollout/goal_rate: 35.0
-    rollout/mean_dist_to_goal_m: -0.75
-    rollout/mean_lane_error_m: -12.0
-    rollout/mean_heading_alignment: 15.0
-    rollout/mean_route_progress_m: 20.0
-    rollout/lane_hit_rate: 15.0
-    rollout/off_road_rate: -35.0
-    rollout/collision_rate: -45.0
-    rollout/road_collision_rate: -25.0
-    rollout/vehicle_collision_rate: -45.0
-    rollout/road_contact_done_rate: -70.0
-    rollout/vehicle_contact_done_rate: -90.0
-    rollout/below_min_z_rate: -120.0
+    rollout/success_rate: 160.0
+    rollout/goal_rate: 45.0
+    rollout/mean_dist_to_goal_m: -1.0
+    rollout/mean_lane_error_m: -15.0
+    rollout/mean_heading_alignment: 20.0
+    rollout/mean_route_progress_m: 28.0
+    rollout/lane_hit_rate: -18.0
+    rollout/off_road_rate: -60.0
+    rollout/collision_rate: -90.0
+    rollout/road_collision_rate: -40.0
+    rollout/vehicle_collision_rate: -90.0
+    rollout/road_contact_done_rate: -120.0
+    rollout/vehicle_contact_done_rate: -150.0
+    rollout/below_min_z_rate: -180.0
     rollout/mean_episode_len: 0.02
 
 space:
@@ -59,19 +60,19 @@ space:
     target: "ppo"
     path: "lr"
     type: "float"
-    min: 0.0001
+    min: 0.00008
     max: 0.0004
     scale: "log"
   - name: "ent_coef"
     target: "ppo"
     path: "ent_coef"
     type: "choice"
-    values: [0.0, 0.00005, 0.0001, 0.0003]
+    values: [0.0, 0.00003, 0.00005, 0.0001, 0.0003]
   - name: "clip_range"
     target: "ppo"
     path: "clip_range"
     type: "choice"
-    values: [0.10, 0.15, 0.20]
+    values: [0.10, 0.15, 0.20, 0.25]
   - name: "gamma"
     target: "ppo"
     path: "gamma"
@@ -91,17 +92,17 @@ space:
     target: "ppo"
     path: "num_minibatches"
     type: "choice"
-    values: [4, 8]
+    values: [4, 8, 16]
   - name: "collision_weight"
     target: "ppo"
     path: "collision_weight"
     type: "choice"
-    values: [0.0, -0.05, -0.10, -0.20]
+    values: [-0.05, -0.10, -0.20]
   - name: "off_road_weight"
     target: "ppo"
     path: "off_road_weight"
     type: "choice"
-    values: [0.0, -0.05, -0.10]
+    values: [-0.05, -0.10, -0.20]
   - name: "reward_scale"
     target: "curriculum"
     path: "env.reward_scale"
@@ -111,7 +112,7 @@ space:
     target: "curriculum"
     path: "env.success_bonus"
     type: "choice"
-    values: [8.0, 10.0, 12.0]
+    values: [8.0, 10.0, 12.0, 16.0]
   - name: "thr_clip_max"
     target: "curriculum"
     path: "control.thr_clip.1"
@@ -151,22 +152,22 @@ space:
     target: "curriculum"
     path: "env.road_contact_done_penalty"
     type: "choice"
-    values: [-3.0, -4.0, -6.0]
+    values: [-4.0, -6.0, -8.0]
   - name: "vehicle_contact_done_penalty"
     target: "curriculum"
     path: "env.vehicle_contact_done_penalty"
     type: "choice"
-    values: [-4.0, -6.0, -8.0]
+    values: [-6.0, -8.0, -10.0]
   - name: "ttc_penalty_alpha"
     target: "curriculum"
     path: "env.ttc_penalty_alpha"
     type: "choice"
-    values: [0.10, 0.15, 0.25]
+    values: [0.10, 0.15, 0.25, 0.35]
   - name: "ttc_penalty_max"
     target: "curriculum"
     path: "env.ttc_penalty_max"
     type: "choice"
-    values: [0.30, 0.50, 0.75]
+    values: [0.50, 0.75, 1.0]
   - name: "ttc_penalty_min_ttc"
     target: "curriculum"
     path: "env.ttc_penalty_min_ttc"
@@ -196,4 +197,4 @@ space:
     target: "curriculum"
     path: "env.max_steps"
     type: "choice"
-    values: [350, 450, 550]
+    values: [450, 550, 650]

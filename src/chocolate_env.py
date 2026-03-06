@@ -131,6 +131,7 @@ class ChocolateEnv:
         action_repeat: int = 4,
         max_steps: int = 600,
         clear_on_done: bool = False,
+        hard_remove_done_agents: bool = False,
         goal_success_dist_m: float = 2.0,   # SUCCESS when dist_to_goal_m <= this
         reward_scale: float = 1.0,
         success_bonus: float = 10.0,
@@ -176,6 +177,10 @@ class ChocolateEnv:
         ttc_penalty_alpha: float = 1.0,
         ttc_penalty_max: float = 1.0,
         ttc_penalty_min_ttc: float = 0.2,
+        ttc_delta_penalty_enable: bool = False,
+        ttc_delta_penalty_alpha: float = 0.0,
+        ttc_delta_penalty_max: float = 0.5,
+        ttc_delta_penalty_normalize_by_dt: bool = False,
         ttc_use_vehicle_size: bool = True,
         ttc_vehicle_radius_scale: float = 0.75,
         ttc_vehicle_radius_margin_m: float = 0.20,
@@ -201,6 +206,7 @@ class ChocolateEnv:
         self.max_steps = int(max_steps)
 
         self.clear_on_done = bool(clear_on_done)
+        self.hard_remove_done_agents = bool(hard_remove_done_agents)
         self.goal_success_dist_m = float(goal_success_dist_m)
 
         self.reward_scale = float(reward_scale)
@@ -251,6 +257,10 @@ class ChocolateEnv:
         self.ttc_penalty_alpha = float(ttc_penalty_alpha)
         self.ttc_penalty_max = float(ttc_penalty_max)
         self.ttc_penalty_min_ttc = float(ttc_penalty_min_ttc)
+        self.ttc_delta_penalty_enable = bool(ttc_delta_penalty_enable)
+        self.ttc_delta_penalty_alpha = max(0.0, float(ttc_delta_penalty_alpha))
+        self.ttc_delta_penalty_max = max(0.0, float(ttc_delta_penalty_max))
+        self.ttc_delta_penalty_normalize_by_dt = bool(ttc_delta_penalty_normalize_by_dt)
         self.ttc_use_vehicle_size = bool(ttc_use_vehicle_size)
         self.ttc_vehicle_radius_scale = max(0.0, float(ttc_vehicle_radius_scale))
         self.ttc_vehicle_radius_margin_m = max(0.0, float(ttc_vehicle_radius_margin_m))
@@ -318,6 +328,7 @@ class ChocolateEnv:
         self._pending_respawns: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self._quarantined_tokens: Set[Tuple[int, int]] = set()
         self._prev_world_xy_m: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        self._prev_min_ttc_s: Dict[Tuple[int, int], float] = {}
         self._world_road_geometry: Dict[int, Dict[str, np.ndarray]] = {}
         self._vehicle_radius_u_cache: Dict[Tuple[int, int], float] = {}
         self._bbox_cache = None
@@ -731,15 +742,8 @@ class ChocolateEnv:
             child = self.stage.GetPrimAtPath(f"{vehicle_prim.GetPath()}/Vehicle")
             if child.IsValid():
                 return child
-        except Exception as exc:
-            self._warn_fallback(
-                "ttc_vehicle_size_child_query_error",
-                f"Failed to query child '/Vehicle' prim for TTC size ({exc}); using vehicle root prim.",
-            )
-        self._warn_fallback(
-            "ttc_vehicle_size_use_root",
-            "Vehicle '/Vehicle' child prim missing for TTC size; using vehicle root prim.",
-        )
+        except Exception:
+            pass
         return vehicle_prim
 
     def _vehicle_radius_u_for_state(
@@ -764,15 +768,37 @@ class ChocolateEnv:
 
         # Optional direct metadata path if available in future builders.
         try:
+            metadata_dicts: List[Dict[str, Any]] = []
             if isinstance(custom_data, dict):
-                if "vehicle_size_m" in custom_data:
-                    sz = custom_data.get("vehicle_size_m", None)
+                metadata_dicts.append(custom_data)
+            try:
+                child = self.stage.GetPrimAtPath(f"{vehicle_prim.GetPath()}/Vehicle")
+                if child.IsValid():
+                    cd_child = child.GetCustomData()
+                    if isinstance(cd_child, dict):
+                        metadata_dicts.append(cd_child)
+            except Exception:
+                pass
+            try:
+                parent = vehicle_prim.GetParent()
+                if parent is not None and parent.IsValid():
+                    cd_parent = parent.GetCustomData()
+                    if isinstance(cd_parent, dict):
+                        metadata_dicts.append(cd_parent)
+            except Exception:
+                pass
+
+            for md in metadata_dicts:
+                if length_u > 0.0 and width_u > 0.0:
+                    break
+                if "vehicle_size_m" in md:
+                    sz = md.get("vehicle_size_m", None)
                     if isinstance(sz, (list, tuple)) and len(sz) >= 2:
                         length_u = float(sz[0]) / mpu
                         width_u = float(sz[1]) / mpu
                 if length_u <= 0.0 and width_u <= 0.0:
-                    lm = custom_data.get("vehicle_length_m", custom_data.get("length_m", None))
-                    wm = custom_data.get("vehicle_width_m", custom_data.get("width_m", None))
+                    lm = md.get("vehicle_length_m", md.get("length_m", None))
+                    wm = md.get("vehicle_width_m", md.get("width_m", None))
                     if lm is not None and wm is not None:
                         length_u = float(lm) / mpu
                         width_u = float(wm) / mpu
@@ -870,19 +896,21 @@ class ChocolateEnv:
                 controllable = bool(cd.get("controllable", False))
                 token = self._agent_token(wi, int(agent_id))
 
-                xform = UsdGeom.Xformable(vehicle_prim)
-                try:
-                    M = xform.ComputeLocalToWorldTransform(tc)
-                    p = M.ExtractTranslation()
-                    px, py = float(p[0]), float(p[1])
-                except Exception:
-                    continue
-
+                # Use a consistent moving frame for TTC state.
+                # For controllable vehicles, prefer rigid-body prim pose/velocity from controller handle.
+                px = py = None
                 vx, vy = 0.0, 0.0
                 if controllable:
                     h = self.ctrl.get(wi, int(agent_id))
-                    if h is not None and h.pose_prim:
+                    if h is not None and getattr(h, "pose_prim", None) is not None:
                         rb_prim = self._find_rb_prim(h.pose_prim)
+                        pose_prim = rb_prim if rb_prim is not None else h.pose_prim
+                        try:
+                            M = UsdGeom.Xformable(pose_prim).ComputeLocalToWorldTransform(tc)
+                            p = M.ExtractTranslation()
+                            px, py = float(p[0]), float(p[1])
+                        except Exception:
+                            px = py = None
                         if rb_prim is not None:
                             vx, vy, _ = self._get_rb_linear_velocity_world(rb_prim)
                         else:
@@ -890,6 +918,15 @@ class ChocolateEnv:
                                 "ttc_velocity_missing_rb",
                                 "TTC velocity fallback: rigid-body prim not found; using zero velocity.",
                             )
+
+                # Fallback for non-controllable (or missing handle): use vehicle prim transform.
+                if px is None or py is None:
+                    try:
+                        M = UsdGeom.Xformable(vehicle_prim).ComputeLocalToWorldTransform(tc)
+                        p = M.ExtractTranslation()
+                        px, py = float(p[0]), float(p[1])
+                    except Exception:
+                        continue
                 radius_u = self._vehicle_radius_u_for_state(
                     world_idx=wi,
                     agent_id=int(agent_id),
@@ -912,7 +949,7 @@ class ChocolateEnv:
         return out
 
     def _compute_ttc_penalty(self, keys: List[object], active: np.ndarray) -> np.ndarray:
-        if not self.ttc_penalty_enable:
+        if not (self.ttc_penalty_enable or self.ttc_delta_penalty_enable):
             return np.zeros((len(keys),), dtype=np.float32)
         if not self.ttc_use_vehicle_size:
             self._warn_fallback(
@@ -922,12 +959,15 @@ class ChocolateEnv:
 
         states_by_world = self._collect_all_vehicle_states()
         penalties = np.zeros((len(keys),), dtype=np.float32)
+        env_step_dt = max(1e-6, float(self.physics_dt) * float(self.action_repeat))
 
         for i, k in enumerate(keys):
             if not active[i]:
                 continue
+            token = self._agent_token_from_key(k)
             wi = int(getattr(k, "world_idx", -1))
             if wi not in states_by_world:
+                self._prev_min_ttc_s.pop(token, None)
                 continue
             ego_state = None
             for s in states_by_world[wi]:
@@ -935,6 +975,7 @@ class ChocolateEnv:
                     ego_state = s
                     break
             if ego_state is None:
+                self._prev_min_ttc_s.pop(token, None)
                 continue
             ex, ey = ego_state["pos"]
             evx, evy = ego_state["vel"]
@@ -988,23 +1029,37 @@ class ChocolateEnv:
                         continue
                     clearance = max(0.0, dist - combined_r)
                     ttc = clearance / closing_speed
-                    self._warn_fallback(
-                        "ttc_continuous_fallback",
-                        "Quadratic TTC root unavailable for a pair; using continuous closing-speed TTC fallback.",
-                    )
 
                 if min_ttc is None or ttc < min_ttc:
                     min_ttc = ttc
             if min_ttc is None:
+                self._prev_min_ttc_s.pop(token, None)
                 continue
-            # Hard safety clamp: imminent risk (<0.5 s TTC) gets maximum penalty.
-            if float(min_ttc) < 0.5:
-                penalties[i] = -float(self.ttc_penalty_max)
-                continue
-            denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
-            penalty = float(self.ttc_penalty_alpha) / denom
-            penalty = min(float(self.ttc_penalty_max), penalty)
-            penalties[i] = -float(penalty)
+
+            abs_penalty = 0.0
+            if self.ttc_penalty_enable:
+                # Hard safety clamp: imminent risk (<0.5 s TTC) gets maximum penalty.
+                if float(min_ttc) < 0.5:
+                    abs_penalty = float(self.ttc_penalty_max)
+                else:
+                    denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
+                    abs_penalty = min(float(self.ttc_penalty_max), float(self.ttc_penalty_alpha) / denom)
+
+            delta_penalty = 0.0
+            if self.ttc_delta_penalty_enable and self.ttc_delta_penalty_alpha > 0.0:
+                prev_min_ttc = self._prev_min_ttc_s.get(token, None)
+                if prev_min_ttc is not None and np.isfinite(prev_min_ttc):
+                    delta_ttc = float(prev_min_ttc) - float(min_ttc)
+                    if self.ttc_delta_penalty_normalize_by_dt:
+                        delta_ttc /= env_step_dt
+                    if delta_ttc > 0.0:
+                        delta_penalty = min(
+                            float(self.ttc_delta_penalty_max),
+                            float(self.ttc_delta_penalty_alpha) * float(delta_ttc),
+                        )
+
+            penalties[i] = -float(abs_penalty + delta_penalty)
+            self._prev_min_ttc_s[token] = float(min_ttc)
         return penalties
     def _cache_spawn_if_missing(self):
         # cache LOCAL pose from the stable Vehicle_Parent xform
@@ -1268,6 +1323,7 @@ class ChocolateEnv:
                 continue
             self._quarantined_tokens.add(token)
             self._pending_respawns.pop(token, None)
+            self._prev_min_ttc_s.pop(token, None)
             world_idx, agent_id = token
             h = self._get_agent_handle(world_idx, agent_id)
             if h is not None:
@@ -1311,6 +1367,12 @@ class ChocolateEnv:
 
     def _agent_token_from_key(self, key: object) -> Tuple[int, int]:
         return self._agent_token(getattr(key, "world_idx"), getattr(key, "agent_id"))
+
+    def _clear_ttc_history_for_tokens(self, tokens: List[Tuple[int, int]]) -> None:
+        if not tokens or not self._prev_min_ttc_s:
+            return
+        for token in tokens:
+            self._prev_min_ttc_s.pop(self._agent_token(token[0], token[1]), None)
 
     def _get_agent_handle(self, world_idx: int, agent_id: int):
         return self.ctrl.get(int(world_idx), int(agent_id))
@@ -1640,6 +1702,112 @@ class ChocolateEnv:
             except Exception:
                 pass
 
+    def _remove_agents(self, keys: List[object], which: np.ndarray) -> bool:
+        idx = np.where(which)[0]
+        if idx.size == 0:
+            return False
+
+        removed_any = False
+        removed_tokens: List[Tuple[int, int]] = []
+        for i in idx:
+            k = keys[i]
+            token = self._agent_token_from_key(k)
+
+            world_root = f"{self.root_container}/{self.world_prefix}{int(k.world_idx):03d}"
+            goals_root = self.stage.GetPrimAtPath(f"{world_root}/Goals")
+            if goals_root.IsValid():
+                goal_suffix = f"_id{int(k.agent_id)}"
+                for goal_prim in list(goals_root.GetAllChildren()):
+                    goal_name = goal_prim.GetName()
+                    goal_path = goal_prim.GetPath().pathString
+                    if goal_name.endswith(goal_suffix) or goal_suffix in goal_name or goal_suffix in goal_path:
+                        try:
+                            self.stage.RemovePrim(goal_prim.GetPath())
+                            removed_any = True
+                        except Exception:
+                            pass
+
+            agent_path = self._find_agent_prim_path(int(k.world_idx), int(k.agent_id))
+            if agent_path is not None:
+                try:
+                    self.stage.RemovePrim(agent_path)
+                    removed_any = True
+                    removed_tokens.append(token)
+                except Exception:
+                    pass
+
+        for token in removed_tokens:
+            self._pending_respawns.pop(token, None)
+            self._quarantined_tokens.discard(token)
+            self._prev_world_xy_m.pop(token, None)
+            self._prev_min_ttc_s.pop(token, None)
+            self._vehicle_radius_u_cache.pop(token, None)
+
+        if removed_any:
+            try:
+                self.ctrl.refresh()
+            except Exception:
+                pass
+            # One settle step helps PhysX drop removed actors before next obs build.
+            try:
+                self.sim.step(render=False)
+            except Exception:
+                pass
+        return bool(removed_any)
+
+    def _sync_keyed_state_from_stage(self) -> None:
+        """
+        Refresh internal keyed arrays/maps after hard-removing agents from stage.
+        Keeps remaining-agent bookkeeping aligned for the next env.step call.
+        """
+        old_keys = list(self._keys)
+        old_done = (
+            self._done.copy()
+            if isinstance(self._done, np.ndarray)
+            else np.zeros((len(old_keys),), dtype=bool)
+        )
+        old_success = (
+            self._success_latched.copy()
+            if isinstance(self._success_latched, np.ndarray)
+            else np.zeros((len(old_keys),), dtype=bool)
+        )
+        old_prev_dist = (
+            self._prev_dist_m.copy()
+            if isinstance(self._prev_dist_m, np.ndarray)
+            else np.zeros((len(old_keys),), dtype=np.float32)
+        )
+        old_idx_by_token = {
+            self._agent_token_from_key(k): i
+            for i, k in enumerate(old_keys)
+        }
+
+        obs2, mask2, keys2 = self._build_obs()
+        dist_n2 = obs2[:, 4].astype(np.float32) if obs2.size else np.zeros((0,), dtype=np.float32)
+        dist_m2 = dist_n2 * (self.bounds_size_m * math.sqrt(2.0))
+
+        self._keys = keys2
+        self._mask = mask2.copy()
+
+        N2 = len(keys2)
+        new_done = np.zeros((N2,), dtype=bool)
+        new_success = np.zeros((N2,), dtype=bool)
+        new_prev_dist = dist_m2.copy()
+
+        for j, k in enumerate(keys2):
+            old_idx = old_idx_by_token.get(self._agent_token_from_key(k), None)
+            if old_idx is None:
+                continue
+            if 0 <= old_idx < old_done.shape[0]:
+                new_done[j] = bool(old_done[old_idx])
+            if 0 <= old_idx < old_success.shape[0]:
+                new_success[j] = bool(old_success[old_idx])
+            if 0 <= old_idx < old_prev_dist.shape[0]:
+                new_prev_dist[j] = float(old_prev_dist[old_idx])
+
+        self._done = new_done
+        self._success_latched = new_success
+        self._prev_dist_m = new_prev_dist
+
     def _get_contact_types(self, h) -> List[int]:
         if h is None:
             return []
@@ -1853,6 +2021,7 @@ class ChocolateEnv:
 
         idx = np.where(done_mask)[0]
         done_tokens = [self._agent_token_from_key(self._keys[i]) for i in idx]
+        self._clear_ttc_history_for_tokens(done_tokens)
         key_by_token = {self._agent_token_from_key(self._keys[i]): self._keys[i] for i in idx}
 
         if self.respawn_on_reset:
@@ -1969,6 +2138,7 @@ class ChocolateEnv:
         self.t = 0
         self._pending_respawns.clear()
         self._prev_world_xy_m.clear()
+        self._prev_min_ttc_s.clear()
 
         # Refresh controller registry
         self.ctrl.refresh()
@@ -2075,6 +2245,7 @@ class ChocolateEnv:
                 obs[:, 4].astype(np.float32) * (self.bounds_size_m * math.sqrt(2.0))
             )
             self._prev_world_xy_m.clear()
+            self._prev_min_ttc_s.clear()
             for key in keys2:
                 h = self.ctrl.get(key.world_idx, key.agent_id)
                 xy_m = self._get_agent_world_xy_m(h)
@@ -2087,6 +2258,7 @@ class ChocolateEnv:
 
         pending_mask = self._pending_mask_for_keys(keys)
         active = mask & (~self._done) & (~pending_mask)
+        removed_agents_this_step = False
 
         # SUCCESS: distance threshold in meters
         success_now = (dist_m <= self.goal_success_dist_m) & active
@@ -2097,7 +2269,12 @@ class ChocolateEnv:
             self._done[newly_success] = True
             self._freeze_agents(keys, newly_success)
             if self.clear_on_done:
-                self._hide_agents(keys, newly_success)
+                if self.respawn_on_reset or (not self.hard_remove_done_agents):
+                    self._hide_agents(keys, newly_success)
+                else:
+                    removed_agents_this_step = (
+                        self._remove_agents(keys, newly_success) or removed_agents_this_step
+                    )
         # Reward: progress toward goal (meters)
         progress = (self._prev_dist_m - dist_m) * self.reward_scale
         reward = np.zeros((N,), dtype=np.float32)
@@ -2122,7 +2299,7 @@ class ChocolateEnv:
                 reward[idle] -= float(self.idle_penalty_per_step)
 
         # Dense TTC penalty (only for active rows)
-        if self.ttc_penalty_enable:
+        if self.ttc_penalty_enable or self.ttc_delta_penalty_enable:
             ttc_pen = self._compute_ttc_penalty(keys, active)
             reward[active] += ttc_pen[active]
         # Per-step survival reward (only for active rows)
@@ -2235,6 +2412,20 @@ class ChocolateEnv:
                 reward[vehicle_contact_done] += float(self.vehicle_contact_done_penalty)
                 self._done[vehicle_contact_done] = True
 
+        # Apply terminal handling for non-success failures as soon as they become done.
+        # This keeps behavior consistent with success terminals when clear_on_done is enabled.
+        terminal_failure_now = below_min_z | road_contact_done | vehicle_contact_done
+        if terminal_failure_now.any():
+            self._freeze_agents(keys, terminal_failure_now)
+            if self.clear_on_done:
+                if self.respawn_on_reset or (not self.hard_remove_done_agents):
+                    self._hide_agents(keys, terminal_failure_now)
+                else:
+                    removed_agents_this_step = (
+                        self._remove_agents(keys, terminal_failure_now)
+                        or removed_agents_this_step
+                    )
+
         # Collision flags (for reward shaping / logging)
         vehicle_collided = np.zeros((N,), dtype=bool)
         for i, k in enumerate(keys):
@@ -2312,6 +2503,8 @@ class ChocolateEnv:
             timeout=bool(timeout),
             t_env=int(self.t),
         )
+        if removed_agents_this_step and self.hard_remove_done_agents and (not self.respawn_on_reset):
+            self._sync_keyed_state_from_stage()
         return obs, reward, done, info
 
 

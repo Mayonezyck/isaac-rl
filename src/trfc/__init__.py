@@ -29,6 +29,14 @@ from .world_pipeline import (
     prepare_stage_world_specs,
     resolve_scene_json_path,
 )
+from .lane_center_sampler import (
+    LanePolyline,
+    LaneStartGoalSample,
+    build_scene_with_sampled_agents,
+    compute_scene_center_from_road,
+    extract_lane_polylines,
+    sample_lane_center_start_goal_pairs,
+)
 
 __all__ = [
     "DEFAULT_TIRE_MODELS",
@@ -48,8 +56,14 @@ __all__ = [
     "texture_amplitude_from_road",
     "texture_coeff_from_road",
     "friction_input_from_mapping",
+    "LanePolyline",
+    "LaneStartGoalSample",
+    "build_scene_with_sampled_agents",
+    "compute_scene_center_from_road",
+    "extract_lane_polylines",
     "prepare_stage_world_specs",
     "resolve_scene_json_path",
+    "sample_lane_center_start_goal_pairs",
     "water_film_from_precip",
     "weather_context_dim",
     "write_demo_svg",
