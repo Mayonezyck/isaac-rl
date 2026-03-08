@@ -177,6 +177,12 @@ class ChocolateEnv:
         ttc_penalty_alpha: float = 1.0,
         ttc_penalty_max: float = 1.0,
         ttc_penalty_min_ttc: float = 0.2,
+        road_edge_ttc_penalty_enable: bool = False,
+        road_edge_ttc_penalty_alpha: float = 0.0,
+        road_edge_ttc_penalty_max: float = 0.5,
+        road_edge_ttc_penalty_min_ttc: float = 0.5,
+        road_edge_ttc_hard_min_ttc: float = 0.5,
+        road_edge_ttc_radius_m: Optional[float] = None,
         ttc_delta_penalty_enable: bool = False,
         ttc_delta_penalty_alpha: float = 0.0,
         ttc_delta_penalty_max: float = 0.5,
@@ -257,6 +263,14 @@ class ChocolateEnv:
         self.ttc_penalty_alpha = float(ttc_penalty_alpha)
         self.ttc_penalty_max = float(ttc_penalty_max)
         self.ttc_penalty_min_ttc = float(ttc_penalty_min_ttc)
+        self.road_edge_ttc_penalty_enable = bool(road_edge_ttc_penalty_enable)
+        self.road_edge_ttc_penalty_alpha = max(0.0, float(road_edge_ttc_penalty_alpha))
+        self.road_edge_ttc_penalty_max = max(0.0, float(road_edge_ttc_penalty_max))
+        self.road_edge_ttc_penalty_min_ttc = max(1e-3, float(road_edge_ttc_penalty_min_ttc))
+        self.road_edge_ttc_hard_min_ttc = max(0.0, float(road_edge_ttc_hard_min_ttc))
+        self.road_edge_ttc_radius_m = (
+            None if road_edge_ttc_radius_m is None else max(0.0, float(road_edge_ttc_radius_m))
+        )
         self.ttc_delta_penalty_enable = bool(ttc_delta_penalty_enable)
         self.ttc_delta_penalty_alpha = max(0.0, float(ttc_delta_penalty_alpha))
         self.ttc_delta_penalty_max = max(0.0, float(ttc_delta_penalty_max))
@@ -948,7 +962,12 @@ class ChocolateEnv:
                 out[wi] = states
         return out
 
-    def _compute_ttc_penalty(self, keys: List[object], active: np.ndarray) -> np.ndarray:
+    def _compute_ttc_penalty(
+        self,
+        keys: List[object],
+        active: np.ndarray,
+        states_by_world: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> np.ndarray:
         if not (self.ttc_penalty_enable or self.ttc_delta_penalty_enable):
             return np.zeros((len(keys),), dtype=np.float32)
         if not self.ttc_use_vehicle_size:
@@ -957,7 +976,8 @@ class ChocolateEnv:
                 "TTC fallback mode active: ttc_use_vehicle_size=false, so vehicle radii are ignored.",
             )
 
-        states_by_world = self._collect_all_vehicle_states()
+        if states_by_world is None:
+            states_by_world = self._collect_all_vehicle_states()
         penalties = np.zeros((len(keys),), dtype=np.float32)
         env_step_dt = max(1e-6, float(self.physics_dt) * float(self.action_repeat))
 
@@ -1061,6 +1081,131 @@ class ChocolateEnv:
             penalties[i] = -float(abs_penalty + delta_penalty)
             self._prev_min_ttc_s[token] = float(min_ttc)
         return penalties
+
+    def _compute_road_edge_ttc_penalty(
+        self,
+        keys: List[object],
+        active: np.ndarray,
+        states_by_world: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> np.ndarray:
+        if not self.road_edge_ttc_penalty_enable:
+            return np.zeros((len(keys),), dtype=np.float32)
+        if self.road_edge_ttc_penalty_alpha <= 0.0 or self.road_edge_ttc_penalty_max <= 0.0:
+            return np.zeros((len(keys),), dtype=np.float32)
+
+        forbidden_types = (
+            set(int(x) for x in self.road_contact_done_types)
+            if self.road_contact_done_types
+            else set(int(x) for x in self.geom_road_edge_types)
+        )
+        if not forbidden_types:
+            self._warn_fallback(
+                "road_edge_ttc_missing_forbidden_types",
+                "Road-edge TTC requested, but no forbidden road types are configured.",
+            )
+            return np.zeros((len(keys),), dtype=np.float32)
+
+        radius_m = (
+            float(self.road_edge_ttc_radius_m)
+            if self.road_edge_ttc_radius_m is not None
+            else float(self.road_points_radius_m)
+        )
+        if radius_m <= 0.0:
+            self._warn_fallback(
+                "road_edge_ttc_radius_nonpositive",
+                "Road-edge TTC radius <= 0; skipping road-edge TTC penalty.",
+            )
+            return np.zeros((len(keys),), dtype=np.float32)
+
+        if states_by_world is None:
+            states_by_world = self._collect_all_vehicle_states()
+
+        penalties = np.zeros((len(keys),), dtype=np.float32)
+        radius2_m = radius_m * radius_m
+        mpu = float(self._mpu)
+        forbidden_type_list = list(forbidden_types)
+
+        for i, k in enumerate(keys):
+            if not active[i]:
+                continue
+
+            wi = int(getattr(k, "world_idx", -1))
+            world_states = states_by_world.get(wi, None)
+            if not world_states:
+                continue
+            ego_state = None
+            for s in world_states:
+                if s.get("agent_id", None) == int(k.agent_id):
+                    ego_state = s
+                    break
+            if ego_state is None:
+                continue
+
+            geom = self._get_world_road_geometry(wi)
+            if geom is None:
+                continue
+            types = geom["types"]
+            points_xy_m = geom["points_xy_m"]
+            forbidden_mask = np.isin(types, forbidden_type_list)
+            if not np.any(forbidden_mask):
+                self._warn_fallback(
+                    "road_edge_ttc_no_points_forbidden_types",
+                    "Road-edge TTC found no geometry points for configured forbidden types.",
+                )
+                continue
+            forbidden_points = points_xy_m[forbidden_mask]
+            if forbidden_points.shape[0] == 0:
+                continue
+
+            ex_m = float(ego_state["pos"][0]) * mpu
+            ey_m = float(ego_state["pos"][1]) * mpu
+            evx_mps = float(ego_state["vel"][0]) * mpu
+            evy_mps = float(ego_state["vel"][1]) * mpu
+            ego_r_m = (
+                float(ego_state.get("radius_u", 0.0)) * mpu if self.ttc_use_vehicle_size else 0.0
+            )
+
+            rel = forbidden_points - np.asarray([[ex_m, ey_m]], dtype=np.float32)
+            dist2 = np.einsum("ij,ij->i", rel, rel)
+            near_mask = dist2 <= radius2_m
+            if not np.any(near_mask):
+                continue
+
+            rel_near = rel[near_mask]
+            dist_near = np.sqrt(np.maximum(dist2[near_mask], 1e-12))
+            min_ttc = None
+
+            if ego_r_m > 0.0:
+                overlap_mask = dist_near <= ego_r_m
+                if np.any(overlap_mask):
+                    min_ttc = 0.0
+
+            dirs = rel_near / np.maximum(dist_near[:, None], 1e-6)
+            closing_speed = dirs[:, 0] * evx_mps + dirs[:, 1] * evy_mps
+            valid = closing_speed > 1e-6
+            if np.any(valid):
+                clearance = np.maximum(0.0, dist_near[valid] - ego_r_m)
+                ttc_vals = clearance / np.maximum(closing_speed[valid], 1e-6)
+                if ttc_vals.size > 0:
+                    cand = float(np.min(ttc_vals))
+                    if min_ttc is None or cand < min_ttc:
+                        min_ttc = cand
+
+            if min_ttc is None:
+                continue
+
+            if float(min_ttc) < float(self.road_edge_ttc_hard_min_ttc):
+                abs_penalty = float(self.road_edge_ttc_penalty_max)
+            else:
+                denom = max(float(min_ttc), float(self.road_edge_ttc_penalty_min_ttc))
+                abs_penalty = min(
+                    float(self.road_edge_ttc_penalty_max),
+                    float(self.road_edge_ttc_penalty_alpha) / denom,
+                )
+            penalties[i] = -float(abs_penalty)
+
+        return penalties
+
     def _cache_spawn_if_missing(self):
         # cache LOCAL pose from the stable Vehicle_Parent xform
         for k in self._keys:
@@ -2298,10 +2443,22 @@ class ChocolateEnv:
             if idle.any():
                 reward[idle] -= float(self.idle_penalty_per_step)
 
-        # Dense TTC penalty (only for active rows)
+        # Dense TTC penalties (vehicle-to-vehicle and optional vehicle-to-forbidden-road-edge).
+        states_by_world = None
+        if (
+            self.ttc_penalty_enable
+            or self.ttc_delta_penalty_enable
+            or self.road_edge_ttc_penalty_enable
+        ):
+            states_by_world = self._collect_all_vehicle_states()
         if self.ttc_penalty_enable or self.ttc_delta_penalty_enable:
-            ttc_pen = self._compute_ttc_penalty(keys, active)
+            ttc_pen = self._compute_ttc_penalty(keys, active, states_by_world=states_by_world)
             reward[active] += ttc_pen[active]
+        if self.road_edge_ttc_penalty_enable:
+            edge_ttc_pen = self._compute_road_edge_ttc_penalty(
+                keys, active, states_by_world=states_by_world
+            )
+            reward[active] += edge_ttc_pen[active]
         # Per-step survival reward (only for active rows)
         if self.survival_reward_per_step != 0.0:
             reward[active] += float(self.survival_reward_per_step)

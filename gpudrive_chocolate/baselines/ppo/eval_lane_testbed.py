@@ -162,6 +162,18 @@ def parse_args() -> argparse.Namespace:
         help="Maximum TTC displayed on overlay (values above clamp to this number).",
     )
     parser.add_argument(
+        "--ttc-overlay-source",
+        type=str,
+        default="vehicle",
+        choices=["vehicle", "forbidden_road", "min"],
+        help=(
+            "TTC source for overlay: "
+            "'vehicle' (vehicle-vehicle), "
+            "'forbidden_road' (vehicle-forbidden-road), "
+            "'min' (minimum of both)."
+        ),
+    )
+    parser.add_argument(
         "--ttc-radius-overlay",
         action="store_true",
         help="Enable TTC collision-radius disk overlay per vehicle (GUI mode).",
@@ -498,8 +510,11 @@ def _ttc_color_rgb(ttc_s: float | None, max_display_s: float) -> tuple[float, fl
 
 def _compute_min_ttc_by_token(
     choco_env,
+    *,
+    states_by_world: Dict[int, List[Dict[str, Any]]] | None = None,
 ) -> tuple[Dict[tuple[int, int], float | None], Dict[tuple[int, int], float]]:
-    states_by_world = choco_env._collect_all_vehicle_states()
+    if states_by_world is None:
+        states_by_world = choco_env._collect_all_vehicle_states()
     use_vehicle_size = bool(getattr(choco_env, "ttc_use_vehicle_size", True))
     excluded_tokens = set(getattr(choco_env, "_pending_respawns", {}).keys()) | set(
         getattr(choco_env, "_quarantined_tokens", set())
@@ -576,6 +591,129 @@ def _compute_min_ttc_by_token(
                     min_ttc = float(ttc)
 
             out_ttc[token] = min_ttc
+    return out_ttc, out_radius
+
+
+def _forbidden_road_types(choco_env) -> List[int]:
+    road_done = list(getattr(choco_env, "road_contact_done_types", set()) or [])
+    if road_done:
+        return sorted(int(v) for v in road_done)
+    geom_edge = list(getattr(choco_env, "geom_road_edge_types", set()) or [])
+    return sorted(int(v) for v in geom_edge)
+
+
+def _compute_min_road_edge_ttc_by_token(
+    choco_env,
+    *,
+    states_by_world: Dict[int, List[Dict[str, Any]]] | None = None,
+) -> tuple[Dict[tuple[int, int], float | None], Dict[tuple[int, int], float]]:
+    if states_by_world is None:
+        states_by_world = choco_env._collect_all_vehicle_states()
+
+    forbidden_types = _forbidden_road_types(choco_env)
+    use_vehicle_size = bool(getattr(choco_env, "ttc_use_vehicle_size", True))
+    mpu = max(float(getattr(choco_env, "_mpu", 1.0)), 1e-6)
+    radius_m = getattr(choco_env, "road_edge_ttc_radius_m", None)
+    if radius_m is None:
+        radius_m = float(getattr(choco_env, "road_points_radius_m", 50.0))
+    radius_m = max(0.0, float(radius_m))
+    radius2_m = float(radius_m * radius_m)
+
+    out_ttc: Dict[tuple[int, int], float | None] = {}
+    out_radius: Dict[tuple[int, int], float] = {}
+    if not forbidden_types or radius_m <= 0.0:
+        for states in states_by_world.values():
+            for ego in states:
+                token = ego.get("token", None)
+                if token is None:
+                    continue
+                token = (int(token[0]), int(token[1]))
+                ego_r_u = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
+                out_radius[token] = float(max(0.0, ego_r_u))
+                out_ttc[token] = None
+        return out_ttc, out_radius
+
+    forbidden_types_np = np.asarray(forbidden_types, dtype=np.int32)
+    for world_idx, states in states_by_world.items():
+        geom = choco_env._get_world_road_geometry(int(world_idx))
+        if geom is None:
+            for ego in states:
+                token = ego.get("token", None)
+                if token is None:
+                    continue
+                token = (int(token[0]), int(token[1]))
+                ego_r_u = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
+                out_radius[token] = float(max(0.0, ego_r_u))
+                out_ttc[token] = None
+            continue
+
+        points_xy_m = np.asarray(geom.get("points_xy_m"), dtype=np.float32)
+        types = np.asarray(geom.get("types"), dtype=np.int32)
+        if points_xy_m.ndim != 2 or points_xy_m.shape[1] < 2 or types.ndim != 1:
+            for ego in states:
+                token = ego.get("token", None)
+                if token is None:
+                    continue
+                token = (int(token[0]), int(token[1]))
+                ego_r_u = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
+                out_radius[token] = float(max(0.0, ego_r_u))
+                out_ttc[token] = None
+            continue
+
+        forbidden_mask = np.isin(types, forbidden_types_np)
+        forbidden_points = points_xy_m[forbidden_mask]
+        if forbidden_points.shape[0] == 0:
+            for ego in states:
+                token = ego.get("token", None)
+                if token is None:
+                    continue
+                token = (int(token[0]), int(token[1]))
+                ego_r_u = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
+                out_radius[token] = float(max(0.0, ego_r_u))
+                out_ttc[token] = None
+            continue
+
+        for ego in states:
+            token = ego.get("token", None)
+            if token is None:
+                continue
+            token = (int(token[0]), int(token[1]))
+            ego_r_u = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
+            out_radius[token] = float(max(0.0, ego_r_u))
+
+            ex_m = float(ego["pos"][0]) * mpu
+            ey_m = float(ego["pos"][1]) * mpu
+            evx_mps = float(ego["vel"][0]) * mpu
+            evy_mps = float(ego["vel"][1]) * mpu
+            ego_r_m = float(max(0.0, ego_r_u) * mpu)
+
+            rel = forbidden_points - np.asarray([[ex_m, ey_m]], dtype=np.float32)
+            dist2 = np.einsum("ij,ij->i", rel, rel)
+            near_mask = dist2 <= radius2_m
+            if not np.any(near_mask):
+                out_ttc[token] = None
+                continue
+
+            rel_near = rel[near_mask]
+            dist_near = np.sqrt(np.maximum(dist2[near_mask], 1e-12))
+            min_ttc = None
+
+            if ego_r_m > 0.0 and np.any(dist_near <= ego_r_m):
+                min_ttc = 0.0
+
+            dirs = rel_near / np.maximum(dist_near[:, None], 1e-6)
+            closing_speed = dirs[:, 0] * evx_mps + dirs[:, 1] * evy_mps
+            valid = closing_speed > 1e-6
+            if np.any(valid):
+                clearance = np.maximum(0.0, dist_near[valid] - ego_r_m)
+                ttc_vals = clearance / np.maximum(closing_speed[valid], 1e-6)
+                if ttc_vals.size > 0:
+                    cand = float(np.min(ttc_vals))
+                    if min_ttc is None or cand < min_ttc:
+                        min_ttc = cand
+
+            out_ttc[token] = min_ttc
+
     return out_ttc, out_radius
 
 
@@ -734,6 +872,7 @@ def _update_ttc_overlay(
     flat_slot_keys: Sequence[object],
     *,
     root_path: str,
+    overlay_source: str,
     show_text: bool,
     z_offset_m: float,
     y_offset_m: float,
@@ -753,7 +892,41 @@ def _update_ttc_overlay(
     for child in list(root.GetChildren()):
         stage.RemovePrim(child.GetPath())
 
-    ttc_by_token, radius_by_token = _compute_min_ttc_by_token(choco_env)
+    source = str(overlay_source).strip().lower()
+    states_by_world = choco_env._collect_all_vehicle_states()
+    veh_ttc_by_token, veh_radius_by_token = _compute_min_ttc_by_token(
+        choco_env, states_by_world=states_by_world
+    )
+    if source == "vehicle":
+        ttc_by_token = veh_ttc_by_token
+        radius_by_token = veh_radius_by_token
+    elif source == "forbidden_road":
+        ttc_by_token, radius_by_token = _compute_min_road_edge_ttc_by_token(
+            choco_env, states_by_world=states_by_world
+        )
+    elif source == "min":
+        road_ttc_by_token, road_radius_by_token = _compute_min_road_edge_ttc_by_token(
+            choco_env, states_by_world=states_by_world
+        )
+        all_tokens = set(veh_ttc_by_token.keys()) | set(road_ttc_by_token.keys())
+        ttc_by_token = {}
+        radius_by_token = {}
+        for token in all_tokens:
+            v = veh_ttc_by_token.get(token, None)
+            r = road_ttc_by_token.get(token, None)
+            if v is None:
+                ttc_by_token[token] = r
+            elif r is None:
+                ttc_by_token[token] = v
+            else:
+                ttc_by_token[token] = min(float(v), float(r))
+            radius_by_token[token] = max(
+                float(veh_radius_by_token.get(token, 0.0)),
+                float(road_radius_by_token.get(token, 0.0)),
+            )
+    else:
+        raise ValueError(f"Unknown TTC overlay source: {overlay_source!r}")
+
     for key in flat_slot_keys:
         world_idx = int(getattr(key, "world_idx"))
         agent_id = int(getattr(key, "agent_id"))
@@ -945,6 +1118,7 @@ def run(args: argparse.Namespace) -> None:
                 env.choco_env,
                 env.flat_slot_keys,
                 root_path="/World/TTCOverlay",
+                overlay_source=str(args.ttc_overlay_source),
                 show_text=bool(args.ttc_overlay),
                 z_offset_m=float(args.ttc_overlay_z_offset_m),
                 y_offset_m=float(args.ttc_overlay_y_offset_m),
@@ -981,6 +1155,7 @@ def run(args: argparse.Namespace) -> None:
                     env.choco_env,
                     env.flat_slot_keys,
                     root_path="/World/TTCOverlay",
+                    overlay_source=str(args.ttc_overlay_source),
                     show_text=bool(args.ttc_overlay),
                     z_offset_m=float(args.ttc_overlay_z_offset_m),
                     y_offset_m=float(args.ttc_overlay_y_offset_m),
@@ -1101,6 +1276,7 @@ def run(args: argparse.Namespace) -> None:
                 "gui_step_delay_sec": float(args.gui_step_delay_sec),
                 "ttc_overlay": bool(ttc_overlay_enabled),
                 "ttc_text_overlay": bool(args.ttc_overlay),
+                "ttc_overlay_source": str(args.ttc_overlay_source),
                 "ttc_overlay_char_height_m": float(args.ttc_overlay_char_height_m),
                 "ttc_overlay_z_offset_m": float(args.ttc_overlay_z_offset_m),
                 "ttc_overlay_y_offset_m": float(args.ttc_overlay_y_offset_m),
