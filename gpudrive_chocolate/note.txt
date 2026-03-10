@@ -1,0 +1,3 @@
+python -u gpudrive_chocolate/baselines/ppo/eval_lane_testbed.py   --checkpoint runs/checkpoints_stage1_goal_route_geom_best/ppo_stage1_goal_route_geom_best_cont0_3000000_steps.zip   --world-config configs/curriculum_design/navigation_geom_v1/curriculum_stage1_goal_route_geom_best_eval_collision_done_32worlds.yaml   --world-count 32   --num-vehicles 20   --out-dir runs/eval_lane_testbed/stage1_eval_32_unique_sampled --invincible 
+
+^very good stage 1 testing output

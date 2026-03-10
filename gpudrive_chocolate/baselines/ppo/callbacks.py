@@ -45,6 +45,8 @@ class RolloutCaptureCallback(BaseCallback):
         self._training_spawned_count_total = 0.0
         self._training_done_success_count_total = 0.0
         self._training_done_count_total = 0.0
+        self._training_vehicle_collision_count_total = 0.0
+        self._training_done_vehicle_collided_count_total = 0.0
         self._reset_rollout_stats()
 
     def _reset_rollout_stats(self) -> None:
@@ -69,6 +71,7 @@ class RolloutCaptureCallback(BaseCallback):
         self._rollout_pending_agent_steps = 0.0
         self._rollout_done_count = 0.0
         self._rollout_done_success_count = 0.0
+        self._rollout_done_vehicle_collided_sum = 0.0
         self._rollout_timeout_count = 0.0
         self._rollout_dist_sum = 0.0
         self._rollout_active_dist_sum = 0.0
@@ -152,6 +155,8 @@ class RolloutCaptureCallback(BaseCallback):
         self._training_spawned_count_total = 0.0
         self._training_done_success_count_total = 0.0
         self._training_done_count_total = 0.0
+        self._training_vehicle_collision_count_total = 0.0
+        self._training_done_vehicle_collided_count_total = 0.0
         if self.continuous_recording:
             self._start_continuous_recording()
 
@@ -218,9 +223,18 @@ class RolloutCaptureCallback(BaseCallback):
                 self._rollout_below_min_z_sum += float(info.get("below_min_z_count", 0.0))
                 self._rollout_done_count += float(info.get("done_count", 0.0))
                 self._rollout_done_success_count += float(info.get("done_success_count", 0.0))
+                self._rollout_done_vehicle_collided_sum += float(
+                    info.get("done_vehicle_collided_count", 0.0)
+                )
                 self._training_spawned_count_total += spawned_count
                 self._training_done_success_count_total += float(info.get("done_success_count", 0.0))
                 self._training_done_count_total += float(info.get("done_count", 0.0))
+                self._training_vehicle_collision_count_total += float(
+                    info.get("vehicle_contact_done_count", 0.0)
+                )
+                self._training_done_vehicle_collided_count_total += float(
+                    info.get("done_vehicle_collided_count", 0.0)
+                )
                 self._rollout_timeout_count += float(info.get("truncated", 0.0))
                 self._rollout_base_reward_sum += float(info.get("mean_base_reward_step", 0.0))
                 self._rollout_dist_sum += (
@@ -258,10 +272,19 @@ class RolloutCaptureCallback(BaseCallback):
                     "choco/total_successful_episodes",
                     float(self._training_done_success_count_total),
                 )
+                self.logger.record(
+                    "choco/total_vehicle_collision_episodes",
+                    float(self._training_vehicle_collision_count_total),
+                )
                 if self._training_spawned_count_total > 0:
                     self.logger.record(
                         "choco/success_over_spawned_rate_total",
                         float(self._training_done_success_count_total)
+                        / float(self._training_spawned_count_total),
+                    )
+                    self.logger.record(
+                        "choco/veh_coll_spawned_cum",
+                        float(self._training_vehicle_collision_count_total)
                         / float(self._training_spawned_count_total),
                     )
                 if self._training_done_count_total > 0:
@@ -280,6 +303,10 @@ class RolloutCaptureCallback(BaseCallback):
                 self.logger.record("choco/collided_count_step", float(info.get("collided_count", 0.0)))
                 self.logger.record("choco/road_collided_count_step", float(info.get("road_collided_count", 0.0)))
                 self.logger.record("choco/vehicle_collided_count_step", float(info.get("vehicle_collided_count", 0.0)))
+                self.logger.record(
+                    "choco/done_vehicle_collided_count_step",
+                    float(info.get("done_vehicle_collided_count", 0.0)),
+                )
                 self.logger.record("choco/below_min_z_count_step", float(info.get("below_min_z_count", 0.0)))
                 self.logger.record("choco/goal_rate_step", float(info.get("goal_rate_step", 0.0)))
                 self.logger.record("choco/success_latched_rate_step", float(info.get("success_latched_rate_step", 0.0)))
@@ -299,6 +326,10 @@ class RolloutCaptureCallback(BaseCallback):
                 self.logger.record(
                     "choco/vehicle_collision_rate_step_per_controlled",
                     float(info.get("vehicle_collision_rate_step_per_controlled", 0.0)),
+                )
+                self.logger.record(
+                    "choco/perc_veh_collisions_step",
+                    float(info.get("perc_veh_collisions_step", 0.0)),
                 )
                 self.logger.record("choco/done_rate_step", float(info.get("done_rate_step", 0.0)))
                 self.logger.record(
@@ -429,6 +460,20 @@ class RolloutCaptureCallback(BaseCallback):
                     "rollout/vehicle_collision_rate_per_controlled_agent_step",
                     self._rollout_vehicle_collided_sum / self._rollout_agent_steps,
                 )
+                if self._rollout_spawned_count > 0:
+                    # GPUDRIVE-style denominator: fraction of spawned agents
+                    # that terminated due to vehicle collision within this rollout.
+                    self.logger.record(
+                        "rollout/veh_coll_spawned",
+                        self._rollout_vehicle_collision_sum / self._rollout_spawned_count,
+                    )
+                if self._rollout_done_count > 0:
+                    # 1:1 parity with GPUDRIVE `perc_veh_collisions`:
+                    # fraction of finished agents that collided at least once.
+                    self.logger.record(
+                        "rollout/perc_veh_collisions",
+                        self._rollout_done_vehicle_collided_sum / self._rollout_done_count,
+                    )
                 self.logger.record(
                     "rollout/below_min_z_rate",
                     self._rollout_below_min_z_sum / self._rollout_agent_steps,
@@ -528,10 +573,21 @@ class RolloutCaptureCallback(BaseCallback):
                     "rollout/success_given_done_rate",
                     self._rollout_done_success_count / self._rollout_done_count,
                 )
+            if self._training_done_count_total > 0:
+                self.logger.record(
+                    "rollout/perc_veh_collisions_total",
+                    self._training_done_vehicle_collided_count_total
+                    / self._training_done_count_total,
+                )
             if self._training_spawned_count_total > 0:
                 self.logger.record(
                     "rollout/success_rate",
                     self._training_done_success_count_total / self._training_spawned_count_total,
+                )
+                self.logger.record(
+                    "rollout/veh_coll_spawned_cum",
+                    self._training_vehicle_collision_count_total
+                    / self._training_spawned_count_total,
                 )
         except Exception:
             pass

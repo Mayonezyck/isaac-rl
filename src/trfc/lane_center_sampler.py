@@ -145,6 +145,7 @@ def extract_lane_polylines(
     *,
     lane_types: Sequence[int] = (1, 2),
     min_polyline_length_m: float = 5.0,
+    max_segment_gap_m: float | None = None,
 ) -> List[LanePolyline]:
     road = scene_cfg.get("road", {}) or {}
     polylines = list(road.get("polylines", []) or [])
@@ -162,6 +163,11 @@ def extract_lane_polylines(
         seg_len = np.linalg.norm(seg, axis=1).astype(np.float32)
         if seg_len.size == 0:
             continue
+        if max_segment_gap_m is not None:
+            gap_thr = float(max_segment_gap_m)
+            if gap_thr > 0.0 and bool(np.any(seg_len > gap_thr)):
+                # Reject broken polylines with discontinuous point jumps.
+                continue
         cum = np.concatenate(
             [np.zeros((1,), dtype=np.float32), np.cumsum(seg_len, dtype=np.float32)],
             axis=0,
@@ -203,6 +209,7 @@ def sample_lane_center_start_goal_pairs(
     min_goal_gap_m: float = 6.0,
     endpoint_margin_m: float = 2.0,
     min_polyline_length_m: float = 5.0,
+    max_segment_gap_m: float | None = None,
     seed: int = 42,
     max_attempts: int | None = None,
 ) -> List[LaneStartGoalSample]:
@@ -217,6 +224,7 @@ def sample_lane_center_start_goal_pairs(
         scene_cfg,
         lane_types=lane_types,
         min_polyline_length_m=min_polyline_length_m,
+        max_segment_gap_m=max_segment_gap_m,
     )
     if not lanes:
         raise RuntimeError(

@@ -274,6 +274,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         ).to(self.device)
 
         self.info_dict = {}
+        self.last_step_info_raw = None
         self._actions = None
 
     def _reset_seeds(self) -> None:
@@ -469,6 +470,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         collided_count = int(collided.sum())
         road_collided_count = int(road_collided.sum())
         vehicle_collided_count = int(vehicle_collided.sum())
+        done_vehicle_collided_count = int(np.logical_and(done, vehicle_collided).sum())
         below_min_z_count = int(below_min_z.sum())
 
         active_dist = dist_m[active] if dist_m.size and active.any() else np.asarray([], dtype=np.float32)
@@ -513,6 +515,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             "collided_count": collided_count,
             "road_collided_count": road_collided_count,
             "vehicle_collided_count": vehicle_collided_count,
+            # GPUDRIVE-style numerator: done agents that collided at least once.
+            "done_vehicle_collided_count": done_vehicle_collided_count,
             "below_min_z_count": below_min_z_count,
             "goal_rate_step": float(new_success_count) / float(denom_controlled),
             "success_latched_rate_step": float(success_latched_count) / float(denom_controlled),
@@ -527,6 +531,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             # Legacy controlled-conditioned vehicle collision incidence (kept for debugging).
             "vehicle_collision_rate_step_per_controlled": float(vehicle_collided_count)
             / float(denom_controlled),
+            # GPUDRIVE-style per-step parity metric.
+            "perc_veh_collisions_step": float(done_vehicle_collided_count) / float(denom_done),
             "done_rate_step": float(done_count) / float(denom_controlled),
             "success_given_done_rate_step": float(new_success_count) / float(denom_done),
             "mean_dist_to_goal_m": _safe_mean(valid_dist),
@@ -630,6 +636,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             U[key_idx, :] = actions_np[env_idx, :]
 
         obs, base_reward, done, info = self.choco_env.step(U)
+        self.last_step_info_raw = info
         reward = self._compute_rewards(obs, base_reward, done, info)
 
         done_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)

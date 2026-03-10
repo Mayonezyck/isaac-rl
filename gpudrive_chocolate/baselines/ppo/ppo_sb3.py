@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 import zipfile
 import yaml
 from box import Box
@@ -298,14 +299,26 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
     )
 
     interrupted = False
+    start_num_timesteps = int(getattr(model, "num_timesteps", 0))
+    print(
+        "[train] learn_start "
+        f"initial_num_timesteps={start_num_timesteps} "
+        f"total_timesteps={int(exp_config.total_timesteps)}"
+    )
     try:
         model.learn(
             total_timesteps=exp_config.total_timesteps,
             callback=[capture_callback, checkpoint_cb],
         )
+        end_num_timesteps = int(getattr(model, "num_timesteps", 0))
+        print(f"[train] learn_end final_num_timesteps={end_num_timesteps}")
     except KeyboardInterrupt:
         interrupted = True
         print("[train] interrupted by user, finalizing video output...")
+    except Exception as exc:
+        print(f"[train] fatal error during learn: {exc}")
+        traceback.print_exc()
+        raise
     finally:
         try:
             capture_callback.finalize()

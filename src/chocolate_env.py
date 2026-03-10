@@ -1492,9 +1492,12 @@ class ChocolateEnv:
             return []
 
         offenders: Set[Tuple[int, int]] = set()
-        zero_actions = np.zeros((len(self._keys), 2), dtype=np.float32)
 
         for _ in range(int(steps)):
+            n_keys = int(len(self._keys))
+            if n_keys <= 0:
+                break
+            zero_actions = np.zeros((n_keys, 2), dtype=np.float32)
             _, _, done, info = self.step(zero_actions)
             for key, flag in zip(info.keys, info.below_min_z):
                 if bool(flag):

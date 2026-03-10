@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import random
 import re
@@ -25,8 +26,9 @@ if REPO_ROOT not in sys.path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Deterministic policy testbed: sample start/goal pairs from lane centerlines, "
-            "build a derived world, run N vehicles, and report success/collision/road-done rates."
+            "Deterministic policy testbed. By default it samples start/goal pairs from lane "
+            "centerlines and builds a derived world. Use --real_start_end to evaluate with "
+            "original scene starts/goals (training-style spawn)."
         )
     )
     parser.add_argument(
@@ -54,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="Assignment index inside world-config when world.assignments exists.",
     )
     parser.add_argument(
+        "--world-count",
+        type=int,
+        default=1,
+        help="Number of worlds to evaluate in parallel; summary rates are aggregated over all worlds.",
+    )
+    parser.add_argument(
         "--scene-json",
         default=None,
         help="Optional scene_json override (name or absolute path).",
@@ -62,7 +70,26 @@ def parse_args() -> argparse.Namespace:
         "--num-vehicles",
         type=int,
         default=24,
-        help="Number of controllable vehicles to spawn.",
+        help=(
+            "Number of controllable vehicles to spawn in sampled mode (default). "
+            "Ignored with --real_start_end."
+        ),
+    )
+    parser.add_argument(
+        "--real_start_end",
+        action="store_true",
+        help=(
+            "Use original scene starts/goals and assignment-style spawn (as in training) "
+            "instead of lane-center sampling."
+        ),
+    )
+    parser.add_argument(
+        "--invincible",
+        action="store_true",
+        help=(
+            "Eval-only mode: disable vehicle-collision and road-edge done conditions, "
+            "while still counting collision/road-edge contact in summary metrics."
+        ),
     )
     parser.add_argument(
         "--lane-types",
@@ -98,6 +125,21 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=2.0,
         help="Margin from polyline endpoints when sampling start/goal arc-length.",
+    )
+    parser.add_argument(
+        "--min-polyline-length-m",
+        type=float,
+        default=40.0,
+        help="Minimum candidate lane polyline length for sampling.",
+    )
+    parser.add_argument(
+        "--max-segment-gap-m",
+        type=float,
+        default=8.0,
+        help=(
+            "Maximum allowed gap between consecutive points on a lane polyline. "
+            "Polylines with larger jumps are rejected as broken."
+        ),
     )
     parser.add_argument(
         "--steps",
@@ -404,23 +446,27 @@ def resolve_scene_assignment(
 def build_eval_curriculum(
     base_world_cfg: Dict[str, Any],
     *,
-    sampled_scene_path: Path,
-    friction_cfg: Dict[str, Any],
-    num_vehicles: int,
+    assignment_entries: List[Dict[str, Any]],
+    max_agents_override: int | None,
     gui: bool,
     steps_override: int | None,
+    invincible: bool,
 ) -> Dict[str, Any]:
     cfg = deepcopy(base_world_cfg)
 
     world = dict(cfg.get("world", {}) or {})
-    world["world_count"] = 1
-    world["grid_cols"] = 1
-    world["rows"] = 1
-    world["max_agents_per_world"] = max(int(world.get("max_agents_per_world", 0)), int(num_vehicles))
-    assignment_entry: Dict[str, Any] = {"scene_json": str(sampled_scene_path)}
-    if friction_cfg:
-        assignment_entry["friction"] = dict(friction_cfg)
-    world["assignments"] = [assignment_entry]
+    world_count = max(1, int(len(assignment_entries)))
+    world["world_count"] = int(world_count)
+    grid_cols = max(1, int(math.ceil(math.sqrt(float(world_count)))))
+    rows = max(1, int(math.ceil(float(world_count) / float(grid_cols))))
+    world["grid_cols"] = int(grid_cols)
+    world["rows"] = int(rows)
+    if max_agents_override is not None:
+        world["max_agents_per_world"] = max(
+            int(world.get("max_agents_per_world", 0)),
+            int(max_agents_override),
+        )
+    world["assignments"] = [dict(a) for a in assignment_entries]
     cfg["world"] = world
 
     app = dict(cfg.get("app", {}) or {})
@@ -435,6 +481,9 @@ def build_eval_curriculum(
     env["clear_on_done"] = True
     env["hard_remove_done_agents"] = True
     env["verbose"] = False
+    if bool(invincible):
+        env["vehicle_contact_done"] = False
+        env["road_contact_done_types"] = []
     if steps_override is not None:
         env["max_steps"] = int(steps_override)
     cfg["env"] = env
@@ -990,6 +1039,7 @@ def run(args: argparse.Namespace) -> None:
     from gpudrive_chocolate.baselines.ppo.ppo_sb3 import build_resume_custom_objects
     from gpudrive_chocolate.env.sb3_wrapper import ChocolateSB3MultiAgentEnv
     from gpudrive_chocolate.networks.late_fusion_policy import LateFusionPolicy  # noqa: F401
+    from src.trfc import resolve_scene_json_path
     from src.trfc.lane_center_sampler import (
         build_scene_with_sampled_agents,
         sample_lane_center_start_goal_pairs,
@@ -1024,47 +1074,133 @@ def run(args: argparse.Namespace) -> None:
     if isinstance(device, str) and device.startswith("cuda"):
         torch.cuda.set_device(device)
 
-    scene_path, friction_cfg, base_assignment = resolve_scene_assignment(
-        world_cfg,
-        scene_json_override=args.scene_json,
-        assignment_index=args.assignment_index,
-    )
-    scene_cfg = json.loads(scene_path.read_text(encoding="utf-8"))
-
+    world_count = max(1, int(args.world_count))
     lane_types = parse_int_list(args.lane_types)
     bounds_size_m = float((world_cfg.get("world", {}) or {}).get("bounds_size_m", 200.0))
     origin_mode = str((world_cfg.get("world", {}) or {}).get("origin_mode", "center"))
+    assignments_cfg = list((world_cfg.get("world", {}) or {}).get("assignments", []) or [])
+    io_scene_jsons = list(((world_cfg.get("io", {}) or {}).get("scene_jsons", []) or []))
 
-    samples = sample_lane_center_start_goal_pairs(
-        scene_cfg,
-        num_agents=int(args.num_vehicles),
-        bounds_size_m=float(bounds_size_m),
-        origin_mode=origin_mode,
-        lane_types=lane_types,
-        min_travel_distance_m=float(args.min_travel_distance_m),
-        max_travel_distance_m=float(args.max_travel_distance_m),
-        min_start_gap_m=float(args.min_start_gap_m),
-        min_goal_gap_m=float(args.min_goal_gap_m),
-        endpoint_margin_m=float(args.endpoint_margin_m),
-        seed=int(args.seed),
-    )
+    source_world_entries: List[Dict[str, Any]] = []
+    for wi in range(world_count):
+        if args.scene_json is not None:
+            world_assignment_index = int(args.assignment_index)
+            scene_override = args.scene_json
+        else:
+            scene_override = None
+            if assignments_cfg:
+                world_assignment_index = (int(args.assignment_index) + int(wi)) % len(assignments_cfg)
+            elif io_scene_jsons:
+                world_assignment_index = (int(args.assignment_index) + int(wi)) % len(io_scene_jsons)
+            else:
+                world_assignment_index = int(args.assignment_index)
+        world_scene_path, world_friction_cfg, world_base_assignment = resolve_scene_assignment(
+            world_cfg,
+            scene_json_override=scene_override,
+            assignment_index=world_assignment_index,
+        )
+        source_world_entries.append(
+            {
+                "scene_path": world_scene_path,
+                "friction_cfg": dict(world_friction_cfg),
+                "base_assignment": dict(world_base_assignment),
+                "assignment_index": int(world_assignment_index),
+            }
+        )
 
-    sampled_scene_cfg = build_scene_with_sampled_agents(
-        scene_cfg,
-        samples,
-        agent_id_start=10000,
-        agent_type=1,
-    )
-    sampled_scene_path = out_dir / "derived_lane_sampled_scene.json"
-    sampled_scene_path.write_text(json.dumps(sampled_scene_cfg, indent=2), encoding="utf-8")
+    scene_path = Path(source_world_entries[0]["scene_path"]).resolve()
+    friction_cfg = dict(source_world_entries[0]["friction_cfg"])
+    base_assignment = dict(source_world_entries[0]["base_assignment"])
+
+    samples_by_world: List[list] = []
+    sampled_scene_paths: List[Path] = []
+    assignment_entries: List[Dict[str, Any]] = []
+    max_agents_override: int | None = None
+    if not bool(args.real_start_end):
+        scene_cfg_cache: Dict[str, Dict[str, Any]] = {}
+        for wi in range(world_count):
+            source_entry = source_world_entries[wi]
+            world_scene_path = Path(source_entry["scene_path"]).resolve()
+            world_friction_cfg = dict(source_entry.get("friction_cfg", {}) or {})
+            scene_key = str(world_scene_path)
+            scene_cfg = scene_cfg_cache.get(scene_key, None)
+            if scene_cfg is None:
+                scene_cfg = json.loads(world_scene_path.read_text(encoding="utf-8"))
+                scene_cfg_cache[scene_key] = scene_cfg
+            world_seed = int(args.seed) + int(wi)
+            world_samples = sample_lane_center_start_goal_pairs(
+                scene_cfg,
+                num_agents=int(args.num_vehicles),
+                bounds_size_m=float(bounds_size_m),
+                origin_mode=origin_mode,
+                lane_types=lane_types,
+                min_travel_distance_m=float(args.min_travel_distance_m),
+                max_travel_distance_m=float(args.max_travel_distance_m),
+                min_start_gap_m=float(args.min_start_gap_m),
+                min_goal_gap_m=float(args.min_goal_gap_m),
+                endpoint_margin_m=float(args.endpoint_margin_m),
+                min_polyline_length_m=float(args.min_polyline_length_m),
+                max_segment_gap_m=float(args.max_segment_gap_m),
+                seed=int(world_seed),
+            )
+            sampled_scene_cfg = build_scene_with_sampled_agents(
+                scene_cfg,
+                world_samples,
+                agent_id_start=10000,
+                agent_type=1,
+            )
+            sampled_scene_path = out_dir / f"derived_lane_sampled_scene_w{wi:03d}.json"
+            sampled_scene_path.write_text(json.dumps(sampled_scene_cfg, indent=2), encoding="utf-8")
+            sampled_scene_paths.append(sampled_scene_path)
+            samples_by_world.append(world_samples)
+
+            assignment_entry: Dict[str, Any] = {
+                "scene_json": str(sampled_scene_path),
+                "source_scene_json": str(world_scene_path),
+            }
+            if world_friction_cfg:
+                assignment_entry["friction"] = dict(world_friction_cfg)
+            assignment_entries.append(assignment_entry)
+        max_agents_override = int(args.num_vehicles)
+    else:
+        print(
+            "[testbed] real_start_end mode enabled: using original scene starts/goals "
+            "and training-style assignment spawn."
+        )
+        if int(args.num_vehicles) > 0:
+            print(
+                "[testbed] note: --num-vehicles is ignored in --real_start_end mode."
+            )
+        assignments_cfg = list((world_cfg.get("world", {}) or {}).get("assignments", []) or [])
+        if args.scene_json is not None or not assignments_cfg:
+            for _ in range(world_count):
+                assignment_entry: Dict[str, Any] = dict(base_assignment or {})
+                assignment_entry["scene_json"] = str(scene_path)
+                assignment_entry["source_scene_json"] = str(scene_path)
+                if friction_cfg:
+                    assignment_entry["friction"] = dict(friction_cfg)
+                assignment_entries.append(assignment_entry)
+        else:
+            io_cfg = world_cfg.get("io", {}) or {}
+            scene_json_dir = io_cfg.get("scene_json_dir", None)
+            if scene_json_dir is None:
+                raise ValueError("world-config is missing io.scene_json_dir")
+            for wi in range(world_count):
+                src = dict(assignments_cfg[(int(args.assignment_index) + wi) % len(assignments_cfg)])
+                raw_scene = src.get("scene_json", None)
+                if raw_scene is None:
+                    raise ValueError(f"assignment {wi} is missing scene_json")
+                src["source_scene_json"] = str(raw_scene)
+                src["scene_json"] = str(resolve_scene_json_path(scene_json_dir, raw_scene))
+                assignment_entries.append(src)
 
     eval_curriculum = build_eval_curriculum(
         world_cfg,
-        sampled_scene_path=sampled_scene_path,
-        friction_cfg=friction_cfg,
-        num_vehicles=int(args.num_vehicles),
+        assignment_entries=assignment_entries,
+        max_agents_override=max_agents_override,
         gui=bool(args.gui),
         steps_override=args.steps,
+        invincible=bool(args.invincible),
     )
     derived_cfg_path = out_dir / "derived_lane_testbed_curriculum.yaml"
     write_yaml(derived_cfg_path, eval_curriculum)
@@ -1074,10 +1210,22 @@ def run(args: argparse.Namespace) -> None:
     eval_exp_cfg.device = device
 
     seed_everything(int(args.seed))
+    source_scene_names = [
+        Path(str(a.get("source_scene_json", a.get("scene_json", "")))).name
+        for a in assignment_entries
+    ]
+    unique_source_scene_names = sorted({name for name in source_scene_names if name})
+    if len(unique_source_scene_names) <= 4:
+        source_scene_desc = ",".join(unique_source_scene_names) if unique_source_scene_names else "n/a"
+    else:
+        source_scene_desc = ",".join(unique_source_scene_names[:4]) + ",..."
 
     print(
         "[testbed] starting deterministic evaluation "
-        f"scene={scene_path.name} sampled_agents={len(samples)} lane_types={lane_types} "
+        f"source_maps={len(unique_source_scene_names)} source={source_scene_desc} "
+        f"mode={'real_start_end' if bool(args.real_start_end) else 'sampled'} "
+        f"invincible={bool(args.invincible)} "
+        f"world_count={world_count} sampled_agents_total={sum(len(s) for s in samples_by_world)} lane_types={lane_types} "
         f"checkpoint={checkpoint_path}"
     )
 
@@ -1110,6 +1258,23 @@ def run(args: argparse.Namespace) -> None:
         model.policy.set_training_mode(False)
 
         obs = env.reset()
+        assignment_names = [
+            Path(
+                str(
+                    a.get(
+                        "source_scene_json",
+                        a.get("scene_json", f"world_{wi:03d}.json"),
+                    )
+                )
+            ).name
+            for wi, a in enumerate((eval_curriculum.get("world", {}) or {}).get("assignments", []) or [])
+        ]
+        spawned_by_world: Dict[int, int] = {}
+        for key in list(getattr(env, "flat_slot_keys", []) or []):
+            wi = int(getattr(key, "world_idx"))
+            spawned_by_world[wi] = int(spawned_by_world.get(wi, 0)) + 1
+        success_by_world: Dict[int, int] = {wi: 0 for wi in range(int(world_count))}
+
         ttc_overlay_enabled = bool(args.gui) and (
             bool(args.ttc_overlay) or bool(args.ttc_radius_overlay)
         )
@@ -1130,10 +1295,11 @@ def run(args: argparse.Namespace) -> None:
                 radius_opacity=float(args.ttc_radius_opacity),
             )
         controlled_n = int(env.num_envs)
-        if controlled_n != int(args.num_vehicles):
+        expected_controlled = int(sum(len(s) for s in samples_by_world))
+        if (not bool(args.real_start_end)) and expected_controlled > 0 and controlled_n != expected_controlled:
             print(
                 "[testbed][warn] controlled agent count differs from requested. "
-                f"requested={int(args.num_vehicles)} controlled={controlled_n}"
+                f"requested={expected_controlled} controlled={controlled_n}"
             )
 
         max_steps = int(args.steps or (eval_curriculum.get("env", {}) or {}).get("max_steps", 300))
@@ -1146,10 +1312,34 @@ def run(args: argparse.Namespace) -> None:
         road_contact_done_count = 0
         below_min_z_count = 0
         rollout_rows: List[Dict[str, Any]] = []
+        vehicle_collided_any_tokens: set[tuple[int, int]] = set()
+        road_edge_contact_any_tokens: set[tuple[int, int]] = set()
+        forbidden_road_types = set(
+            int(v) for v in (
+                getattr(env.choco_env, "road_contact_done_types", None)
+                or getattr(env.choco_env, "geom_road_edge_types", [])
+                or []
+            )
+        )
 
         for step_idx in range(max_steps):
             actions, _ = model.predict(obs, deterministic=True)
             obs, _, dones, _ = env.step(actions)
+            raw_info = getattr(env, "last_step_info_raw", None)
+            if raw_info is not None:
+                raw_keys = list(getattr(raw_info, "keys", []) or [])
+                raw_newly_success = np.asarray(
+                    getattr(raw_info, "newly_success", np.zeros((len(raw_keys),), dtype=bool)),
+                    dtype=bool,
+                )
+                n = min(len(raw_keys), int(raw_newly_success.shape[0]))
+                for i in range(n):
+                    if not bool(raw_newly_success[i]):
+                        continue
+                    wi = int(getattr(raw_keys[i], "world_idx", -1))
+                    if wi < 0:
+                        continue
+                    success_by_world[wi] = int(success_by_world.get(wi, 0)) + 1
             if ttc_overlay_enabled:
                 _update_ttc_overlay(
                     env.choco_env,
@@ -1178,6 +1368,21 @@ def run(args: argparse.Namespace) -> None:
             vehicle_contact_done_count += int(info.get("vehicle_contact_done_count", 0))
             road_contact_done_count += int(info.get("road_contact_done_count", 0))
             below_min_z_count += int(info.get("below_min_z_count", 0))
+
+            # Track "ever collided/contacted road-edge" per spawned token.
+            for key in list(getattr(env, "flat_slot_keys", []) or []):
+                wi = int(getattr(key, "world_idx"))
+                aid = int(getattr(key, "agent_id"))
+                token = (wi, aid)
+                h = env.choco_env.ctrl.get(wi, aid)
+                if h is None:
+                    continue
+                if bool(env.choco_env._get_vehicle_collided(h)):
+                    vehicle_collided_any_tokens.add(token)
+                if forbidden_road_types:
+                    contact_types = env.choco_env._get_contact_types(h)
+                    if any(int(t) in forbidden_road_types for t in contact_types):
+                        road_edge_contact_any_tokens.add(token)
 
             rollout_rows.append(
                 {
@@ -1211,6 +1416,13 @@ def run(args: argparse.Namespace) -> None:
             spawned_total = int(controlled_n)
         done_total = int(ever_done.sum())
 
+        if bool(args.invincible):
+            vehicle_collision_count_metric = int(len(vehicle_collided_any_tokens))
+            road_done_count_metric = int(len(road_edge_contact_any_tokens))
+        else:
+            vehicle_collision_count_metric = int(vehicle_contact_done_count)
+            road_done_count_metric = int(road_contact_done_count)
+
         metrics = {
             "spawned_total": int(spawned_total),
             "controlled_agents": int(controlled_n),
@@ -1221,30 +1433,57 @@ def run(args: argparse.Namespace) -> None:
                 "success": int(success_count),
                 "vehicle_contact_done": int(vehicle_contact_done_count),
                 "road_contact_done": int(road_contact_done_count),
+                "vehicle_collision_count_metric": int(vehicle_collision_count_metric),
+                "road_done_count_metric": int(road_done_count_metric),
+                "vehicle_collision_any_count": int(len(vehicle_collided_any_tokens)),
+                "road_edge_contact_any_count": int(len(road_edge_contact_any_tokens)),
                 "below_min_z": int(below_min_z_count),
                 "done_total": int(done_total),
             },
             "rates": {
                 "success_rate": float(success_count) / float(max(1, spawned_total)),
-                "vehicle_collision_rate": float(vehicle_contact_done_count) / float(max(1, spawned_total)),
-                "road_done_rate": float(road_contact_done_count) / float(max(1, spawned_total)),
+                "vehicle_collision_rate": float(vehicle_collision_count_metric) / float(max(1, spawned_total)),
+                "road_done_rate": float(road_done_count_metric) / float(max(1, spawned_total)),
                 "below_min_z_rate": float(below_min_z_count) / float(max(1, spawned_total)),
                 "done_rate": float(done_total) / float(max(1, spawned_total)),
             },
         }
+        per_map_summary = []
+        for wi in range(int(world_count)):
+            spawned_w = int(spawned_by_world.get(wi, 0))
+            success_w = int(success_by_world.get(wi, 0))
+            map_name = assignment_names[wi] if wi < len(assignment_names) else f"world_{wi:03d}"
+            per_map_summary.append(
+                {
+                    "world_idx": int(wi),
+                    "map_name": str(map_name),
+                    "spawned_total": int(spawned_w),
+                    "success_count": int(success_w),
+                    "success_rate": float(success_w) / float(max(1, spawned_w)),
+                }
+            )
+
+        agent_dump_by_world = []
+        for wi, samples in enumerate(samples_by_world):
+            world_dump = [
+                {
+                    "sample_idx": int(sample.sample_idx),
+                    "polyline_idx": int(sample.polyline_idx),
+                    "road_type": int(sample.road_type),
+                    "travel_distance_m": float(sample.travel_distance_m),
+                    "start_xyz": [float(v) for v in sample.start_xyz],
+                    "start_yaw_rad": float(sample.start_yaw_rad),
+                    "goal_xyz": [float(v) for v in sample.goal_xyz],
+                    "goal_yaw_rad": float(sample.goal_yaw_rad),
+                }
+                for sample in samples
+            ]
+            agent_dump_by_world.append({"world_idx": int(wi), "agents": world_dump})
 
         agent_dump = [
-            {
-                "sample_idx": int(sample.sample_idx),
-                "polyline_idx": int(sample.polyline_idx),
-                "road_type": int(sample.road_type),
-                "travel_distance_m": float(sample.travel_distance_m),
-                "start_xyz": [float(v) for v in sample.start_xyz],
-                "start_yaw_rad": float(sample.start_yaw_rad),
-                "goal_xyz": [float(v) for v in sample.goal_xyz],
-                "goal_yaw_rad": float(sample.goal_yaw_rad),
-            }
-            for sample in samples
+            entry
+            for world_entry in agent_dump_by_world
+            for entry in world_entry["agents"]
         ]
 
         metadata = {
@@ -1253,19 +1492,29 @@ def run(args: argparse.Namespace) -> None:
             "world_config": str(Path(args.world_config).expanduser().resolve()),
             "derived_curriculum": str(derived_cfg_path),
             "source_scene_json": str(scene_path),
-            "derived_scene_json": str(sampled_scene_path),
+            "source_scene_jsons": [
+                str(a.get("source_scene_json", a.get("scene_json", "")))
+                for a in assignment_entries
+            ],
+            "derived_scene_json": str(sampled_scene_paths[0]) if sampled_scene_paths else None,
+            "derived_scene_jsons": [str(p) for p in sampled_scene_paths],
             "assignment_index": int(args.assignment_index),
             "base_assignment": base_assignment,
             "friction_cfg": friction_cfg,
+            "world_count": int(world_count),
             "lane_types": lane_types,
             "sampling": {
+                "mode": "real_start_end" if bool(args.real_start_end) else "sampled",
                 "num_vehicles_requested": int(args.num_vehicles),
-                "num_vehicles_sampled": int(len(samples)),
+                "num_vehicles_sampled": int(len(agent_dump)),
+                "num_vehicles_sampled_per_world": [int(len(s)) for s in samples_by_world],
                 "min_travel_distance_m": float(args.min_travel_distance_m),
                 "max_travel_distance_m": float(args.max_travel_distance_m),
                 "min_start_gap_m": float(args.min_start_gap_m),
                 "min_goal_gap_m": float(args.min_goal_gap_m),
                 "endpoint_margin_m": float(args.endpoint_margin_m),
+                "min_polyline_length_m": float(args.min_polyline_length_m),
+                "max_segment_gap_m": float(args.max_segment_gap_m),
                 "bounds_size_m": float(bounds_size_m),
                 "origin_mode": str(origin_mode),
             },
@@ -1273,6 +1522,7 @@ def run(args: argparse.Namespace) -> None:
                 "seed": int(args.seed),
                 "device": str(device),
                 "gui": bool(args.gui),
+                "invincible": bool(args.invincible),
                 "gui_step_delay_sec": float(args.gui_step_delay_sec),
                 "ttc_overlay": bool(ttc_overlay_enabled),
                 "ttc_text_overlay": bool(args.ttc_overlay),
@@ -1289,7 +1539,9 @@ def run(args: argparse.Namespace) -> None:
                 "distant_light_intensity": float(args.distant_light_intensity),
             },
             "metrics": metrics,
+            "per_map_summary": per_map_summary,
             "sampled_agents": agent_dump,
+            "sampled_agents_by_world": agent_dump_by_world,
         }
 
         metrics_path = out_dir / "metrics.json"
@@ -1298,7 +1550,11 @@ def run(args: argparse.Namespace) -> None:
         write_rollout_csv(rollout_csv_path, rollout_rows)
 
         print(f"[testbed] wrote derived curriculum: {derived_cfg_path}")
-        print(f"[testbed] wrote sampled scene: {sampled_scene_path}")
+        if sampled_scene_paths:
+            print(
+                f"[testbed] wrote sampled scenes: n={len(sampled_scene_paths)} "
+                f"first={sampled_scene_paths[0]}"
+            )
         print(f"[testbed] wrote rollout metrics CSV: {rollout_csv_path}")
         print(f"[testbed] wrote summary metrics JSON: {metrics_path}")
         print(
@@ -1308,6 +1564,22 @@ def run(args: argparse.Namespace) -> None:
             f"road_done_rate={metrics['rates']['road_done_rate']:.4f} "
             f"done_rate={metrics['rates']['done_rate']:.4f}"
         )
+        print(
+            "[testbed] summary_counts "
+            f"success={metrics['counts']['success']}/{metrics['spawned_total']} "
+            f"({metrics['rates']['success_rate']:.4f}) "
+            f"vehicle_collision={metrics['counts']['vehicle_collision_count_metric']}/{metrics['spawned_total']} "
+            f"({metrics['rates']['vehicle_collision_rate']:.4f}) "
+            f"road_done={metrics['counts']['road_done_count_metric']}/{metrics['spawned_total']} "
+            f"({metrics['rates']['road_done_rate']:.4f})"
+        )
+        for row in per_map_summary:
+            print(
+                "[testbed] summary_map "
+                f"map={row['map_name']} world={int(row['world_idx']):03d} "
+                f"success={int(row['success_count'])}/{int(row['spawned_total'])} "
+                f"({float(row['success_rate']):.4f})"
+            )
     finally:
         try:
             if env is not None:
