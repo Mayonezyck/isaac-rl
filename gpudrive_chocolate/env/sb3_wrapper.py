@@ -118,6 +118,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             ttc_penalty_alpha=float(cfg_env.get("ttc_penalty_alpha", 1.0)),
             ttc_penalty_max=float(cfg_env.get("ttc_penalty_max", 1.0)),
             ttc_penalty_min_ttc=float(cfg_env.get("ttc_penalty_min_ttc", 0.2)),
+            ttc_penalty_function=str(cfg_env.get("ttc_penalty_function", "inverse")),
+            ttc_proximity_zuo_a=float(cfg_env.get("ttc_proximity_zuo_a", 0.5)),
+            ttc_proximity_zuo_b=float(cfg_env.get("ttc_proximity_zuo_b", 5.0)),
             road_edge_ttc_penalty_enable=bool(
                 cfg_env.get("road_edge_ttc_penalty_enable", False)
             ),
@@ -136,6 +139,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 if cfg_env.get("road_edge_ttc_radius_m", None) is None
                 else float(cfg_env.get("road_edge_ttc_radius_m"))
             ),
+            road_edge_ttc_penalty_function=cfg_env.get("road_edge_ttc_penalty_function", None),
+            road_edge_ttc_proximity_zuo_a=cfg_env.get("road_edge_ttc_proximity_zuo_a", None),
+            road_edge_ttc_proximity_zuo_b=cfg_env.get("road_edge_ttc_proximity_zuo_b", None),
             ttc_delta_penalty_enable=bool(cfg_env.get("ttc_delta_penalty_enable", False)),
             ttc_delta_penalty_alpha=float(cfg_env.get("ttc_delta_penalty_alpha", 0.0)),
             ttc_delta_penalty_max=float(cfg_env.get("ttc_delta_penalty_max", 0.5)),

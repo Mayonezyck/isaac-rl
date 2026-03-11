@@ -177,12 +177,18 @@ class ChocolateEnv:
         ttc_penalty_alpha: float = 1.0,
         ttc_penalty_max: float = 1.0,
         ttc_penalty_min_ttc: float = 0.2,
+        ttc_penalty_function: str = "inverse",
+        ttc_proximity_zuo_a: float = 0.5,
+        ttc_proximity_zuo_b: float = 5.0,
         road_edge_ttc_penalty_enable: bool = False,
         road_edge_ttc_penalty_alpha: float = 0.0,
         road_edge_ttc_penalty_max: float = 0.5,
         road_edge_ttc_penalty_min_ttc: float = 0.5,
         road_edge_ttc_hard_min_ttc: float = 0.5,
         road_edge_ttc_radius_m: Optional[float] = None,
+        road_edge_ttc_penalty_function: Optional[str] = None,
+        road_edge_ttc_proximity_zuo_a: Optional[float] = None,
+        road_edge_ttc_proximity_zuo_b: Optional[float] = None,
         ttc_delta_penalty_enable: bool = False,
         ttc_delta_penalty_alpha: float = 0.0,
         ttc_delta_penalty_max: float = 0.5,
@@ -264,6 +270,16 @@ class ChocolateEnv:
         self.ttc_penalty_alpha = float(ttc_penalty_alpha)
         self.ttc_penalty_max = float(ttc_penalty_max)
         self.ttc_penalty_min_ttc = float(ttc_penalty_min_ttc)
+        ttc_fn = str(ttc_penalty_function).strip().lower()
+        if ttc_fn not in {"inverse", "proximity_zuo"}:
+            print(
+                f"[warn][fallback] Unknown ttc_penalty_function='{ttc_penalty_function}', "
+                "falling back to 'inverse'."
+            )
+            ttc_fn = "inverse"
+        self.ttc_penalty_function = ttc_fn
+        self.ttc_proximity_zuo_a = max(1e-6, float(ttc_proximity_zuo_a))
+        self.ttc_proximity_zuo_b = max(1e-6, float(ttc_proximity_zuo_b))
         self.road_edge_ttc_penalty_enable = bool(road_edge_ttc_penalty_enable)
         self.road_edge_ttc_penalty_alpha = max(0.0, float(road_edge_ttc_penalty_alpha))
         self.road_edge_ttc_penalty_max = max(0.0, float(road_edge_ttc_penalty_max))
@@ -271,6 +287,33 @@ class ChocolateEnv:
         self.road_edge_ttc_hard_min_ttc = max(0.0, float(road_edge_ttc_hard_min_ttc))
         self.road_edge_ttc_radius_m = (
             None if road_edge_ttc_radius_m is None else max(0.0, float(road_edge_ttc_radius_m))
+        )
+        road_ttc_fn_raw = (
+            ttc_fn if road_edge_ttc_penalty_function is None else str(road_edge_ttc_penalty_function)
+        )
+        road_ttc_fn = str(road_ttc_fn_raw).strip().lower()
+        if road_ttc_fn not in {"inverse", "proximity_zuo"}:
+            print(
+                f"[warn][fallback] Unknown road_edge_ttc_penalty_function='{road_ttc_fn_raw}', "
+                f"falling back to '{ttc_fn}'."
+            )
+            road_ttc_fn = ttc_fn
+        self.road_edge_ttc_penalty_function = road_ttc_fn
+        self.road_edge_ttc_proximity_zuo_a = max(
+            1e-6,
+            float(
+                self.ttc_proximity_zuo_a
+                if road_edge_ttc_proximity_zuo_a is None
+                else road_edge_ttc_proximity_zuo_a
+            ),
+        )
+        self.road_edge_ttc_proximity_zuo_b = max(
+            1e-6,
+            float(
+                self.ttc_proximity_zuo_b
+                if road_edge_ttc_proximity_zuo_b is None
+                else road_edge_ttc_proximity_zuo_b
+            ),
         )
         self.ttc_delta_penalty_enable = bool(ttc_delta_penalty_enable)
         self.ttc_delta_penalty_alpha = max(0.0, float(ttc_delta_penalty_alpha))
@@ -1046,6 +1089,34 @@ class ChocolateEnv:
                 out[wi] = states
         return out
 
+    def _ttc_abs_penalty_from_min_ttc(self, min_ttc: float) -> float:
+        if self.ttc_penalty_function == "proximity_zuo":
+            a = max(1e-6, float(self.ttc_proximity_zuo_a))
+            b = max(1e-6, float(self.ttc_proximity_zuo_b))
+            c = max(0.0, float(self.ttc_penalty_max))
+            ratio = abs(float(min_ttc) / a)
+            return float(c * math.exp(-math.pow(ratio, b)))
+
+        # Legacy inverse mapping with hard clamp for imminent TTC.
+        if float(min_ttc) < 0.5:
+            return float(self.ttc_penalty_max)
+        denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
+        return min(float(self.ttc_penalty_max), float(self.ttc_penalty_alpha) / denom)
+
+    def _road_edge_ttc_abs_penalty_from_min_ttc(self, min_ttc: float) -> float:
+        if self.road_edge_ttc_penalty_function == "proximity_zuo":
+            a = max(1e-6, float(self.road_edge_ttc_proximity_zuo_a))
+            b = max(1e-6, float(self.road_edge_ttc_proximity_zuo_b))
+            c = max(0.0, float(self.road_edge_ttc_penalty_max))
+            ratio = abs(float(min_ttc) / a)
+            return float(c * math.exp(-math.pow(ratio, b)))
+
+        # Legacy inverse mapping with configurable hard clamp.
+        if float(min_ttc) < float(self.road_edge_ttc_hard_min_ttc):
+            return float(self.road_edge_ttc_penalty_max)
+        denom = max(float(min_ttc), float(self.road_edge_ttc_penalty_min_ttc))
+        return min(float(self.road_edge_ttc_penalty_max), float(self.road_edge_ttc_penalty_alpha) / denom)
+
     def _compute_ttc_penalty_torch_cuda(
         self,
         keys: List[object],
@@ -1227,14 +1298,7 @@ class ChocolateEnv:
 
                 abs_penalty = 0.0
                 if self.ttc_penalty_enable:
-                    if float(min_ttc) < 0.5:
-                        abs_penalty = float(self.ttc_penalty_max)
-                    else:
-                        denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
-                        abs_penalty = min(
-                            float(self.ttc_penalty_max),
-                            float(self.ttc_penalty_alpha) / denom,
-                        )
+                    abs_penalty = self._ttc_abs_penalty_from_min_ttc(min_ttc)
 
                 delta_penalty = 0.0
                 if self.ttc_delta_penalty_enable and self.ttc_delta_penalty_alpha > 0.0:
@@ -1427,12 +1491,7 @@ class ChocolateEnv:
 
             abs_penalty = 0.0
             if self.ttc_penalty_enable:
-                # Hard safety clamp: imminent risk (<0.5 s TTC) gets maximum penalty.
-                if float(min_ttc) < 0.5:
-                    abs_penalty = float(self.ttc_penalty_max)
-                else:
-                    denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
-                    abs_penalty = min(float(self.ttc_penalty_max), float(self.ttc_penalty_alpha) / denom)
+                abs_penalty = self._ttc_abs_penalty_from_min_ttc(min_ttc)
 
             delta_penalty = 0.0
             if self.ttc_delta_penalty_enable and self.ttc_delta_penalty_alpha > 0.0:
@@ -1600,14 +1659,7 @@ class ChocolateEnv:
                     continue
                 min_ttc = float(torch.min(ttc[finite_mask]).item())
 
-                if float(min_ttc) < float(self.road_edge_ttc_hard_min_ttc):
-                    abs_penalty = float(self.road_edge_ttc_penalty_max)
-                else:
-                    denom = max(float(min_ttc), float(self.road_edge_ttc_penalty_min_ttc))
-                    abs_penalty = min(
-                        float(self.road_edge_ttc_penalty_max),
-                        float(self.road_edge_ttc_penalty_alpha) / denom,
-                    )
+                abs_penalty = self._road_edge_ttc_abs_penalty_from_min_ttc(min_ttc)
                 penalties[i] = -float(abs_penalty)
         except Exception as exc:
             self._warn_fallback(
@@ -1767,14 +1819,7 @@ class ChocolateEnv:
                 continue
             min_ttc = float(np.min(finite_ttc))
 
-            if float(min_ttc) < float(self.road_edge_ttc_hard_min_ttc):
-                abs_penalty = float(self.road_edge_ttc_penalty_max)
-            else:
-                denom = max(float(min_ttc), float(self.road_edge_ttc_penalty_min_ttc))
-                abs_penalty = min(
-                    float(self.road_edge_ttc_penalty_max),
-                    float(self.road_edge_ttc_penalty_alpha) / denom,
-                )
+            abs_penalty = self._road_edge_ttc_abs_penalty_from_min_ttc(min_ttc)
             penalties[i] = -float(abs_penalty)
 
         return penalties
