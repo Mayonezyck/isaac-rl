@@ -190,6 +190,7 @@ class ChocolateEnv:
         ttc_use_vehicle_size: bool = True,
         ttc_vehicle_radius_scale: float = 0.75,
         ttc_vehicle_radius_margin_m: float = 0.20,
+        ttc_backend: str = "numpy",
         obs_viz_enable: bool = False,
         obs_viz_world_idx: int = 0,
         obs_viz_agent_rank: int = 0,
@@ -278,6 +279,13 @@ class ChocolateEnv:
         self.ttc_use_vehicle_size = bool(ttc_use_vehicle_size)
         self.ttc_vehicle_radius_scale = max(0.0, float(ttc_vehicle_radius_scale))
         self.ttc_vehicle_radius_margin_m = max(0.0, float(ttc_vehicle_radius_margin_m))
+        backend = str(ttc_backend).strip().lower()
+        if backend not in {"numpy", "torch_cuda"}:
+            print(
+                f"[warn][fallback] Unknown ttc_backend='{ttc_backend}', falling back to 'numpy'."
+            )
+            backend = "numpy"
+        self.ttc_backend = backend
         self.obs_viz_enable = bool(obs_viz_enable)
         self.obs_viz_world_idx = int(obs_viz_world_idx)
         self.obs_viz_agent_rank = int(obs_viz_agent_rank)
@@ -345,6 +353,7 @@ class ChocolateEnv:
         self._prev_min_ttc_s: Dict[Tuple[int, int], float] = {}
         self._world_road_geometry: Dict[int, Dict[str, np.ndarray]] = {}
         self._vehicle_radius_u_cache: Dict[Tuple[int, int], float] = {}
+        self._vehicle_shape_u_cache: Dict[Tuple[int, int], Tuple[float, float, float]] = {}
         self._bbox_cache = None
         self._mpu = float(getattr(self.sim, "meters_per_unit", 1.0))  # IsaacSim usually has this
         self._collision_tracker = None
@@ -363,6 +372,32 @@ class ChocolateEnv:
             suffix = " [further repeats suppressed]" if (count + 1) == self._fallback_warn_limit else ""
             print(f"[warn][fallback] {message}{suffix}")
         self._fallback_warn_counts[key] = count + 1
+
+    def _get_ttc_torch_cuda(self):
+        if self.ttc_backend != "torch_cuda":
+            return None, None
+        try:
+            import torch  # type: ignore
+        except Exception as exc:
+            self._warn_fallback(
+                "ttc_backend_torch_import",
+                f"TTC backend 'torch_cuda' requested but torch import failed ({exc}); using numpy TTC.",
+            )
+            return None, None
+        try:
+            if not torch.cuda.is_available():
+                self._warn_fallback(
+                    "ttc_backend_torch_cuda_unavailable",
+                    "TTC backend 'torch_cuda' requested but CUDA is unavailable; using numpy TTC.",
+                )
+                return None, None
+            return torch, torch.device("cuda")
+        except Exception as exc:
+            self._warn_fallback(
+                "ttc_backend_torch_cuda_error",
+                f"TTC backend 'torch_cuda' init failed ({exc}); using numpy TTC.",
+            )
+            return None, None
 
     def _world_root_path(self, world_idx: int) -> str:
         return f"{self.root_container}/{self.world_prefix}{int(world_idx):03d}"
@@ -760,21 +795,21 @@ class ChocolateEnv:
             pass
         return vehicle_prim
 
-    def _vehicle_radius_u_for_state(
+    def _vehicle_shape_u_for_state(
         self,
         *,
         world_idx: int,
         agent_id: int,
         vehicle_prim: Usd.Prim,
         custom_data: Dict[str, Any],
-    ) -> float:
+    ) -> Tuple[float, float, float]:
         if not self.ttc_use_vehicle_size:
-            return 0.0
+            return (0.0, 0.0, 0.0)
 
         token = self._agent_token(world_idx, agent_id)
-        cached = self._vehicle_radius_u_cache.get(token, None)
+        cached = self._vehicle_shape_u_cache.get(token, None)
         if cached is not None:
-            return float(cached)
+            return (float(cached[0]), float(cached[1]), float(cached[2]))
 
         mpu = max(float(self._mpu), 1e-6)
         length_u = 0.0
@@ -866,10 +901,26 @@ class ChocolateEnv:
             )
             width_u = 2.0 / mpu
 
-        base_radius_u = 0.5 * math.sqrt(length_u * length_u + width_u * width_u)
-        margin_u = float(self.ttc_vehicle_radius_margin_m) / mpu
-        radius_u = max(0.0, float(self.ttc_vehicle_radius_scale) * base_radius_u + margin_u)
+        # Three-circle TTC model: each circle radius follows the vehicle width.
+        radius_u = max(0.0, 0.5 * width_u)
+        self._vehicle_shape_u_cache[token] = (float(length_u), float(width_u), float(radius_u))
         self._vehicle_radius_u_cache[token] = float(radius_u)
+        return (float(length_u), float(width_u), float(radius_u))
+
+    def _vehicle_radius_u_for_state(
+        self,
+        *,
+        world_idx: int,
+        agent_id: int,
+        vehicle_prim: Usd.Prim,
+        custom_data: Dict[str, Any],
+    ) -> float:
+        _length_u, _width_u, radius_u = self._vehicle_shape_u_for_state(
+            world_idx=world_idx,
+            agent_id=agent_id,
+            vehicle_prim=vehicle_prim,
+            custom_data=custom_data,
+        )
         return float(radius_u)
 
     def _collect_all_vehicle_states(self):
@@ -913,6 +964,7 @@ class ChocolateEnv:
                 # Use a consistent moving frame for TTC state.
                 # For controllable vehicles, prefer rigid-body prim pose/velocity from controller handle.
                 px = py = None
+                yaw = None
                 vx, vy = 0.0, 0.0
                 if controllable:
                     h = self.ctrl.get(wi, int(agent_id))
@@ -923,8 +975,10 @@ class ChocolateEnv:
                             M = UsdGeom.Xformable(pose_prim).ComputeLocalToWorldTransform(tc)
                             p = M.ExtractTranslation()
                             px, py = float(p[0]), float(p[1])
+                            yaw = float(_yaw_from_xform(M))
                         except Exception:
                             px = py = None
+                            yaw = None
                         if rb_prim is not None:
                             vx, vy, _ = self._get_rb_linear_velocity_world(rb_prim)
                         else:
@@ -939,14 +993,38 @@ class ChocolateEnv:
                         M = UsdGeom.Xformable(vehicle_prim).ComputeLocalToWorldTransform(tc)
                         p = M.ExtractTranslation()
                         px, py = float(p[0]), float(p[1])
+                        yaw = float(_yaw_from_xform(M))
                     except Exception:
                         continue
-                radius_u = self._vehicle_radius_u_for_state(
+                if yaw is None or not np.isfinite(float(yaw)):
+                    yaw = 0.0
+                fwd_x = float(math.cos(float(yaw)))
+                fwd_y = float(math.sin(float(yaw)))
+                fwd_norm = math.hypot(fwd_x, fwd_y)
+                if fwd_norm <= 1e-6:
+                    fwd_x, fwd_y = 1.0, 0.0
+                else:
+                    fwd_x /= fwd_norm
+                    fwd_y /= fwd_norm
+
+                length_u, width_u, radius_u = self._vehicle_shape_u_for_state(
                     world_idx=wi,
                     agent_id=int(agent_id),
                     vehicle_prim=vehicle_prim,
                     custom_data=cd,
                 )
+                if self.ttc_use_vehicle_size and radius_u > 0.0 and length_u > 0.0:
+                    spine_offset_u = max(0.0, 0.5 * float(length_u) - float(radius_u))
+                    offsets_u = np.asarray(
+                        [-spine_offset_u, 0.0, spine_offset_u], dtype=np.float32
+                    )
+                    cx = float(px) + offsets_u * float(fwd_x)
+                    cy = float(py) + offsets_u * float(fwd_y)
+                    ttc_centers_u = np.stack([cx, cy], axis=-1).astype(np.float32)
+                    ttc_radii_u = np.full((3,), float(radius_u), dtype=np.float32)
+                else:
+                    ttc_centers_u = np.asarray([[float(px), float(py)]], dtype=np.float32)
+                    ttc_radii_u = np.asarray([float(max(0.0, radius_u))], dtype=np.float32)
 
                 states.append(
                     {
@@ -954,7 +1032,13 @@ class ChocolateEnv:
                         "token": token,
                         "pos": (px, py),
                         "vel": (vx, vy),
+                        "yaw": float(yaw),
+                        "fwd": (float(fwd_x), float(fwd_y)),
+                        "length_u": float(length_u),
+                        "width_u": float(width_u),
                         "radius_u": radius_u,
+                        "ttc_centers_u": ttc_centers_u,
+                        "ttc_radii_u": ttc_radii_u,
                         "controllable": controllable,
                     }
                 )
@@ -962,14 +1046,16 @@ class ChocolateEnv:
                 out[wi] = states
         return out
 
-    def _compute_ttc_penalty(
+    def _compute_ttc_penalty_torch_cuda(
         self,
         keys: List[object],
         active: np.ndarray,
+        *,
         states_by_world: Optional[Dict[int, List[Dict[str, Any]]]] = None,
-    ) -> np.ndarray:
-        if not (self.ttc_penalty_enable or self.ttc_delta_penalty_enable):
-            return np.zeros((len(keys),), dtype=np.float32)
+    ) -> Optional[np.ndarray]:
+        torch, torch_dev = self._get_ttc_torch_cuda()
+        if torch is None or torch_dev is None:
+            return None
         if not self.ttc_use_vehicle_size:
             self._warn_fallback(
                 "ttc_point_agent_mode",
@@ -980,81 +1066,364 @@ class ChocolateEnv:
             states_by_world = self._collect_all_vehicle_states()
         penalties = np.zeros((len(keys),), dtype=np.float32)
         env_step_dt = max(1e-6, float(self.physics_dt) * float(self.action_repeat))
+        excluded_tokens = set(self._pending_respawns.keys()) | set(self._quarantined_tokens)
+
+        try:
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+                token = self._agent_token_from_key(k)
+                wi = int(getattr(k, "world_idx", -1))
+                world_states = states_by_world.get(wi, None)
+                if not world_states:
+                    self._prev_min_ttc_s.pop(token, None)
+                    continue
+                ego_state = None
+                for s in world_states:
+                    if s["agent_id"] == int(k.agent_id):
+                        ego_state = s
+                        break
+                if ego_state is None:
+                    self._prev_min_ttc_s.pop(token, None)
+                    continue
+
+                ego_centers_np = np.asarray(
+                    ego_state.get(
+                        "ttc_centers_u",
+                        np.asarray([ego_state["pos"]], dtype=np.float32),
+                    ),
+                    dtype=np.float32,
+                )
+                ego_radii_np = np.asarray(
+                    ego_state.get(
+                        "ttc_radii_u",
+                        np.asarray([ego_state.get("radius_u", 0.0)], dtype=np.float32),
+                    ),
+                    dtype=np.float32,
+                )
+                if ego_centers_np.ndim != 2 or ego_centers_np.shape[0] <= 0:
+                    ego_centers_np = np.asarray([ego_state["pos"]], dtype=np.float32)
+                if ego_radii_np.ndim != 1 or ego_radii_np.shape[0] != ego_centers_np.shape[0]:
+                    ego_radii_np = np.full(
+                        (ego_centers_np.shape[0],),
+                        float(max(0.0, ego_state.get("radius_u", 0.0))),
+                        dtype=np.float32,
+                    )
+
+                ego_vel_np = np.asarray(ego_state["vel"], dtype=np.float32)[:2]
+                ego_fwd_np = np.asarray(ego_state.get("fwd", (1.0, 0.0)), dtype=np.float32)[:2]
+                fwd_norm = float(np.linalg.norm(ego_fwd_np))
+                if fwd_norm <= 1e-6:
+                    ego_fwd_np = np.asarray([1.0, 0.0], dtype=np.float32)
+                else:
+                    ego_fwd_np = ego_fwd_np / fwd_norm
+
+                other_centers_list: List[np.ndarray] = []
+                other_radii_list: List[np.ndarray] = []
+                other_vel_list: List[np.ndarray] = []
+                for s in world_states:
+                    if s["agent_id"] == int(k.agent_id):
+                        continue
+                    if s.get("token", None) in excluded_tokens:
+                        continue
+                    centers = np.asarray(
+                        s.get("ttc_centers_u", np.asarray([s["pos"]], dtype=np.float32)),
+                        dtype=np.float32,
+                    )
+                    if centers.ndim != 2 or centers.shape[0] <= 0:
+                        centers = np.asarray([s["pos"]], dtype=np.float32)
+                    radii = np.asarray(
+                        s.get("ttc_radii_u", np.asarray([s.get("radius_u", 0.0)], dtype=np.float32)),
+                        dtype=np.float32,
+                    )
+                    if radii.ndim != 1 or radii.shape[0] != centers.shape[0]:
+                        radii = np.full(
+                            (centers.shape[0],),
+                            float(max(0.0, s.get("radius_u", 0.0))),
+                            dtype=np.float32,
+                        )
+                    vel = np.asarray(s["vel"], dtype=np.float32)[:2]
+                    vel_rep = np.repeat(vel[None, :], centers.shape[0], axis=0)
+                    other_centers_list.append(centers)
+                    other_radii_list.append(radii)
+                    other_vel_list.append(vel_rep)
+
+                if not other_centers_list:
+                    self._prev_min_ttc_s.pop(token, None)
+                    continue
+
+                ego_centers = torch.as_tensor(ego_centers_np, dtype=torch.float32, device=torch_dev)
+                ego_radii = torch.as_tensor(ego_radii_np, dtype=torch.float32, device=torch_dev)
+                ego_vel = torch.as_tensor(ego_vel_np, dtype=torch.float32, device=torch_dev)
+                ego_fwd = torch.as_tensor(ego_fwd_np, dtype=torch.float32, device=torch_dev)
+                other_centers = torch.as_tensor(
+                    np.concatenate(other_centers_list, axis=0),
+                    dtype=torch.float32,
+                    device=torch_dev,
+                )
+                other_radii = torch.as_tensor(
+                    np.concatenate(other_radii_list, axis=0),
+                    dtype=torch.float32,
+                    device=torch_dev,
+                )
+                other_vel = torch.as_tensor(
+                    np.concatenate(other_vel_list, axis=0),
+                    dtype=torch.float32,
+                    device=torch_dev,
+                )
+
+                rel = other_centers.unsqueeze(0) - ego_centers.unsqueeze(1)
+                rv = other_vel.unsqueeze(0) - ego_vel.view(1, 1, 2)
+                rx = rel[:, :, 0]
+                ry = rel[:, :, 1]
+                rvx = rv[:, :, 0]
+                rvy = rv[:, :, 1]
+                r2 = rx * rx + ry * ry
+                v2 = rvx * rvx + rvy * rvy
+                rdotv = rx * rvx + ry * rvy
+                combined_r = ego_radii.view(-1, 1) + other_radii.view(1, -1)
+                combined_r2 = combined_r * combined_r
+
+                forward_dot = rx * ego_fwd[0] + ry * ego_fwd[1]
+                forward_mask = forward_dot > 0.0
+                inf = torch.full_like(r2, float("inf"))
+                ttc = inf.clone()
+                overlap_mask = forward_mask & (r2 <= combined_r2)
+                ttc = torch.where(overlap_mask, torch.zeros_like(ttc), ttc)
+
+                moving_mask = forward_mask & (~overlap_mask) & (v2 > 1e-6)
+                if bool(torch.any(moving_mask).item()):
+                    a = torch.where(moving_mask, v2, torch.ones_like(v2))
+                    b = torch.where(moving_mask, 2.0 * rdotv, torch.zeros_like(rdotv))
+                    c = torch.where(moving_mask, r2 - combined_r2, torch.zeros_like(r2))
+                    disc = b * b - 4.0 * a * c
+                    valid_quad = moving_mask & (disc >= 0.0)
+                    sqrt_disc = torch.sqrt(torch.clamp(disc, min=0.0))
+                    denom = 2.0 * torch.clamp(a, min=1e-6)
+                    t_enter = (-b - sqrt_disc) / denom
+                    t_exit = (-b + sqrt_disc) / denom
+                    valid_enter = valid_quad & (t_exit >= 0.0)
+                    ttc_quad = torch.where(valid_enter, torch.clamp(t_enter, min=0.0), inf)
+                    ttc = torch.minimum(ttc, ttc_quad)
+
+                    unresolved = moving_mask & (~torch.isfinite(ttc))
+                    if bool(torch.any(unresolved).item()):
+                        dist = torch.sqrt(torch.clamp(r2, min=1e-9))
+                        closing_speed = -rdotv / torch.clamp(dist, min=1e-6)
+                        clearance = torch.clamp(dist - combined_r, min=0.0)
+                        valid_fb = unresolved & (rdotv < 0.0) & (closing_speed > 1e-6)
+                        ttc_fb = torch.where(
+                            valid_fb,
+                            clearance / torch.clamp(closing_speed, min=1e-6),
+                            inf,
+                        )
+                        ttc = torch.minimum(ttc, ttc_fb)
+
+                finite_mask = torch.isfinite(ttc)
+                if not bool(torch.any(finite_mask).item()):
+                    self._prev_min_ttc_s.pop(token, None)
+                    continue
+                min_ttc = float(torch.min(ttc[finite_mask]).item())
+
+                abs_penalty = 0.0
+                if self.ttc_penalty_enable:
+                    if float(min_ttc) < 0.5:
+                        abs_penalty = float(self.ttc_penalty_max)
+                    else:
+                        denom = max(float(min_ttc), float(self.ttc_penalty_min_ttc))
+                        abs_penalty = min(
+                            float(self.ttc_penalty_max),
+                            float(self.ttc_penalty_alpha) / denom,
+                        )
+
+                delta_penalty = 0.0
+                if self.ttc_delta_penalty_enable and self.ttc_delta_penalty_alpha > 0.0:
+                    prev_min_ttc = self._prev_min_ttc_s.get(token, None)
+                    if prev_min_ttc is not None and np.isfinite(prev_min_ttc):
+                        delta_ttc = float(prev_min_ttc) - float(min_ttc)
+                        if self.ttc_delta_penalty_normalize_by_dt:
+                            delta_ttc /= env_step_dt
+                        if delta_ttc > 0.0:
+                            delta_penalty = min(
+                                float(self.ttc_delta_penalty_max),
+                                float(self.ttc_delta_penalty_alpha) * float(delta_ttc),
+                            )
+
+                penalties[i] = -float(abs_penalty + delta_penalty)
+                self._prev_min_ttc_s[token] = float(min_ttc)
+        except Exception as exc:
+            self._warn_fallback(
+                "ttc_backend_torch_vehicle_runtime",
+                f"torch_cuda vehicle TTC failed ({exc}); falling back to numpy TTC.",
+            )
+            return None
+
+        return penalties
+
+    def _compute_ttc_penalty(
+        self,
+        keys: List[object],
+        active: np.ndarray,
+        states_by_world: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> np.ndarray:
+        if not (self.ttc_penalty_enable or self.ttc_delta_penalty_enable):
+            return np.zeros((len(keys),), dtype=np.float32)
+        if self.ttc_backend == "torch_cuda":
+            penalties_torch = self._compute_ttc_penalty_torch_cuda(
+                keys,
+                active,
+                states_by_world=states_by_world,
+            )
+            if penalties_torch is not None:
+                return penalties_torch
+        if not self.ttc_use_vehicle_size:
+            self._warn_fallback(
+                "ttc_point_agent_mode",
+                "TTC fallback mode active: ttc_use_vehicle_size=false, so vehicle radii are ignored.",
+            )
+
+        if states_by_world is None:
+            states_by_world = self._collect_all_vehicle_states()
+        penalties = np.zeros((len(keys),), dtype=np.float32)
+        env_step_dt = max(1e-6, float(self.physics_dt) * float(self.action_repeat))
+        excluded_tokens = set(self._pending_respawns.keys()) | set(self._quarantined_tokens)
 
         for i, k in enumerate(keys):
             if not active[i]:
                 continue
             token = self._agent_token_from_key(k)
             wi = int(getattr(k, "world_idx", -1))
-            if wi not in states_by_world:
+            world_states = states_by_world.get(wi, None)
+            if not world_states:
                 self._prev_min_ttc_s.pop(token, None)
                 continue
             ego_state = None
-            for s in states_by_world[wi]:
+            for s in world_states:
                 if s["agent_id"] == int(k.agent_id):
                     ego_state = s
                     break
             if ego_state is None:
                 self._prev_min_ttc_s.pop(token, None)
                 continue
-            ex, ey = ego_state["pos"]
-            evx, evy = ego_state["vel"]
-            ego_r = float(ego_state.get("radius_u", 0.0)) if self.ttc_use_vehicle_size else 0.0
-            min_ttc = None
-            excluded_tokens = set(self._pending_respawns.keys()) | set(self._quarantined_tokens)
-            for s in states_by_world[wi]:
+
+            ego_centers = np.asarray(
+                ego_state.get("ttc_centers_u", np.asarray([ego_state["pos"]], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            ego_radii = np.asarray(
+                ego_state.get("ttc_radii_u", np.asarray([ego_state.get("radius_u", 0.0)], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            if ego_centers.ndim != 2 or ego_centers.shape[0] <= 0:
+                ego_centers = np.asarray([ego_state["pos"]], dtype=np.float32)
+            if ego_radii.ndim != 1 or ego_radii.shape[0] != ego_centers.shape[0]:
+                ego_radii = np.full(
+                    (ego_centers.shape[0],),
+                    float(max(0.0, ego_state.get("radius_u", 0.0))),
+                    dtype=np.float32,
+                )
+
+            ego_vel = np.asarray(ego_state["vel"], dtype=np.float32)[:2]
+            ego_fwd = np.asarray(ego_state.get("fwd", (1.0, 0.0)), dtype=np.float32)[:2]
+            fwd_norm = float(np.linalg.norm(ego_fwd))
+            if fwd_norm <= 1e-6:
+                ego_fwd = np.asarray([1.0, 0.0], dtype=np.float32)
+            else:
+                ego_fwd = ego_fwd / fwd_norm
+
+            other_centers_list: List[np.ndarray] = []
+            other_radii_list: List[np.ndarray] = []
+            other_vel_list: List[np.ndarray] = []
+            for s in world_states:
                 if s["agent_id"] == int(k.agent_id):
                     continue
                 if s.get("token", None) in excluded_tokens:
                     continue
-                ox, oy = s["pos"]
-                ovx, ovy = s["vel"]
-                rx = ox - ex
-                ry = oy - ey
-                rvx = ovx - evx
-                rvy = ovy - evy
-                v2 = rvx * rvx + rvy * rvy
-                if v2 < 1e-6:
-                    continue
-                rdotv = rx * rvx + ry * rvy
-                r2 = rx * rx + ry * ry
+                centers = np.asarray(
+                    s.get("ttc_centers_u", np.asarray([s["pos"]], dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                if centers.ndim != 2 or centers.shape[0] <= 0:
+                    centers = np.asarray([s["pos"]], dtype=np.float32)
+                radii = np.asarray(
+                    s.get("ttc_radii_u", np.asarray([s.get("radius_u", 0.0)], dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                if radii.ndim != 1 or radii.shape[0] != centers.shape[0]:
+                    radii = np.full(
+                        (centers.shape[0],),
+                        float(max(0.0, s.get("radius_u", 0.0))),
+                        dtype=np.float32,
+                    )
+                vel = np.asarray(s["vel"], dtype=np.float32)[:2]
+                vel_rep = np.repeat(vel[None, :], centers.shape[0], axis=0)
+                other_centers_list.append(centers)
+                other_radii_list.append(radii)
+                other_vel_list.append(vel_rep)
 
-                other_r = float(s.get("radius_u", 0.0)) if self.ttc_use_vehicle_size else 0.0
-                combined_r = max(0.0, ego_r + other_r)
-
-                ttc = None
-                if r2 <= combined_r * combined_r:
-                    ttc = 0.0
-                else:
-                    # Exact first time-of-overlap for 2D discs under constant velocity.
-                    # ||r + rv t||^2 = R^2 -> a t^2 + b t + c = 0
-                    a = v2
-                    b = 2.0 * rdotv
-                    c = r2 - combined_r * combined_r
-                    disc = b * b - 4.0 * a * c
-                    if disc >= 0.0:
-                        sqrt_disc = math.sqrt(disc)
-                        t_enter = (-b - sqrt_disc) / (2.0 * a)
-                        t_exit = (-b + sqrt_disc) / (2.0 * a)
-                        if t_exit >= 0.0:
-                            ttc = max(0.0, t_enter)
-
-                # Continuous fallback for near-collision closing motion.
-                if ttc is None:
-                    if rdotv >= 0.0:
-                        continue
-                    dist = math.sqrt(max(r2, 1e-9))
-                    closing_speed = -rdotv / max(dist, 1e-6)
-                    if closing_speed <= 1e-6:
-                        continue
-                    clearance = max(0.0, dist - combined_r)
-                    ttc = clearance / closing_speed
-
-                if min_ttc is None or ttc < min_ttc:
-                    min_ttc = ttc
-            if min_ttc is None:
+            if not other_centers_list:
                 self._prev_min_ttc_s.pop(token, None)
                 continue
+            other_centers = np.concatenate(other_centers_list, axis=0)
+            other_radii = np.concatenate(other_radii_list, axis=0)
+            other_vel = np.concatenate(other_vel_list, axis=0)
+
+            # Pairwise ego-circle vs target-circle geometry.
+            # rel/rv shape: (E, O, 2), where E=ego circle count, O=all other circles.
+            rel = other_centers[None, :, :] - ego_centers[:, None, :]
+            rv = other_vel[None, :, :] - ego_vel[None, None, :]
+            rx = rel[:, :, 0]
+            ry = rel[:, :, 1]
+            rvx = rv[:, :, 0]
+            rvy = rv[:, :, 1]
+            r2 = rx * rx + ry * ry
+            v2 = rvx * rvx + rvy * rvy
+            rdotv = rx * rvx + ry * rvy
+            combined_r = ego_radii[:, None] + other_radii[None, :]
+            combined_r2 = combined_r * combined_r
+
+            # Forward-direction TTC: only consider objects ahead of ego heading.
+            forward_dot = rx * float(ego_fwd[0]) + ry * float(ego_fwd[1])
+            forward_mask = forward_dot > 0.0
+
+            ttc = np.full(r2.shape, np.inf, dtype=np.float32)
+            overlap_mask = forward_mask & (r2 <= combined_r2)
+            ttc[overlap_mask] = 0.0
+
+            moving_mask = forward_mask & (~overlap_mask) & (v2 > 1e-6)
+            if np.any(moving_mask):
+                a = np.where(moving_mask, v2, 1.0)
+                b = np.where(moving_mask, 2.0 * rdotv, 0.0)
+                c = np.where(moving_mask, r2 - combined_r2, 0.0)
+                disc = b * b - 4.0 * a * c
+                valid_quad = moving_mask & (disc >= 0.0)
+                sqrt_disc = np.sqrt(np.maximum(disc, 0.0))
+                denom = 2.0 * np.maximum(a, 1e-6)
+                t_enter = (-b - sqrt_disc) / denom
+                t_exit = (-b + sqrt_disc) / denom
+                valid_enter = valid_quad & (t_exit >= 0.0)
+                ttc_quad = np.where(valid_enter, np.maximum(0.0, t_enter), np.inf).astype(np.float32)
+                ttc = np.minimum(ttc, ttc_quad)
+
+                unresolved = moving_mask & (~np.isfinite(ttc))
+                if np.any(unresolved):
+                    # Continuous fallback for closing pairs without usable quadratic root.
+                    dist = np.sqrt(np.maximum(r2, 1e-9))
+                    closing_speed = -rdotv / np.maximum(dist, 1e-6)
+                    clearance = np.maximum(0.0, dist - combined_r)
+                    valid_fb = unresolved & (rdotv < 0.0) & (closing_speed > 1e-6)
+                    ttc_fb = np.where(
+                        valid_fb,
+                        clearance / np.maximum(closing_speed, 1e-6),
+                        np.inf,
+                    ).astype(np.float32)
+                    ttc = np.minimum(ttc, ttc_fb)
+
+            finite_ttc = ttc[np.isfinite(ttc)]
+            if finite_ttc.size == 0:
+                self._prev_min_ttc_s.pop(token, None)
+                continue
+            min_ttc = float(np.min(finite_ttc))
 
             abs_penalty = 0.0
             if self.ttc_penalty_enable:
@@ -1082,6 +1451,173 @@ class ChocolateEnv:
             self._prev_min_ttc_s[token] = float(min_ttc)
         return penalties
 
+    def _compute_road_edge_ttc_penalty_torch_cuda(
+        self,
+        keys: List[object],
+        active: np.ndarray,
+        *,
+        states_by_world: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> Optional[np.ndarray]:
+        torch, torch_dev = self._get_ttc_torch_cuda()
+        if torch is None or torch_dev is None:
+            return None
+
+        forbidden_types = (
+            set(int(x) for x in self.road_contact_done_types)
+            if self.road_contact_done_types
+            else set(int(x) for x in self.geom_road_edge_types)
+        )
+        if not forbidden_types:
+            self._warn_fallback(
+                "road_edge_ttc_missing_forbidden_types",
+                "Road-edge TTC requested, but no forbidden road types are configured.",
+            )
+            return np.zeros((len(keys),), dtype=np.float32)
+
+        radius_m = (
+            float(self.road_edge_ttc_radius_m)
+            if self.road_edge_ttc_radius_m is not None
+            else float(self.road_points_radius_m)
+        )
+        if radius_m <= 0.0:
+            self._warn_fallback(
+                "road_edge_ttc_radius_nonpositive",
+                "Road-edge TTC radius <= 0; skipping road-edge TTC penalty.",
+            )
+            return np.zeros((len(keys),), dtype=np.float32)
+
+        if states_by_world is None:
+            states_by_world = self._collect_all_vehicle_states()
+
+        penalties = np.zeros((len(keys),), dtype=np.float32)
+        radius2_m = radius_m * radius_m
+        mpu = float(self._mpu)
+        forbidden_type_list = list(forbidden_types)
+
+        try:
+            for i, k in enumerate(keys):
+                if not active[i]:
+                    continue
+
+                wi = int(getattr(k, "world_idx", -1))
+                world_states = states_by_world.get(wi, None)
+                if not world_states:
+                    continue
+                ego_state = None
+                for s in world_states:
+                    if s.get("agent_id", None) == int(k.agent_id):
+                        ego_state = s
+                        break
+                if ego_state is None:
+                    continue
+
+                geom = self._get_world_road_geometry(wi)
+                if geom is None:
+                    continue
+                types = geom["types"]
+                points_xy_m = geom["points_xy_m"]
+                forbidden_mask = np.isin(types, forbidden_type_list)
+                if not np.any(forbidden_mask):
+                    self._warn_fallback(
+                        "road_edge_ttc_no_points_forbidden_types",
+                        "Road-edge TTC found no geometry points for configured forbidden types.",
+                    )
+                    continue
+                forbidden_points = points_xy_m[forbidden_mask]
+                if forbidden_points.shape[0] == 0:
+                    continue
+
+                ego_centers_u = np.asarray(
+                    ego_state.get("ttc_centers_u", np.asarray([ego_state["pos"]], dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                ego_radii_u = np.asarray(
+                    ego_state.get("ttc_radii_u", np.asarray([ego_state.get("radius_u", 0.0)], dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                if ego_centers_u.ndim != 2 or ego_centers_u.shape[0] <= 0:
+                    ego_centers_u = np.asarray([ego_state["pos"]], dtype=np.float32)
+                if ego_radii_u.ndim != 1 or ego_radii_u.shape[0] != ego_centers_u.shape[0]:
+                    ego_radii_u = np.full(
+                        (ego_centers_u.shape[0],),
+                        float(max(0.0, ego_state.get("radius_u", 0.0))),
+                        dtype=np.float32,
+                    )
+
+                ego_centers_m = ego_centers_u * float(mpu)
+                ego_radii_m = ego_radii_u * float(mpu)
+                evx_mps = float(ego_state["vel"][0]) * mpu
+                evy_mps = float(ego_state["vel"][1]) * mpu
+                ego_fwd_np = np.asarray(ego_state.get("fwd", (1.0, 0.0)), dtype=np.float32)[:2]
+                fwd_norm = float(np.linalg.norm(ego_fwd_np))
+                if fwd_norm <= 1e-6:
+                    ego_fwd_np = np.asarray([1.0, 0.0], dtype=np.float32)
+                else:
+                    ego_fwd_np = ego_fwd_np / fwd_norm
+
+                ego_centers_m_t = torch.as_tensor(ego_centers_m, dtype=torch.float32, device=torch_dev)
+                ego_radii_m_t = torch.as_tensor(ego_radii_m, dtype=torch.float32, device=torch_dev)
+                forbidden_points_t = torch.as_tensor(
+                    forbidden_points,
+                    dtype=torch.float32,
+                    device=torch_dev,
+                )
+                ego_fwd_t = torch.as_tensor(ego_fwd_np, dtype=torch.float32, device=torch_dev)
+
+                rel = forbidden_points_t.unsqueeze(0) - ego_centers_m_t.unsqueeze(1)
+                rx = rel[:, :, 0]
+                ry = rel[:, :, 1]
+                dist2 = rx * rx + ry * ry
+                near_mask = dist2 <= float(radius2_m)
+                if not bool(torch.any(near_mask).item()):
+                    continue
+
+                forward_dot = rx * ego_fwd_t[0] + ry * ego_fwd_t[1]
+                candidate_mask = near_mask & (forward_dot > 0.0)
+                if not bool(torch.any(candidate_mask).item()):
+                    continue
+
+                dist = torch.sqrt(torch.clamp(dist2, min=1e-12))
+                inf = torch.full_like(dist, float("inf"))
+                ttc = inf.clone()
+                overlap_mask = candidate_mask & (dist <= ego_radii_m_t.view(-1, 1))
+                ttc = torch.where(overlap_mask, torch.zeros_like(ttc), ttc)
+
+                dirs = rel / torch.clamp(dist.unsqueeze(-1), min=1e-6)
+                closing_speed = dirs[:, :, 0] * float(evx_mps) + dirs[:, :, 1] * float(evy_mps)
+                valid = candidate_mask & (closing_speed > 1e-6)
+                if bool(torch.any(valid).item()):
+                    clearance = torch.clamp(dist - ego_radii_m_t.view(-1, 1), min=0.0)
+                    ttc_vals = torch.where(
+                        valid,
+                        clearance / torch.clamp(closing_speed, min=1e-6),
+                        inf,
+                    )
+                    ttc = torch.minimum(ttc, ttc_vals)
+
+                finite_mask = torch.isfinite(ttc)
+                if not bool(torch.any(finite_mask).item()):
+                    continue
+                min_ttc = float(torch.min(ttc[finite_mask]).item())
+
+                if float(min_ttc) < float(self.road_edge_ttc_hard_min_ttc):
+                    abs_penalty = float(self.road_edge_ttc_penalty_max)
+                else:
+                    denom = max(float(min_ttc), float(self.road_edge_ttc_penalty_min_ttc))
+                    abs_penalty = min(
+                        float(self.road_edge_ttc_penalty_max),
+                        float(self.road_edge_ttc_penalty_alpha) / denom,
+                    )
+                penalties[i] = -float(abs_penalty)
+        except Exception as exc:
+            self._warn_fallback(
+                "ttc_backend_torch_road_runtime",
+                f"torch_cuda road-edge TTC failed ({exc}); falling back to numpy TTC.",
+            )
+            return None
+
+        return penalties
+
     def _compute_road_edge_ttc_penalty(
         self,
         keys: List[object],
@@ -1092,6 +1628,14 @@ class ChocolateEnv:
             return np.zeros((len(keys),), dtype=np.float32)
         if self.road_edge_ttc_penalty_alpha <= 0.0 or self.road_edge_ttc_penalty_max <= 0.0:
             return np.zeros((len(keys),), dtype=np.float32)
+        if self.ttc_backend == "torch_cuda":
+            penalties_torch = self._compute_road_edge_ttc_penalty_torch_cuda(
+                keys,
+                active,
+                states_by_world=states_by_world,
+            )
+            if penalties_torch is not None:
+                return penalties_torch
 
         forbidden_types = (
             set(int(x) for x in self.road_contact_done_types)
@@ -1157,42 +1701,71 @@ class ChocolateEnv:
             if forbidden_points.shape[0] == 0:
                 continue
 
-            ex_m = float(ego_state["pos"][0]) * mpu
-            ey_m = float(ego_state["pos"][1]) * mpu
+            ego_centers_u = np.asarray(
+                ego_state.get("ttc_centers_u", np.asarray([ego_state["pos"]], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            ego_radii_u = np.asarray(
+                ego_state.get("ttc_radii_u", np.asarray([ego_state.get("radius_u", 0.0)], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            if ego_centers_u.ndim != 2 or ego_centers_u.shape[0] <= 0:
+                ego_centers_u = np.asarray([ego_state["pos"]], dtype=np.float32)
+            if ego_radii_u.ndim != 1 or ego_radii_u.shape[0] != ego_centers_u.shape[0]:
+                ego_radii_u = np.full(
+                    (ego_centers_u.shape[0],),
+                    float(max(0.0, ego_state.get("radius_u", 0.0))),
+                    dtype=np.float32,
+                )
+
+            ego_centers_m = ego_centers_u * float(mpu)
+            ego_radii_m = ego_radii_u * float(mpu)
             evx_mps = float(ego_state["vel"][0]) * mpu
             evy_mps = float(ego_state["vel"][1]) * mpu
-            ego_r_m = (
-                float(ego_state.get("radius_u", 0.0)) * mpu if self.ttc_use_vehicle_size else 0.0
-            )
+            ego_fwd = np.asarray(ego_state.get("fwd", (1.0, 0.0)), dtype=np.float32)[:2]
+            fwd_norm = float(np.linalg.norm(ego_fwd))
+            if fwd_norm <= 1e-6:
+                ego_fwd = np.asarray([1.0, 0.0], dtype=np.float32)
+            else:
+                ego_fwd = ego_fwd / fwd_norm
 
-            rel = forbidden_points - np.asarray([[ex_m, ey_m]], dtype=np.float32)
-            dist2 = np.einsum("ij,ij->i", rel, rel)
+            # Pairwise ego circles vs forbidden road points.
+            # rel shape: (E, P, 2), E=ego circle count, P=forbidden point count.
+            rel = forbidden_points[None, :, :] - ego_centers_m[:, None, :]
+            rx = rel[:, :, 0]
+            ry = rel[:, :, 1]
+            dist2 = rx * rx + ry * ry
             near_mask = dist2 <= radius2_m
             if not np.any(near_mask):
                 continue
 
-            rel_near = rel[near_mask]
-            dist_near = np.sqrt(np.maximum(dist2[near_mask], 1e-12))
-            min_ttc = None
-
-            if ego_r_m > 0.0:
-                overlap_mask = dist_near <= ego_r_m
-                if np.any(overlap_mask):
-                    min_ttc = 0.0
-
-            dirs = rel_near / np.maximum(dist_near[:, None], 1e-6)
-            closing_speed = dirs[:, 0] * evx_mps + dirs[:, 1] * evy_mps
-            valid = closing_speed > 1e-6
-            if np.any(valid):
-                clearance = np.maximum(0.0, dist_near[valid] - ego_r_m)
-                ttc_vals = clearance / np.maximum(closing_speed[valid], 1e-6)
-                if ttc_vals.size > 0:
-                    cand = float(np.min(ttc_vals))
-                    if min_ttc is None or cand < min_ttc:
-                        min_ttc = cand
-
-            if min_ttc is None:
+            forward_dot = rx * float(ego_fwd[0]) + ry * float(ego_fwd[1])
+            forward_mask = forward_dot > 0.0
+            candidate_mask = near_mask & forward_mask
+            if not np.any(candidate_mask):
                 continue
+
+            dist = np.sqrt(np.maximum(dist2, 1e-12))
+            ttc = np.full(dist.shape, np.inf, dtype=np.float32)
+            overlap_mask = candidate_mask & (dist <= ego_radii_m[:, None])
+            ttc[overlap_mask] = 0.0
+
+            dirs = rel / np.maximum(dist[:, :, None], 1e-6)
+            closing_speed = dirs[:, :, 0] * evx_mps + dirs[:, :, 1] * evy_mps
+            valid = candidate_mask & (closing_speed > 1e-6)
+            if np.any(valid):
+                clearance = np.maximum(0.0, dist - ego_radii_m[:, None])
+                ttc_vals = np.where(
+                    valid,
+                    clearance / np.maximum(closing_speed, 1e-6),
+                    np.inf,
+                ).astype(np.float32)
+                ttc = np.minimum(ttc, ttc_vals)
+
+            finite_ttc = ttc[np.isfinite(ttc)]
+            if finite_ttc.size == 0:
+                continue
+            min_ttc = float(np.min(finite_ttc))
 
             if float(min_ttc) < float(self.road_edge_ttc_hard_min_ttc):
                 abs_penalty = float(self.road_edge_ttc_penalty_max)
@@ -1890,6 +2463,7 @@ class ChocolateEnv:
             self._prev_world_xy_m.pop(token, None)
             self._prev_min_ttc_s.pop(token, None)
             self._vehicle_radius_u_cache.pop(token, None)
+            self._vehicle_shape_u_cache.pop(token, None)
 
         if removed_any:
             try:
@@ -2164,10 +2738,32 @@ class ChocolateEnv:
         return True
 
     def reset_done(self, done_mask: np.ndarray) -> None:
-        if done_mask is None or not np.any(done_mask):
+        if done_mask is None:
             return
 
+        done_mask = np.asarray(done_mask, dtype=bool).reshape(-1)
+        if done_mask.size == 0 or not np.any(done_mask):
+            return
+
+        n_keys = int(len(self._keys))
+        if n_keys <= 0:
+            return
+        if done_mask.shape[0] != n_keys:
+            common = min(int(done_mask.shape[0]), n_keys)
+            self._warn_fallback(
+                "reset_done_mask_size_mismatch",
+                f"reset_done got done_mask size={int(done_mask.shape[0])} but keys={n_keys}; "
+                f"using common prefix size={common}.",
+            )
+            if common <= 0:
+                return
+            done_mask = done_mask[:common]
+            if not np.any(done_mask):
+                return
+
         idx = np.where(done_mask)[0]
+        if idx.size == 0:
+            return
         done_tokens = [self._agent_token_from_key(self._keys[i]) for i in idx]
         self._clear_ttc_history_for_tokens(done_tokens)
         key_by_token = {self._agent_token_from_key(self._keys[i]): self._keys[i] for i in idx}

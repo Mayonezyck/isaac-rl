@@ -145,6 +145,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             ttc_use_vehicle_size=bool(cfg_env.get("ttc_use_vehicle_size", True)),
             ttc_vehicle_radius_scale=float(cfg_env.get("ttc_vehicle_radius_scale", 0.75)),
             ttc_vehicle_radius_margin_m=float(cfg_env.get("ttc_vehicle_radius_margin_m", 0.20)),
+            ttc_backend=str(cfg_env.get("ttc_backend", "numpy")),
             obs_viz_enable=bool(cfg_env.get("obs_viz_enable", False)),
             obs_viz_world_idx=int(cfg_env.get("obs_viz_world_idx", 0)),
             obs_viz_agent_rank=int(cfg_env.get("obs_viz_agent_rank", 0)),

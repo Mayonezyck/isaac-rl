@@ -578,16 +578,40 @@ def _compute_min_ttc_by_token(
             if token is None:
                 continue
             token = (int(token[0]), int(token[1]))
-            ego_r = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
-            out_radius[token] = float(max(0.0, ego_r))
+            ego_centers = np.asarray(
+                ego.get("ttc_centers_u", np.asarray([ego["pos"]], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            ego_radii = np.asarray(
+                ego.get("ttc_radii_u", np.asarray([ego.get("radius_u", 0.0)], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            if ego_centers.ndim != 2 or ego_centers.shape[0] <= 0:
+                ego_centers = np.asarray([ego["pos"]], dtype=np.float32)
+            if ego_radii.ndim != 1 or ego_radii.shape[0] != ego_centers.shape[0]:
+                ego_radii = np.full(
+                    (ego_centers.shape[0],),
+                    float(max(0.0, ego.get("radius_u", 0.0))),
+                    dtype=np.float32,
+                )
+            if not use_vehicle_size:
+                ego_radii = np.zeros_like(ego_radii, dtype=np.float32)
+            out_radius[token] = float(max(0.0, float(np.max(ego_radii)) if ego_radii.size else 0.0))
             if token in excluded_tokens:
                 out_ttc[token] = None
                 continue
 
-            ex, ey = ego["pos"]
-            evx, evy = ego["vel"]
-            min_ttc = None
+            ego_vel = np.asarray(ego["vel"], dtype=np.float32)[:2]
+            ego_fwd = np.asarray(ego.get("fwd", (1.0, 0.0)), dtype=np.float32)[:2]
+            fwd_norm = float(np.linalg.norm(ego_fwd))
+            if fwd_norm <= 1e-6:
+                ego_fwd = np.asarray([1.0, 0.0], dtype=np.float32)
+            else:
+                ego_fwd = ego_fwd / fwd_norm
 
+            other_centers_list: List[np.ndarray] = []
+            other_radii_list: List[np.ndarray] = []
+            other_vel_list: List[np.ndarray] = []
             for other in states:
                 other_token = other.get("token", None)
                 if other_token is not None:
@@ -597,49 +621,88 @@ def _compute_min_ttc_by_token(
                 if other_token in excluded_tokens:
                     continue
 
-                ox, oy = other["pos"]
-                ovx, ovy = other["vel"]
-                rx = ox - ex
-                ry = oy - ey
-                rvx = ovx - evx
-                rvy = ovy - evy
-                v2 = rvx * rvx + rvy * rvy
-                if v2 < 1e-6:
-                    continue
-                rdotv = rx * rvx + ry * rvy
-                r2 = rx * rx + ry * ry
-                other_r = float(other.get("radius_u", 0.0)) if use_vehicle_size else 0.0
-                combined_r = max(0.0, ego_r + other_r)
+                other_centers = np.asarray(
+                    other.get("ttc_centers_u", np.asarray([other["pos"]], dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                other_radii = np.asarray(
+                    other.get("ttc_radii_u", np.asarray([other.get("radius_u", 0.0)], dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                if other_centers.ndim != 2 or other_centers.shape[0] <= 0:
+                    other_centers = np.asarray([other["pos"]], dtype=np.float32)
+                if other_radii.ndim != 1 or other_radii.shape[0] != other_centers.shape[0]:
+                    other_radii = np.full(
+                        (other_centers.shape[0],),
+                        float(max(0.0, other.get("radius_u", 0.0))),
+                        dtype=np.float32,
+                    )
+                if not use_vehicle_size:
+                    other_radii = np.zeros_like(other_radii, dtype=np.float32)
 
-                ttc = None
-                if r2 <= combined_r * combined_r:
-                    ttc = 0.0
-                else:
-                    a = v2
-                    b = 2.0 * rdotv
-                    c = r2 - combined_r * combined_r
-                    disc = b * b - 4.0 * a * c
-                    if disc >= 0.0:
-                        sqrt_disc = float(np.sqrt(disc))
-                        t_enter = (-b - sqrt_disc) / (2.0 * a)
-                        t_exit = (-b + sqrt_disc) / (2.0 * a)
-                        if t_exit >= 0.0:
-                            ttc = max(0.0, float(t_enter))
+                other_vel = np.asarray(other["vel"], dtype=np.float32)[:2]
+                other_vel_rep = np.repeat(other_vel[None, :], other_centers.shape[0], axis=0)
+                other_centers_list.append(other_centers)
+                other_radii_list.append(other_radii)
+                other_vel_list.append(other_vel_rep)
 
-                if ttc is None:
-                    if rdotv >= 0.0:
-                        continue
-                    dist = float(np.sqrt(max(r2, 1e-9)))
-                    closing_speed = -rdotv / max(dist, 1e-6)
-                    if closing_speed <= 1e-6:
-                        continue
-                    clearance = max(0.0, dist - combined_r)
-                    ttc = clearance / closing_speed
+            if not other_centers_list:
+                out_ttc[token] = None
+                continue
 
-                if min_ttc is None or float(ttc) < float(min_ttc):
-                    min_ttc = float(ttc)
+            other_centers = np.concatenate(other_centers_list, axis=0)
+            other_radii = np.concatenate(other_radii_list, axis=0)
+            other_vel = np.concatenate(other_vel_list, axis=0)
 
-            out_ttc[token] = min_ttc
+            rel = other_centers[None, :, :] - ego_centers[:, None, :]
+            rv = other_vel[None, :, :] - ego_vel[None, None, :]
+            rx = rel[:, :, 0]
+            ry = rel[:, :, 1]
+            rvx = rv[:, :, 0]
+            rvy = rv[:, :, 1]
+            r2 = rx * rx + ry * ry
+            v2 = rvx * rvx + rvy * rvy
+            rdotv = rx * rvx + ry * rvy
+            combined_r = ego_radii[:, None] + other_radii[None, :]
+            combined_r2 = combined_r * combined_r
+
+            forward_dot = rx * float(ego_fwd[0]) + ry * float(ego_fwd[1])
+            forward_mask = forward_dot > 0.0
+
+            ttc = np.full(r2.shape, np.inf, dtype=np.float32)
+            overlap_mask = forward_mask & (r2 <= combined_r2)
+            ttc[overlap_mask] = 0.0
+
+            moving_mask = forward_mask & (~overlap_mask) & (v2 > 1e-6)
+            if np.any(moving_mask):
+                a = np.where(moving_mask, v2, 1.0)
+                b = np.where(moving_mask, 2.0 * rdotv, 0.0)
+                c = np.where(moving_mask, r2 - combined_r2, 0.0)
+                disc = b * b - 4.0 * a * c
+                valid_quad = moving_mask & (disc >= 0.0)
+                sqrt_disc = np.sqrt(np.maximum(disc, 0.0))
+                denom = 2.0 * np.maximum(a, 1e-6)
+                t_enter = (-b - sqrt_disc) / denom
+                t_exit = (-b + sqrt_disc) / denom
+                valid_enter = valid_quad & (t_exit >= 0.0)
+                ttc_quad = np.where(valid_enter, np.maximum(0.0, t_enter), np.inf).astype(np.float32)
+                ttc = np.minimum(ttc, ttc_quad)
+
+                unresolved = moving_mask & (~np.isfinite(ttc))
+                if np.any(unresolved):
+                    dist = np.sqrt(np.maximum(r2, 1e-9))
+                    closing_speed = -rdotv / np.maximum(dist, 1e-6)
+                    clearance = np.maximum(0.0, dist - combined_r)
+                    valid_fb = unresolved & (rdotv < 0.0) & (closing_speed > 1e-6)
+                    ttc_fb = np.where(
+                        valid_fb,
+                        clearance / np.maximum(closing_speed, 1e-6),
+                        np.inf,
+                    ).astype(np.float32)
+                    ttc = np.minimum(ttc, ttc_fb)
+
+            finite_ttc = ttc[np.isfinite(ttc)]
+            out_ttc[token] = float(np.min(finite_ttc)) if finite_ttc.size > 0 else None
     return out_ttc, out_radius
 
 
@@ -667,6 +730,9 @@ def _compute_min_road_edge_ttc_by_token(
         radius_m = float(getattr(choco_env, "road_points_radius_m", 50.0))
     radius_m = max(0.0, float(radius_m))
     radius2_m = float(radius_m * radius_m)
+    excluded_tokens = set(getattr(choco_env, "_pending_respawns", {}).keys()) | set(
+        getattr(choco_env, "_quarantined_tokens", set())
+    )
 
     out_ttc: Dict[tuple[int, int], float | None] = {}
     out_radius: Dict[tuple[int, int], float] = {}
@@ -727,41 +793,74 @@ def _compute_min_road_edge_ttc_by_token(
             if token is None:
                 continue
             token = (int(token[0]), int(token[1]))
-            ego_r_u = float(ego.get("radius_u", 0.0)) if use_vehicle_size else 0.0
-            out_radius[token] = float(max(0.0, ego_r_u))
+            ego_centers_u = np.asarray(
+                ego.get("ttc_centers_u", np.asarray([ego["pos"]], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            ego_radii_u = np.asarray(
+                ego.get("ttc_radii_u", np.asarray([ego.get("radius_u", 0.0)], dtype=np.float32)),
+                dtype=np.float32,
+            )
+            if ego_centers_u.ndim != 2 or ego_centers_u.shape[0] <= 0:
+                ego_centers_u = np.asarray([ego["pos"]], dtype=np.float32)
+            if ego_radii_u.ndim != 1 or ego_radii_u.shape[0] != ego_centers_u.shape[0]:
+                ego_radii_u = np.full(
+                    (ego_centers_u.shape[0],),
+                    float(max(0.0, ego.get("radius_u", 0.0))),
+                    dtype=np.float32,
+                )
+            if not use_vehicle_size:
+                ego_radii_u = np.zeros_like(ego_radii_u, dtype=np.float32)
+            out_radius[token] = float(max(0.0, float(np.max(ego_radii_u)) if ego_radii_u.size else 0.0))
+            if token in excluded_tokens:
+                out_ttc[token] = None
+                continue
 
-            ex_m = float(ego["pos"][0]) * mpu
-            ey_m = float(ego["pos"][1]) * mpu
+            ego_centers_m = ego_centers_u * float(mpu)
+            ego_radii_m = ego_radii_u * float(mpu)
             evx_mps = float(ego["vel"][0]) * mpu
             evy_mps = float(ego["vel"][1]) * mpu
-            ego_r_m = float(max(0.0, ego_r_u) * mpu)
+            ego_fwd = np.asarray(ego.get("fwd", (1.0, 0.0)), dtype=np.float32)[:2]
+            fwd_norm = float(np.linalg.norm(ego_fwd))
+            if fwd_norm <= 1e-6:
+                ego_fwd = np.asarray([1.0, 0.0], dtype=np.float32)
+            else:
+                ego_fwd = ego_fwd / fwd_norm
 
-            rel = forbidden_points - np.asarray([[ex_m, ey_m]], dtype=np.float32)
-            dist2 = np.einsum("ij,ij->i", rel, rel)
+            rel = forbidden_points[None, :, :] - ego_centers_m[:, None, :]
+            rx = rel[:, :, 0]
+            ry = rel[:, :, 1]
+            dist2 = rx * rx + ry * ry
             near_mask = dist2 <= radius2_m
             if not np.any(near_mask):
                 out_ttc[token] = None
                 continue
 
-            rel_near = rel[near_mask]
-            dist_near = np.sqrt(np.maximum(dist2[near_mask], 1e-12))
-            min_ttc = None
+            forward_dot = rx * float(ego_fwd[0]) + ry * float(ego_fwd[1])
+            candidate_mask = near_mask & (forward_dot > 0.0)
+            if not np.any(candidate_mask):
+                out_ttc[token] = None
+                continue
 
-            if ego_r_m > 0.0 and np.any(dist_near <= ego_r_m):
-                min_ttc = 0.0
+            dist = np.sqrt(np.maximum(dist2, 1e-12))
+            ttc = np.full(dist.shape, np.inf, dtype=np.float32)
+            overlap_mask = candidate_mask & (dist <= ego_radii_m[:, None])
+            ttc[overlap_mask] = 0.0
 
-            dirs = rel_near / np.maximum(dist_near[:, None], 1e-6)
-            closing_speed = dirs[:, 0] * evx_mps + dirs[:, 1] * evy_mps
-            valid = closing_speed > 1e-6
+            dirs = rel / np.maximum(dist[:, :, None], 1e-6)
+            closing_speed = dirs[:, :, 0] * evx_mps + dirs[:, :, 1] * evy_mps
+            valid = candidate_mask & (closing_speed > 1e-6)
             if np.any(valid):
-                clearance = np.maximum(0.0, dist_near[valid] - ego_r_m)
-                ttc_vals = clearance / np.maximum(closing_speed[valid], 1e-6)
-                if ttc_vals.size > 0:
-                    cand = float(np.min(ttc_vals))
-                    if min_ttc is None or cand < min_ttc:
-                        min_ttc = cand
+                clearance = np.maximum(0.0, dist - ego_radii_m[:, None])
+                ttc_vals = np.where(
+                    valid,
+                    clearance / np.maximum(closing_speed, 1e-6),
+                    np.inf,
+                ).astype(np.float32)
+                ttc = np.minimum(ttc, ttc_vals)
 
-            out_ttc[token] = min_ttc
+            finite_ttc = ttc[np.isfinite(ttc)]
+            out_ttc[token] = float(np.min(finite_ttc)) if finite_ttc.size > 0 else None
 
     return out_ttc, out_radius
 
