@@ -21,6 +21,8 @@ class RolloutCaptureCallback(BaseCallback):
         video_fps: int = 30,
         video_name_prefix: str = "training",
         keep_frames: bool = False,
+        log_step_metrics: bool = False,
+        log_detailed_metrics: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -32,6 +34,8 @@ class RolloutCaptureCallback(BaseCallback):
         self.video_fps = max(1, int(video_fps))
         self.video_name_prefix = str(video_name_prefix)
         self.keep_frames = bool(keep_frames)
+        self.log_step_metrics = bool(log_step_metrics)
+        self.log_detailed_metrics = bool(log_detailed_metrics)
         self.update_count = 0
         self.recording = False
         self.frame_idx = 0
@@ -186,12 +190,13 @@ class RolloutCaptureCallback(BaseCallback):
                     pass
 
     def _on_step(self) -> bool:
-        # Log per-step reward average so TensorBoard shows a series of points.
+        # Keep a rollout reward accumulator; avoid noisy per-step logging by default.
+        rewards = None
+        avg_reward = 0.0
         try:
             rewards = self.locals.get("rewards", None)
             if rewards is not None:
                 avg_reward = float(np.nanmean(rewards))
-                self.logger.record("choco/avg_reward_step", avg_reward)
                 self._rollout_reward_sum += avg_reward
                 self._rollout_steps += 1
         except Exception:
@@ -258,132 +263,49 @@ class RolloutCaptureCallback(BaseCallback):
                     * float(info.get("num_active_agents", 0.0))
                 )
 
-                # Rich per-step scalars for TensorBoard.
-                self.logger.record("choco/num_controlled_agents", n_agents)
-                self.logger.record("choco/num_valid_agents", float(info.get("num_valid_agents", 0.0)))
-                self.logger.record("choco/num_active_agents", float(info.get("num_active_agents", 0.0)))
-                self.logger.record("choco/pending_respawn_count", float(info.get("pending_respawn_count", 0.0)))
-                self.logger.record("choco/spawned_count_step", spawned_count)
-                self.logger.record(
-                    "choco/total_spawned_episodes",
-                    float(self._training_spawned_count_total),
-                )
-                self.logger.record(
-                    "choco/total_successful_episodes",
-                    float(self._training_done_success_count_total),
-                )
-                self.logger.record(
-                    "choco/total_vehicle_collision_episodes",
-                    float(self._training_vehicle_collision_count_total),
-                )
-                if self._training_spawned_count_total > 0:
+                if self.log_step_metrics:
+                    self.logger.record("step/mean_reward", avg_reward if rewards is not None else 0.0)
+                    self.logger.record("step/num_active_agents", float(info.get("num_active_agents", 0.0)))
                     self.logger.record(
-                        "choco/success_over_spawned_rate_total",
-                        float(self._training_done_success_count_total)
-                        / float(self._training_spawned_count_total),
+                        "step/pending_respawn_count",
+                        float(info.get("pending_respawn_count", 0.0)),
+                    )
+                    self.logger.record("step/done_count", float(info.get("done_count", 0.0)))
+                    self.logger.record("step/new_success_count", float(info.get("new_success_count", 0.0)))
+                    self.logger.record(
+                        "step/road_contact_done_count",
+                        float(info.get("road_contact_done_count", 0.0)),
                     )
                     self.logger.record(
-                        "choco/veh_coll_spawned_cum",
-                        float(self._training_vehicle_collision_count_total)
-                        / float(self._training_spawned_count_total),
+                        "step/vehicle_contact_done_count",
+                        float(info.get("vehicle_contact_done_count", 0.0)),
                     )
-                if self._training_done_count_total > 0:
                     self.logger.record(
-                        "choco/success_given_done_rate_total",
-                        float(self._training_done_success_count_total)
-                        / float(self._training_done_count_total),
+                        "step/mean_active_dist_to_goal_m",
+                        float(info.get("mean_active_dist_to_goal_m", 0.0)),
                     )
-                self.logger.record("choco/done_count_step", float(info.get("done_count", 0.0)))
-                self.logger.record("choco/new_success_count_step", float(info.get("new_success_count", 0.0)))
-                self.logger.record("choco/success_latched_count", float(info.get("success_latched_count", 0.0)))
-                self.logger.record("choco/road_contact_done_count_step", float(info.get("road_contact_done_count", 0.0)))
-                self.logger.record("choco/vehicle_contact_done_count_step", float(info.get("vehicle_contact_done_count", 0.0)))
-                self.logger.record("choco/off_road_count_step", float(info.get("off_road_count", 0.0)))
-                self.logger.record("choco/lane_hit_count_step", float(info.get("lane_hit_count", 0.0)))
-                self.logger.record("choco/collided_count_step", float(info.get("collided_count", 0.0)))
-                self.logger.record("choco/road_collided_count_step", float(info.get("road_collided_count", 0.0)))
-                self.logger.record("choco/vehicle_collided_count_step", float(info.get("vehicle_collided_count", 0.0)))
-                self.logger.record(
-                    "choco/done_vehicle_collided_count_step",
-                    float(info.get("done_vehicle_collided_count", 0.0)),
-                )
-                self.logger.record("choco/below_min_z_count_step", float(info.get("below_min_z_count", 0.0)))
-                self.logger.record("choco/goal_rate_step", float(info.get("goal_rate_step", 0.0)))
-                self.logger.record("choco/success_latched_rate_step", float(info.get("success_latched_rate_step", 0.0)))
-                self.logger.record(
-                    "choco/road_contact_done_rate_step",
-                    float(info.get("road_contact_done_rate_step", 0.0)),
-                )
-                self.logger.record(
-                    "choco/vehicle_contact_done_rate_step",
-                    float(info.get("vehicle_contact_done_rate_step", 0.0)),
-                )
-                self.logger.record("choco/off_road_rate_step", float(info.get("off_road_rate_step", 0.0)))
-                self.logger.record("choco/lane_hit_rate_step", float(info.get("lane_hit_rate_step", 0.0)))
-                self.logger.record("choco/collision_rate_step", float(info.get("collision_rate_step", 0.0)))
-                self.logger.record("choco/road_collision_rate_step", float(info.get("road_collision_rate_step", 0.0)))
-                self.logger.record("choco/vehicle_collision_rate_step", float(info.get("vehicle_collision_rate_step", 0.0)))
-                self.logger.record(
-                    "choco/vehicle_collision_rate_step_per_controlled",
-                    float(info.get("vehicle_collision_rate_step_per_controlled", 0.0)),
-                )
-                self.logger.record(
-                    "choco/perc_veh_collisions_step",
-                    float(info.get("perc_veh_collisions_step", 0.0)),
-                )
-                self.logger.record("choco/done_rate_step", float(info.get("done_rate_step", 0.0)))
-                self.logger.record(
-                    "choco/success_given_done_rate_step",
-                    float(info.get("success_given_done_rate_step", 0.0)),
-                )
-                self.logger.record(
-                    "choco/road_contact_done_given_active_rate_step",
-                    float(info.get("road_contact_done_given_active_rate_step", 0.0)),
-                )
-                self.logger.record(
-                    "choco/vehicle_contact_done_given_active_rate_step",
-                    float(info.get("vehicle_contact_done_given_active_rate_step", 0.0)),
-                )
-                self.logger.record(
-                    "choco/lane_hit_given_active_rate_step",
-                    float(info.get("lane_hit_given_active_rate_step", 0.0)),
-                )
-                self.logger.record(
-                    "choco/off_road_given_active_rate_step",
-                    float(info.get("off_road_given_active_rate_step", 0.0)),
-                )
-                self.logger.record(
-                    "choco/collision_given_active_rate_step",
-                    float(info.get("collision_given_active_rate_step", 0.0)),
-                )
-                self.logger.record("choco/active_fraction", float(info.get("active_fraction", 0.0)))
-                self.logger.record("choco/pending_fraction", float(info.get("pending_fraction", 0.0)))
-                self.logger.record("choco/mean_dist_to_goal_m_step", float(info.get("mean_dist_to_goal_m", 0.0)))
-                self.logger.record(
-                    "choco/mean_active_dist_to_goal_m_step",
-                    float(info.get("mean_active_dist_to_goal_m", 0.0)),
-                )
-                self.logger.record(
-                    "choco/min_active_dist_to_goal_m_step",
-                    float(info.get("min_active_dist_to_goal_m", 0.0)),
-                )
-                self.logger.record(
-                    "choco/mean_lane_error_m_step",
-                    float(info.get("mean_lane_error_m", 0.0)),
-                )
-                self.logger.record(
-                    "choco/mean_heading_alignment_step",
-                    float(info.get("mean_heading_alignment", 0.0)),
-                )
-                self.logger.record(
-                    "choco/mean_route_progress_m_step",
-                    float(info.get("mean_route_progress_m", 0.0)),
-                )
-                self.logger.record(
-                    "choco/mean_base_reward_step",
-                    float(info.get("mean_base_reward_step", 0.0)),
-                )
-                self.logger.record("choco/truncated_step", float(info.get("truncated", 0.0)))
+                    self.logger.record(
+                        "step/mean_lane_error_m",
+                        float(info.get("mean_lane_error_m", 0.0)),
+                    )
+
+                if self.log_detailed_metrics:
+                    self.logger.record("debug/num_controlled_agents", n_agents)
+                    self.logger.record("debug/num_valid_agents", float(info.get("num_valid_agents", 0.0)))
+                    self.logger.record("debug/spawned_count_step", spawned_count)
+                    self.logger.record("debug/off_road_count_step", float(info.get("off_road_count", 0.0)))
+                    self.logger.record("debug/lane_hit_count_step", float(info.get("lane_hit_count", 0.0)))
+                    self.logger.record("debug/road_collided_count_step", float(info.get("road_collided_count", 0.0)))
+                    self.logger.record(
+                        "debug/vehicle_collided_count_step",
+                        float(info.get("vehicle_collided_count", 0.0)),
+                    )
+                    self.logger.record("debug/below_min_z_count_step", float(info.get("below_min_z_count", 0.0)))
+                    self.logger.record(
+                        "debug/mean_base_reward_step",
+                        float(info.get("mean_base_reward_step", 0.0)),
+                    )
+                    self.logger.record("debug/truncated_step", float(info.get("truncated", 0.0)))
         except Exception:
             pass
 
@@ -409,13 +331,6 @@ class RolloutCaptureCallback(BaseCallback):
             self.recording = False
             if not self.always_render:
                 self._set_render_enabled(False)
-
-        try:
-            rewards = self.model.rollout_buffer.rewards
-            avg_reward = float(np.nanmean(rewards))
-            self.logger.record("choco/avg_reward", avg_reward)
-        except Exception:
-            pass
 
         # Per-rollout aggregates
         try:
@@ -447,18 +362,6 @@ class RolloutCaptureCallback(BaseCallback):
                 self.logger.record(
                     "rollout/lane_hit_rate",
                     self._rollout_lane_hit_sum / self._rollout_agent_steps,
-                )
-                self.logger.record(
-                    "rollout/collision_rate",
-                    self._rollout_collision_sum / self._rollout_agent_steps,
-                )
-                self.logger.record(
-                    "rollout/road_collision_rate",
-                    self._rollout_road_collision_sum / self._rollout_agent_steps,
-                )
-                self.logger.record(
-                    "rollout/vehicle_collision_rate_per_controlled_agent_step",
-                    self._rollout_vehicle_collided_sum / self._rollout_agent_steps,
                 )
                 if self._rollout_spawned_count > 0:
                     # GPUDRIVE-style denominator: fraction of spawned agents
@@ -505,7 +408,6 @@ class RolloutCaptureCallback(BaseCallback):
                     "rollout/mean_pending_respawns",
                     self._rollout_pending_agent_steps / self._rollout_steps,
                 )
-            if self._rollout_steps > 0:
                 self.logger.record(
                     "rollout/mean_reward",
                     self._rollout_reward_sum / self._rollout_steps,
@@ -566,10 +468,6 @@ class RolloutCaptureCallback(BaseCallback):
                     self._rollout_vehicle_collision_sum / self._rollout_done_count,
                 )
                 self.logger.record(
-                    "rollout/mean_episode_len",
-                    self._rollout_agent_steps / self._rollout_done_count,
-                )
-                self.logger.record(
                     "rollout/success_given_done_rate",
                     self._rollout_done_success_count / self._rollout_done_count,
                 )
@@ -589,5 +487,42 @@ class RolloutCaptureCallback(BaseCallback):
                     self._training_vehicle_collision_count_total
                     / self._training_spawned_count_total,
                 )
+
+            if self.log_detailed_metrics:
+                if self._rollout_agent_steps > 0:
+                    self.logger.record(
+                        "debug/collision_rate",
+                        self._rollout_collision_sum / self._rollout_agent_steps,
+                    )
+                    self.logger.record(
+                        "debug/road_collision_rate",
+                        self._rollout_road_collision_sum / self._rollout_agent_steps,
+                    )
+                    self.logger.record(
+                        "debug/vehicle_collision_rate_per_controlled_agent_step",
+                        self._rollout_vehicle_collided_sum / self._rollout_agent_steps,
+                    )
+                    self.logger.record(
+                        "debug/success_latched_rate",
+                        self._rollout_success_latched_sum / self._rollout_agent_steps,
+                    )
+                if self._rollout_done_count > 0:
+                    self.logger.record(
+                        "debug/mean_episode_len",
+                        self._rollout_agent_steps / self._rollout_done_count,
+                    )
+                if self._rollout_steps > 0:
+                    self.logger.record(
+                        "debug/mean_controlled_agents",
+                        self._rollout_agent_steps / self._rollout_steps,
+                    )
+                    self.logger.record(
+                        "debug/mean_valid_agents",
+                        self._rollout_valid_agent_steps / self._rollout_steps,
+                    )
+                    self.logger.record(
+                        "debug/spawned_episode_count",
+                        self._rollout_spawned_count,
+                    )
         except Exception:
             pass

@@ -1,0 +1,55 @@
+choco_config_path: "configs/curriculum_design/navigation_geom_v1/curriculum_stage2_lane_safety_geom_roadedge_ttc_worldreset.yaml"
+
+device: "cuda:1"
+
+reward_type: "weighted_combination"
+collision_weight: -0.2
+goal_achieved_weight: 0.0
+off_road_weight: -0.2
+log_distance_weight: 0.0
+policy_type: "late_fusion"
+align_obs_with_resume: true
+
+late_fusion:
+  ego_dim: 11
+  road_point_dim: 5
+  vehicle_dim: 6
+  ego_layers: [64, 64]
+  road_layers: [96, 96]
+  vehicle_layers: [96, 96]
+  shared_layers: [128, 64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: "relu"
+  dropout: 0.0
+  pool: "max"
+
+seed: 42
+gamma: 0.995
+gae_lambda: 0.95
+clip_range: 0.25
+vf_coef: 0.5
+n_steps: 64
+num_minibatches: 8
+verbose: 1
+total_timesteps: 3_000_000
+ent_coef: 0.0
+lr: 8.703432629003532e-05
+n_epochs: 5
+
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: "runs/capture_stage2_lane_safety_geom_roadedge_ttc_worldreset_from_stage1_3m"
+render_during_training: false
+record_training_video: false
+video_fps: 30
+video_name_prefix: "ppo_stage2_lane_safety_geom_roadedge_ttc_worldreset_from_stage1_3m"
+video_keep_frames: false
+
+save_freq: 2000
+save_dir: "runs/checkpoints_stage2_lane_safety_geom_roadedge_ttc_worldreset_from_stage1_3m"
+save_prefix: "ppo_stage2_lane_safety_geom_roadedge_ttc_worldreset_from_stage1_3m"
+resume_from: "runs/checkpoints_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset/ppo_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_3000000_steps.zip"
+
+log_step_metrics: false
+log_detailed_metrics: false

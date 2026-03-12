@@ -216,6 +216,12 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.log_distance_weight = float(log_distance_weight)
         self.auto_reset_done = bool(cfg_env.get("auto_reset_done", True))
         self.auto_reset_timeout = bool(cfg_env.get("auto_reset_timeout", True))
+        self.done_reset_mode = str(cfg_env.get("done_reset_mode", "agent")).strip().lower()
+        if self.done_reset_mode not in {"agent", "world"}:
+            self.done_reset_mode = "agent"
+        self.mask_dead_agent_steps = bool(
+            cfg_env.get("mask_dead_agent_steps", self.done_reset_mode == "world")
+        )
         self.hard_remove_done_agents = bool(cfg_env.get("hard_remove_done_agents", False))
         self._dynamic_key_mapping = bool(self.hard_remove_done_agents)
         self._spawned_episode_total = 0
@@ -283,6 +289,11 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.info_dict = {}
         self.last_step_info_raw = None
         self._actions = None
+        if self.verbose:
+            print(
+                "[sb3] reset_mode="
+                f"{self.done_reset_mode} mask_dead_agent_steps={self.mask_dead_agent_steps}"
+            )
 
     def _reset_seeds(self) -> None:
         self._seeds = None
@@ -379,6 +390,15 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 f"num_envs={self.num_envs} keys={len(self._keys)}"
             )
         return True
+
+    def _done_worlds_from_mask(self, done_mask_t: torch.Tensor) -> torch.Tensor:
+        controlled_done_counts = (
+            done_mask_t.to(torch.int32) * self.controlled_agent_mask.to(torch.int32)
+        ).sum(dim=1)
+        controlled_counts = self.controlled_agent_mask.to(torch.int32).sum(dim=1)
+        return torch.where(
+            (controlled_counts > 0) & (controlled_done_counts == controlled_counts)
+        )[0]
 
     def _build_info_dict(
         self,
@@ -647,10 +667,10 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         reward = self._compute_rewards(obs, base_reward, done, info)
 
         done_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
-        success_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
         reward_mask = np.full(
             (self.num_worlds, self.max_agent_count), fill_value=np.nan, dtype=np.float32
         )
+        slot_key_idx = np.full((self.num_worlds, self.max_agent_count), fill_value=-1, dtype=np.int64)
         for wi in range(self.num_worlds):
             for si in range(self.max_agent_count):
                 if not bool(self.controlled_agent_mask[wi, si].item()):
@@ -659,16 +679,52 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 if k is None:
                     continue
                 key_idx = self._key_index[k]
+                slot_key_idx[wi, si] = int(key_idx)
                 done_mask[wi, si] = bool(done[key_idx])
-                if hasattr(info, "success"):
-                    success_mask[wi, si] = bool(info.success[key_idx])
                 reward_mask[wi, si] = float(reward[key_idx])
 
         done_mask_t = torch.tensor(done_mask, device=self.device)
-
         reward_mask_t = torch.tensor(reward_mask, device=self.device)
-        self.buf_rews = reward_mask_t.clone()
-        self.buf_dones = done_mask_t.to(torch.float32)
+        done_for_info = np.asarray(done, dtype=bool).copy()
+
+        if self.done_reset_mode == "world":
+            prev_dead_mask = self.dead_agent_mask.clone()
+            newly_done_mask_t = (
+                done_mask_t
+                & self.controlled_agent_mask
+                & (~prev_dead_mask)
+            )
+            self.dead_agent_mask = torch.logical_or(prev_dead_mask, done_mask_t)
+            alive_prev_mask_t = self.controlled_agent_mask & (~prev_dead_mask)
+
+            if self.mask_dead_agent_steps:
+                # GPUDDrive-style masking:
+                # - already-dead controlled slots emit NaN rewards and done=1.0
+                # - newly done slots emit done=1.0 once and then become masked on later steps
+                self.buf_rews = torch.full_like(self.buf_rews, fill_value=float("nan"))
+                self.buf_dones = torch.zeros_like(self.buf_dones, dtype=torch.float32)
+                self.buf_rews[alive_prev_mask_t] = reward_mask_t[alive_prev_mask_t]
+                dead_already_mask_t = prev_dead_mask & self.controlled_agent_mask
+                self.buf_dones[dead_already_mask_t] = 1.0
+                self.buf_dones[alive_prev_mask_t] = done_mask_t[alive_prev_mask_t].to(torch.float32)
+            else:
+                self.buf_rews = torch.zeros_like(self.buf_rews, dtype=torch.float32)
+                self.buf_dones = torch.zeros_like(self.buf_dones, dtype=torch.float32)
+                self.buf_rews[alive_prev_mask_t] = reward_mask_t[alive_prev_mask_t]
+                dead_already_mask_t = prev_dead_mask & self.controlled_agent_mask
+                self.buf_dones[dead_already_mask_t] = 1.0
+                self.buf_dones[alive_prev_mask_t] = done_mask_t[alive_prev_mask_t].to(torch.float32)
+
+            done_for_info = np.zeros_like(done_for_info, dtype=bool)
+            for wi in range(self.num_worlds):
+                for si in range(self.max_agent_count):
+                    key_idx = int(slot_key_idx[wi, si])
+                    if key_idx < 0:
+                        continue
+                    done_for_info[key_idx] = bool(newly_done_mask_t[wi, si].item())
+        else:
+            self.buf_rews = reward_mask_t.clone()
+            self.buf_dones = done_mask_t.to(torch.float32)
 
         if hasattr(info, "timeout") and info.timeout:
             if self.auto_reset_timeout:
@@ -677,17 +733,40 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 spawned_count_step += timeout_respawn_count
                 self.choco_env.reset_timeout()
                 obs, _, _ = self.choco_env._build_obs()
+                if self.done_reset_mode == "world":
+                    self.dead_agent_mask = ~self.controlled_agent_mask.clone()
         elif np.any(done):
             if self.auto_reset_done:
-                if self.flat_key_indices:
-                    sel = np.asarray(self.flat_key_indices, dtype=np.int64)
-                    done_respawn_count = int(np.asarray(done, dtype=bool)[sel].sum())
+                if self.done_reset_mode == "world":
+                    done_worlds_t = self._done_worlds_from_mask(self.dead_agent_mask)
+                    if len(done_worlds_t) > 0:
+                        done_worlds = [int(x) for x in done_worlds_t.detach().cpu().tolist()]
+                        done_world_set = set(done_worlds)
+                        done_world_key_mask = np.zeros((len(self._keys),), dtype=bool)
+                        for i, k in enumerate(self._keys):
+                            if int(k.world_idx) in done_world_set:
+                                done_world_key_mask[i] = True
+                        done_respawn_count = int(
+                            self.controlled_agent_mask[done_worlds_t].to(torch.int32).sum().item()
+                        )
+                        self._spawned_episode_total += done_respawn_count
+                        spawned_count_step += done_respawn_count
+                        self.choco_env.reset_done(done_world_key_mask)
+                        obs, _, _ = self.choco_env._build_obs()
+                        for wi in done_worlds:
+                            if wi < 0 or wi >= self.num_worlds:
+                                continue
+                            self.dead_agent_mask[wi, :] = ~self.controlled_agent_mask[wi, :]
                 else:
-                    done_respawn_count = int(np.asarray(done, dtype=bool).sum())
-                self._spawned_episode_total += done_respawn_count
-                spawned_count_step += done_respawn_count
-                self.choco_env.reset_done(done)
-                obs, _, _ = self.choco_env._build_obs()
+                    if self.flat_key_indices:
+                        sel = np.asarray(self.flat_key_indices, dtype=np.int64)
+                        done_respawn_count = int(np.asarray(done, dtype=bool)[sel].sum())
+                    else:
+                        done_respawn_count = int(np.asarray(done, dtype=bool).sum())
+                    self._spawned_episode_total += done_respawn_count
+                    spawned_count_step += done_respawn_count
+                    self.choco_env.reset_done(done)
+                    obs, _, _ = self.choco_env._build_obs()
 
         obs_flat = obs[self.flat_key_indices]
         if self.verbose:
@@ -700,7 +779,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         # Lightweight info summary for optional logging.
         self.info_dict = self._build_info_dict(
             info=info,
-            done=done,
+            done=done_for_info,
             reward=reward,
             base_reward=base_reward,
             spawned_count_step=spawned_count_step,

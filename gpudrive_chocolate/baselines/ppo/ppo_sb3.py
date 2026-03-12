@@ -20,6 +20,7 @@ if REPO_ROOT not in sys.path:
 from gpudrive_chocolate.env.sb3_wrapper import ChocolateSB3MultiAgentEnv
 from gpudrive_chocolate.networks.late_fusion_policy import LateFusionPolicy
 from gpudrive_chocolate.baselines.ppo.callbacks import RolloutCaptureCallback
+from gpudrive_chocolate.baselines.ppo.masked_rollout_buffer import MaskedRolloutBuffer
 
 
 def load_config(config_path):
@@ -260,6 +261,7 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
             device=exp_config.device,
             custom_objects=build_resume_custom_objects(env),
             tensorboard_log=tensorboard_root,
+            rollout_buffer_class=MaskedRolloutBuffer,
         )
     else:
         model = PPO(
@@ -279,6 +281,7 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
             device=exp_config.device,
             tensorboard_log=tensorboard_root,
             policy_kwargs=policy_kwargs,
+            rollout_buffer_class=MaskedRolloutBuffer,
         )
 
     capture_callback = RolloutCaptureCallback(
@@ -290,6 +293,8 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
         video_fps=int(getattr(exp_config, "video_fps", 30)),
         video_name_prefix=str(getattr(exp_config, "video_name_prefix", "training")),
         keep_frames=bool(getattr(exp_config, "video_keep_frames", False)),
+        log_step_metrics=bool(getattr(exp_config, "log_step_metrics", False)),
+        log_detailed_metrics=bool(getattr(exp_config, "log_detailed_metrics", False)),
     )
 
     checkpoint_cb = CheckpointCallback(
