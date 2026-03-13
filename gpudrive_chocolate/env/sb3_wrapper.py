@@ -258,6 +258,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             obs, mask, keys = self.choco_env.reset()
         # TODO: swap in a richer observation builder and update obs_dim accordingly.
         self._rebuild_slot_mapping(keys)
+        self._initialize_world_episode_tracking(reset_totals=True)
 
         self.obs_dim = int(obs.shape[-1])
         print(f"[sb3] initial obs shape={tuple(obs.shape)} obs_dim={self.obs_dim}")
@@ -400,6 +401,226 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             (controlled_counts > 0) & (controlled_done_counts == controlled_counts)
         )[0]
 
+    def _current_world_spawn_counts(self) -> np.ndarray:
+        counts_t = self.controlled_agent_mask.to(torch.int32).sum(dim=1).detach().cpu()
+        return np.asarray(counts_t.numpy(), dtype=np.int64)
+
+    def _empty_episode_completion_summary(self) -> Dict[str, float]:
+        spawn_total = int(max(1, int(self._episode_completed_spawned_total)))
+        return {
+            "episode_worlds_completed_count": 0,
+            "episode_spawned_count": 0,
+            "episode_done_count": 0,
+            "episode_success_count": 0,
+            "episode_road_done_count": 0,
+            "episode_vehicle_done_count": 0,
+            "episode_below_min_z_count": 0,
+            "episode_other_done_count": 0,
+            "episode_vehicle_collided_any_count": 0,
+            "episode_success_rate": 0.0,
+            "episode_road_done_rate": 0.0,
+            "episode_vehicle_done_rate": 0.0,
+            "episode_below_min_z_rate": 0.0,
+            "episode_other_done_rate": 0.0,
+            "episode_vehicle_collided_any_rate": 0.0,
+            "episode_cum_worlds_completed": int(self._episode_completed_worlds_total),
+            "episode_cum_spawned_count": int(self._episode_completed_spawned_total),
+            "episode_cum_done_count": int(self._episode_completed_done_total),
+            "episode_cum_success_count": int(self._episode_completed_success_total),
+            "episode_cum_road_done_count": int(self._episode_completed_road_done_total),
+            "episode_cum_vehicle_done_count": int(self._episode_completed_vehicle_done_total),
+            "episode_cum_below_min_z_count": int(self._episode_completed_below_min_z_total),
+            "episode_cum_other_done_count": int(self._episode_completed_other_done_total),
+            "episode_cum_vehicle_collided_any_count": int(
+                self._episode_completed_vehicle_collided_any_total
+            ),
+            "episode_cum_success_rate": float(self._episode_completed_success_total)
+            / float(spawn_total),
+            "episode_cum_road_done_rate": float(self._episode_completed_road_done_total)
+            / float(spawn_total),
+            "episode_cum_vehicle_done_rate": float(self._episode_completed_vehicle_done_total)
+            / float(spawn_total),
+            "episode_cum_below_min_z_rate": float(self._episode_completed_below_min_z_total)
+            / float(spawn_total),
+            "episode_cum_other_done_rate": float(self._episode_completed_other_done_total)
+            / float(spawn_total),
+            "episode_cum_vehicle_collided_any_rate": float(
+                self._episode_completed_vehicle_collided_any_total
+            )
+            / float(spawn_total),
+        }
+
+    def _initialize_world_episode_tracking(self, *, reset_totals: bool = False) -> None:
+        spawn_counts = self._current_world_spawn_counts()
+        self._episode_world_spawned = spawn_counts.copy()
+        self._episode_world_done = np.zeros((self.num_worlds,), dtype=np.int64)
+        self._episode_world_success = np.zeros((self.num_worlds,), dtype=np.int64)
+        self._episode_world_road_done = np.zeros((self.num_worlds,), dtype=np.int64)
+        self._episode_world_vehicle_done = np.zeros((self.num_worlds,), dtype=np.int64)
+        self._episode_world_below_min_z = np.zeros((self.num_worlds,), dtype=np.int64)
+        self._episode_world_other_done = np.zeros((self.num_worlds,), dtype=np.int64)
+        self._episode_world_vehicle_collided_any = [set() for _ in range(self.num_worlds)]
+        if reset_totals:
+            self._episode_completed_worlds_total = 0
+            self._episode_completed_spawned_total = 0
+            self._episode_completed_done_total = 0
+            self._episode_completed_success_total = 0
+            self._episode_completed_road_done_total = 0
+            self._episode_completed_vehicle_done_total = 0
+            self._episode_completed_below_min_z_total = 0
+            self._episode_completed_other_done_total = 0
+            self._episode_completed_vehicle_collided_any_total = 0
+
+    def _accumulate_world_episode_events(self, *, info, done: np.ndarray) -> None:
+        if self.done_reset_mode != "world":
+            return
+        keys = list(self._keys)
+        n = len(keys)
+        if n <= 0:
+            return
+
+        done = np.asarray(done, dtype=bool).reshape(-1)
+        newly_success = np.asarray(
+            getattr(info, "newly_success", np.zeros((n,), dtype=bool)),
+            dtype=bool,
+        ).reshape(-1)
+        road_contact_done = np.asarray(
+            getattr(info, "road_contact_done", np.zeros((n,), dtype=bool)),
+            dtype=bool,
+        ).reshape(-1)
+        vehicle_contact_done = np.asarray(
+            getattr(info, "vehicle_contact_done", np.zeros((n,), dtype=bool)),
+            dtype=bool,
+        ).reshape(-1)
+        below_min_z = np.asarray(
+            getattr(info, "below_min_z", np.zeros((n,), dtype=bool)),
+            dtype=bool,
+        ).reshape(-1)
+        vehicle_collided = np.asarray(
+            getattr(info, "vehicle_collided", np.zeros((n,), dtype=bool)),
+            dtype=bool,
+        ).reshape(-1)
+
+        common = min(
+            n,
+            int(done.shape[0]),
+            int(newly_success.shape[0]),
+            int(road_contact_done.shape[0]),
+            int(vehicle_contact_done.shape[0]),
+            int(below_min_z.shape[0]),
+            int(vehicle_collided.shape[0]),
+        )
+        if common <= 0:
+            return
+
+        for i in range(common):
+            k = keys[i]
+            wi = int(k.world_idx)
+            if wi < 0 or wi >= self.num_worlds:
+                continue
+            if bool(vehicle_collided[i]):
+                self._episode_world_vehicle_collided_any[wi].add(int(k.agent_id))
+            if not bool(done[i]):
+                continue
+
+            self._episode_world_done[wi] += 1
+            if bool(newly_success[i]):
+                self._episode_world_success[wi] += 1
+            elif bool(road_contact_done[i]):
+                self._episode_world_road_done[wi] += 1
+            elif bool(vehicle_contact_done[i]):
+                self._episode_world_vehicle_done[wi] += 1
+            elif bool(below_min_z[i]):
+                self._episode_world_below_min_z[wi] += 1
+            else:
+                self._episode_world_other_done[wi] += 1
+
+    def _finalize_completed_world_episodes(self, completed_worlds: Sequence[int]) -> Dict[str, float]:
+        out = self._empty_episode_completion_summary()
+        if self.done_reset_mode != "world":
+            return out
+
+        current_spawn = self._current_world_spawn_counts()
+        worlds = sorted(set(int(wi) for wi in completed_worlds))
+        for wi in worlds:
+            if wi < 0 or wi >= self.num_worlds:
+                continue
+            spawned = int(self._episode_world_spawned[wi])
+            if spawned <= 0:
+                spawned = int(current_spawn[wi]) if wi < current_spawn.shape[0] else 0
+            done_count = int(self._episode_world_done[wi])
+            success_count = int(self._episode_world_success[wi])
+            road_done_count = int(self._episode_world_road_done[wi])
+            vehicle_done_count = int(self._episode_world_vehicle_done[wi])
+            below_min_z_count = int(self._episode_world_below_min_z[wi])
+            other_done_count = int(self._episode_world_other_done[wi])
+            vehicle_collided_any_count = int(len(self._episode_world_vehicle_collided_any[wi]))
+
+            out["episode_worlds_completed_count"] += 1
+            out["episode_spawned_count"] += spawned
+            out["episode_done_count"] += done_count
+            out["episode_success_count"] += success_count
+            out["episode_road_done_count"] += road_done_count
+            out["episode_vehicle_done_count"] += vehicle_done_count
+            out["episode_below_min_z_count"] += below_min_z_count
+            out["episode_other_done_count"] += other_done_count
+            out["episode_vehicle_collided_any_count"] += vehicle_collided_any_count
+
+            self._episode_completed_worlds_total += 1
+            self._episode_completed_spawned_total += spawned
+            self._episode_completed_done_total += done_count
+            self._episode_completed_success_total += success_count
+            self._episode_completed_road_done_total += road_done_count
+            self._episode_completed_vehicle_done_total += vehicle_done_count
+            self._episode_completed_below_min_z_total += below_min_z_count
+            self._episode_completed_other_done_total += other_done_count
+            self._episode_completed_vehicle_collided_any_total += vehicle_collided_any_count
+
+            # Start a fresh world-episode bucket after respawn/reset.
+            next_spawned = int(current_spawn[wi]) if wi < current_spawn.shape[0] else 0
+            self._episode_world_spawned[wi] = next_spawned
+            self._episode_world_done[wi] = 0
+            self._episode_world_success[wi] = 0
+            self._episode_world_road_done[wi] = 0
+            self._episode_world_vehicle_done[wi] = 0
+            self._episode_world_below_min_z[wi] = 0
+            self._episode_world_other_done[wi] = 0
+            self._episode_world_vehicle_collided_any[wi].clear()
+
+        spawned = int(max(1, int(out["episode_spawned_count"])))
+        out["episode_success_rate"] = float(out["episode_success_count"]) / float(spawned)
+        out["episode_road_done_rate"] = float(out["episode_road_done_count"]) / float(spawned)
+        out["episode_vehicle_done_rate"] = float(out["episode_vehicle_done_count"]) / float(spawned)
+        out["episode_below_min_z_rate"] = float(out["episode_below_min_z_count"]) / float(spawned)
+        out["episode_other_done_rate"] = float(out["episode_other_done_count"]) / float(spawned)
+        out["episode_vehicle_collided_any_rate"] = float(out["episode_vehicle_collided_any_count"]) / float(spawned)
+
+        out["episode_cum_worlds_completed"] = int(self._episode_completed_worlds_total)
+        out["episode_cum_spawned_count"] = int(self._episode_completed_spawned_total)
+        out["episode_cum_done_count"] = int(self._episode_completed_done_total)
+        out["episode_cum_success_count"] = int(self._episode_completed_success_total)
+        out["episode_cum_road_done_count"] = int(self._episode_completed_road_done_total)
+        out["episode_cum_vehicle_done_count"] = int(self._episode_completed_vehicle_done_total)
+        out["episode_cum_below_min_z_count"] = int(self._episode_completed_below_min_z_total)
+        out["episode_cum_other_done_count"] = int(self._episode_completed_other_done_total)
+        out["episode_cum_vehicle_collided_any_count"] = int(
+            self._episode_completed_vehicle_collided_any_total
+        )
+        spawn_total = int(max(1, int(self._episode_completed_spawned_total)))
+        out["episode_cum_success_rate"] = float(self._episode_completed_success_total) / float(spawn_total)
+        out["episode_cum_road_done_rate"] = float(self._episode_completed_road_done_total) / float(spawn_total)
+        out["episode_cum_vehicle_done_rate"] = float(self._episode_completed_vehicle_done_total) / float(
+            spawn_total
+        )
+        out["episode_cum_below_min_z_rate"] = float(self._episode_completed_below_min_z_total) / float(
+            spawn_total
+        )
+        out["episode_cum_other_done_rate"] = float(self._episode_completed_other_done_total) / float(spawn_total)
+        out["episode_cum_vehicle_collided_any_rate"] = float(
+            self._episode_completed_vehicle_collided_any_total
+        ) / float(spawn_total)
+        return out
+
     def _build_info_dict(
         self,
         *,
@@ -408,6 +629,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         reward: np.ndarray,
         base_reward: np.ndarray,
         spawned_count_step: int = 0,
+        episode_summary: Optional[Dict[str, float]] = None,
     ) -> dict:
         mask = np.asarray(getattr(info, "mask", np.zeros((0,), dtype=bool)), dtype=bool)
         success = np.asarray(getattr(info, "success", np.zeros_like(mask)), dtype=bool)
@@ -520,7 +742,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         denom_active = max(1, active_agents)
         denom_done = max(1, done_count)
 
-        return {
+        info_dict = {
             "num_controlled_agents": controlled_agents,
             "num_valid_agents": valid_agents,
             "num_active_agents": active_agents,
@@ -579,6 +801,10 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             "collision_given_active_rate_step": float(collided_count) / float(denom_active),
             "t_env": int(getattr(info, "t_env", 0)),
         }
+        if episode_summary is None:
+            episode_summary = self._empty_episode_completion_summary()
+        info_dict.update(episode_summary)
+        return info_dict
 
     def reset(self, world_idx=None, seed=None):
         if world_idx is not None:
@@ -587,6 +813,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
         obs, mask, keys = self.choco_env.reset()
         self._rebuild_slot_mapping(keys)
+        self._initialize_world_episode_tracking(reset_totals=False)
         initial_spawn_count = int(len(self.flat_key_indices))
         self._spawned_episode_total += initial_spawn_count
         self._pending_initial_spawn_count += initial_spawn_count
@@ -686,6 +913,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         done_mask_t = torch.tensor(done_mask, device=self.device)
         reward_mask_t = torch.tensor(reward_mask, device=self.device)
         done_for_info = np.asarray(done, dtype=bool).copy()
+        completed_worlds: List[int] = []
 
         if self.done_reset_mode == "world":
             prev_dead_mask = self.dead_agent_mask.clone()
@@ -726,8 +954,14 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             self.buf_rews = reward_mask_t.clone()
             self.buf_dones = done_mask_t.to(torch.float32)
 
+        self._accumulate_world_episode_events(info=info, done=done_for_info)
+
         if hasattr(info, "timeout") and info.timeout:
             if self.auto_reset_timeout:
+                if self.done_reset_mode == "world":
+                    completed_worlds = [
+                        wi for wi in range(self.num_worlds) if int(self._episode_world_spawned[wi]) > 0
+                    ]
                 timeout_respawn_count = int(len(self.flat_key_indices))
                 self._spawned_episode_total += timeout_respawn_count
                 spawned_count_step += timeout_respawn_count
@@ -741,6 +975,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     done_worlds_t = self._done_worlds_from_mask(self.dead_agent_mask)
                     if len(done_worlds_t) > 0:
                         done_worlds = [int(x) for x in done_worlds_t.detach().cpu().tolist()]
+                        completed_worlds = done_worlds
                         done_world_set = set(done_worlds)
                         done_world_key_mask = np.zeros((len(self._keys),), dtype=bool)
                         for i, k in enumerate(self._keys):
@@ -768,6 +1003,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     self.choco_env.reset_done(done)
                     obs, _, _ = self.choco_env._build_obs()
 
+        episode_summary = self._finalize_completed_world_episodes(completed_worlds)
+
         obs_flat = obs[self.flat_key_indices]
         if self.verbose:
             print(f"[sb3] step obs shape={tuple(obs_flat.shape)}")
@@ -783,6 +1020,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             reward=reward,
             base_reward=base_reward,
             spawned_count_step=spawned_count_step,
+            episode_summary=episode_summary,
         )
 
         mask_cpu = self.controlled_agent_mask.cpu()

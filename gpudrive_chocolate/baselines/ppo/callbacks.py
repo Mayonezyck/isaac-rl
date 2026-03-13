@@ -51,6 +51,15 @@ class RolloutCaptureCallback(BaseCallback):
         self._training_done_count_total = 0.0
         self._training_vehicle_collision_count_total = 0.0
         self._training_done_vehicle_collided_count_total = 0.0
+        self._training_ep_worlds_total = 0.0
+        self._training_ep_spawn_total = 0.0
+        self._training_ep_done_total = 0.0
+        self._training_ep_success_total = 0.0
+        self._training_ep_road_done_total = 0.0
+        self._training_ep_vehicle_done_total = 0.0
+        self._training_ep_below_min_z_total = 0.0
+        self._training_ep_other_done_total = 0.0
+        self._training_ep_vehicle_any_total = 0.0
         self._reset_rollout_stats()
 
     def _reset_rollout_stats(self) -> None:
@@ -82,6 +91,15 @@ class RolloutCaptureCallback(BaseCallback):
         self._rollout_lane_error_sum = 0.0
         self._rollout_heading_alignment_sum = 0.0
         self._rollout_route_progress_sum = 0.0
+        self._rollout_ep_worlds = 0.0
+        self._rollout_ep_spawn = 0.0
+        self._rollout_ep_done = 0.0
+        self._rollout_ep_success = 0.0
+        self._rollout_ep_road_done = 0.0
+        self._rollout_ep_vehicle_done = 0.0
+        self._rollout_ep_below_min_z = 0.0
+        self._rollout_ep_other_done = 0.0
+        self._rollout_ep_vehicle_any = 0.0
 
     def _set_render_enabled(self, enabled: bool) -> None:
         try:
@@ -161,6 +179,15 @@ class RolloutCaptureCallback(BaseCallback):
         self._training_done_count_total = 0.0
         self._training_vehicle_collision_count_total = 0.0
         self._training_done_vehicle_collided_count_total = 0.0
+        self._training_ep_worlds_total = 0.0
+        self._training_ep_spawn_total = 0.0
+        self._training_ep_done_total = 0.0
+        self._training_ep_success_total = 0.0
+        self._training_ep_road_done_total = 0.0
+        self._training_ep_vehicle_done_total = 0.0
+        self._training_ep_below_min_z_total = 0.0
+        self._training_ep_other_done_total = 0.0
+        self._training_ep_vehicle_any_total = 0.0
         if self.continuous_recording:
             self._start_continuous_recording()
 
@@ -240,6 +267,35 @@ class RolloutCaptureCallback(BaseCallback):
                 self._training_done_vehicle_collided_count_total += float(
                     info.get("done_vehicle_collided_count", 0.0)
                 )
+                ep_worlds = float(info.get("episode_worlds_completed_count", 0.0))
+                ep_spawn = float(info.get("episode_spawned_count", 0.0))
+                ep_done = float(info.get("episode_done_count", 0.0))
+                ep_success = float(info.get("episode_success_count", 0.0))
+                ep_road_done = float(info.get("episode_road_done_count", 0.0))
+                ep_vehicle_done = float(info.get("episode_vehicle_done_count", 0.0))
+                ep_below_min_z = float(info.get("episode_below_min_z_count", 0.0))
+                ep_other_done = float(info.get("episode_other_done_count", 0.0))
+                ep_vehicle_any = float(info.get("episode_vehicle_collided_any_count", 0.0))
+
+                self._rollout_ep_worlds += ep_worlds
+                self._rollout_ep_spawn += ep_spawn
+                self._rollout_ep_done += ep_done
+                self._rollout_ep_success += ep_success
+                self._rollout_ep_road_done += ep_road_done
+                self._rollout_ep_vehicle_done += ep_vehicle_done
+                self._rollout_ep_below_min_z += ep_below_min_z
+                self._rollout_ep_other_done += ep_other_done
+                self._rollout_ep_vehicle_any += ep_vehicle_any
+
+                self._training_ep_worlds_total += ep_worlds
+                self._training_ep_spawn_total += ep_spawn
+                self._training_ep_done_total += ep_done
+                self._training_ep_success_total += ep_success
+                self._training_ep_road_done_total += ep_road_done
+                self._training_ep_vehicle_done_total += ep_vehicle_done
+                self._training_ep_below_min_z_total += ep_below_min_z
+                self._training_ep_other_done_total += ep_other_done
+                self._training_ep_vehicle_any_total += ep_vehicle_any
                 self._rollout_timeout_count += float(info.get("truncated", 0.0))
                 self._rollout_base_reward_sum += float(info.get("mean_base_reward_step", 0.0))
                 self._rollout_dist_sum += (
@@ -487,6 +543,48 @@ class RolloutCaptureCallback(BaseCallback):
                     self._training_vehicle_collision_count_total
                     / self._training_spawned_count_total,
                 )
+
+            if self._rollout_ep_worlds > 0:
+                ep_spawn = max(1.0, self._rollout_ep_spawn)
+                self.logger.record("ep/worlds", self._rollout_ep_worlds)
+                self.logger.record("ep/spawn", self._rollout_ep_spawn)
+                self.logger.record("ep/done", self._rollout_ep_done)
+                self.logger.record("ep/succ", self._rollout_ep_success)
+                self.logger.record("ep/road", self._rollout_ep_road_done)
+                self.logger.record("ep/veh_done", self._rollout_ep_vehicle_done)
+                self.logger.record("ep/z_fail", self._rollout_ep_below_min_z)
+                self.logger.record("ep/other", self._rollout_ep_other_done)
+                self.logger.record("ep/veh_any", self._rollout_ep_vehicle_any)
+                self.logger.record("ep/succ_rate", self._rollout_ep_success / ep_spawn)
+                self.logger.record("ep/road_rate", self._rollout_ep_road_done / ep_spawn)
+                self.logger.record("ep/veh_done_rate", self._rollout_ep_vehicle_done / ep_spawn)
+                self.logger.record("ep/z_fail_rate", self._rollout_ep_below_min_z / ep_spawn)
+                self.logger.record("ep/other_rate", self._rollout_ep_other_done / ep_spawn)
+                self.logger.record("ep/veh_any_rate", self._rollout_ep_vehicle_any / ep_spawn)
+
+            if self._training_ep_worlds_total > 0:
+                ep_spawn_cum = max(1.0, self._training_ep_spawn_total)
+                self.logger.record("ep_cum/worlds", self._training_ep_worlds_total)
+                self.logger.record("ep_cum/spawn", self._training_ep_spawn_total)
+                self.logger.record("ep_cum/done", self._training_ep_done_total)
+                self.logger.record("ep_cum/succ", self._training_ep_success_total)
+                self.logger.record("ep_cum/road", self._training_ep_road_done_total)
+                self.logger.record("ep_cum/veh_done", self._training_ep_vehicle_done_total)
+                self.logger.record("ep_cum/z_fail", self._training_ep_below_min_z_total)
+                self.logger.record("ep_cum/other", self._training_ep_other_done_total)
+                self.logger.record("ep_cum/veh_any", self._training_ep_vehicle_any_total)
+                self.logger.record("ep_cum/succ_rate", self._training_ep_success_total / ep_spawn_cum)
+                self.logger.record("ep_cum/road_rate", self._training_ep_road_done_total / ep_spawn_cum)
+                self.logger.record(
+                    "ep_cum/veh_done_rate",
+                    self._training_ep_vehicle_done_total / ep_spawn_cum,
+                )
+                self.logger.record(
+                    "ep_cum/z_fail_rate",
+                    self._training_ep_below_min_z_total / ep_spawn_cum,
+                )
+                self.logger.record("ep_cum/other_rate", self._training_ep_other_done_total / ep_spawn_cum)
+                self.logger.record("ep_cum/veh_any_rate", self._training_ep_vehicle_any_total / ep_spawn_cum)
 
             if self.log_detailed_metrics:
                 if self._rollout_agent_steps > 0:

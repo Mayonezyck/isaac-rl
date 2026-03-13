@@ -31,23 +31,23 @@ vf_coef: 0.5
 n_steps: 64
 num_minibatches: 4
 verbose: 1
-total_timesteps: 6_000_000
+total_timesteps: 100_000_000
 ent_coef: 0.0
 lr: 0.00035229989244478754
 n_epochs: 5
 
 render_every_updates: 1000
 render_rollout_steps: 0
-render_dir: "runs/capture_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset"
+render_dir: "runs/capture_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo_32"
 render_during_training: false
 record_training_video: false
 video_fps: 30
-video_name_prefix: "ppo_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset"
+video_name_prefix: "ppo_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo_32"
 video_keep_frames: false
 
 save_freq: 3125
-save_dir: "runs/checkpoints_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo"
-save_prefix: "ppo_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo"
-
+save_dir: "runs/checkpoints_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo_32"
+save_prefix: "ppo_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo_32"
+resume_from: "runs/checkpoints_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo_32/ppo_stage1_goal_route_geom_best_roadedge_ttc_hardreset_r10_k350_knn_worldreset_zuo_32_12403125_steps.zip"
 log_step_metrics: false
 log_detailed_metrics: false

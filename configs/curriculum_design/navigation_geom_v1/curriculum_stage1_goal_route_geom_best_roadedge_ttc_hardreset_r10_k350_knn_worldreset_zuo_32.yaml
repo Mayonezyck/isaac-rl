@@ -23,21 +23,69 @@ world:
   origin_mode: "center"
   max_agents_per_world: 8
   assignments:
+    - scene_json: "scene_000000.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000002.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000006.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000008.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000012.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000014.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000015.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000016.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000017.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000019.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000025.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000027.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000028.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000029.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000031.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000035.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000039.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000052.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000053.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000059.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000064.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000067.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000071.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000080.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000085.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000090.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
     - scene_json: "scene_000098.json"
       friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000038.json"
+    - scene_json: "scene_000099.json"
       friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000076.json"
+    - scene_json: "scene_000103.json"
       friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000085.json"
+    - scene_json: "scene_000108.json"
       friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000088.json"
+    - scene_json: "scene_000114.json"
       friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000087.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000076.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000085.json"
+    - scene_json: "scene_000117.json"
       friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
 
 road:
