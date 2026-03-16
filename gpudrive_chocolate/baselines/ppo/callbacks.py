@@ -70,6 +70,8 @@ class RolloutCaptureCallback(BaseCallback):
         self._rollout_goal_sum = 0.0
         self._rollout_success_latched_sum = 0.0
         self._rollout_road_contact_done_sum = 0.0
+        self._rollout_road_contact_hit_sum = 0.0
+        self._rollout_road_edge_latched_sum = 0.0
         self._rollout_vehicle_contact_done_sum = 0.0
         self._rollout_off_road_sum = 0.0
         self._rollout_lane_hit_sum = 0.0
@@ -243,6 +245,8 @@ class RolloutCaptureCallback(BaseCallback):
                 self._rollout_goal_sum += float(info.get("new_success_count", 0.0))
                 self._rollout_success_latched_sum += float(info.get("success_latched_count", 0.0))
                 self._rollout_road_contact_done_sum += float(info.get("road_contact_done_count", 0.0))
+                self._rollout_road_contact_hit_sum += float(info.get("road_contact_hit_count", 0.0))
+                self._rollout_road_edge_latched_sum += float(info.get("road_edge_latched_count", 0.0))
                 self._rollout_vehicle_contact_done_sum += float(info.get("vehicle_contact_done_count", 0.0))
                 self._rollout_off_road_sum += float(info.get("off_road", 0.0))
                 self._rollout_lane_hit_sum += float(info.get("lane_hit_count", 0.0))
@@ -406,6 +410,14 @@ class RolloutCaptureCallback(BaseCallback):
                 self.logger.record(
                     "rollout/road_contact_done_rate",
                     self._rollout_road_contact_done_sum / self._rollout_agent_steps,
+                )
+                self.logger.record(
+                    "rollout/road_contact_hit_rate",
+                    self._rollout_road_contact_hit_sum / self._rollout_agent_steps,
+                )
+                self.logger.record(
+                    "rollout/road_edge_latched_rate",
+                    self._rollout_road_edge_latched_sum / self._rollout_agent_steps,
                 )
                 self.logger.record(
                     "rollout/vehicle_contact_done_rate",

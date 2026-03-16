@@ -79,6 +79,13 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             collision_debug=bool(cfg_env.get("collision_debug", False)),
             road_contact_done_types=list(cfg_env.get("road_contact_done_types", [])),
             road_contact_done_penalty=float(cfg_env.get("road_contact_done_penalty", -1.0)),
+            road_edge_latched_penalty_enable=bool(
+                cfg_env.get("road_edge_latched_penalty_enable", False)
+            ),
+            road_edge_latched_penalty_per_step=float(
+                cfg_env.get("road_edge_latched_penalty_per_step", -5.0)
+            ),
+            road_edge_latched_clear_types=cfg_env.get("road_edge_latched_clear_types", None),
             lane_center_reward_enable=bool(cfg_env.get("lane_center_reward_enable", False)),
             lane_center_reward_type=cfg_env.get("lane_center_reward_type", 2),
             lane_center_reward_per_step=float(cfg_env.get("lane_center_reward_per_step", 0.05)),
@@ -641,6 +648,14 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             getattr(info, "road_contact_done", np.zeros_like(mask)),
             dtype=bool,
         )
+        road_contact_hit = np.asarray(
+            getattr(info, "road_contact_hit", np.zeros_like(mask)),
+            dtype=bool,
+        )
+        road_edge_latched = np.asarray(
+            getattr(info, "road_edge_latched", np.zeros_like(mask)),
+            dtype=bool,
+        )
         vehicle_contact_done = np.asarray(
             getattr(info, "vehicle_contact_done", np.zeros_like(mask)),
             dtype=bool,
@@ -688,6 +703,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             success = success[sel]
             newly_success = newly_success[sel]
             road_contact_done = road_contact_done[sel]
+            road_contact_hit = road_contact_hit[sel]
+            road_edge_latched = road_edge_latched[sel]
             vehicle_contact_done = vehicle_contact_done[sel]
             collided = collided[sel]
             road_collided = road_collided[sel]
@@ -713,6 +730,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         new_success_count = int(newly_success.sum())
         success_latched_count = int(success.sum())
         road_contact_done_count = int(road_contact_done.sum())
+        road_contact_hit_count = int(road_contact_hit.sum())
+        road_edge_latched_count = int(road_edge_latched.sum())
         vehicle_contact_done_count = int(vehicle_contact_done.sum())
         off_road_count = int(off_road.sum())
         lane_hit_count = int(lane_hit.sum())
@@ -755,6 +774,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             "success_latched_count": success_latched_count,
             "done_success_count": int(np.logical_and(done, success).sum()),
             "road_contact_done_count": road_contact_done_count,
+            "road_contact_hit_count": road_contact_hit_count,
+            "road_edge_latched_count": road_edge_latched_count,
             "vehicle_contact_done_count": vehicle_contact_done_count,
             "truncated": float(bool(getattr(info, "timeout", False))),
             "off_road": float(off_road_count),
@@ -770,6 +791,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             "goal_rate_step": float(new_success_count) / float(denom_controlled),
             "success_latched_rate_step": float(success_latched_count) / float(denom_controlled),
             "road_contact_done_rate_step": float(road_contact_done_count) / float(denom_controlled),
+            "road_contact_hit_rate_step": float(road_contact_hit_count) / float(denom_controlled),
+            "road_edge_latched_rate_step": float(road_edge_latched_count) / float(denom_controlled),
             "vehicle_contact_done_rate_step": float(vehicle_contact_done_count) / float(denom_controlled),
             "off_road_rate_step": float(off_road_count) / float(denom_controlled),
             "lane_hit_rate_step": float(lane_hit_count) / float(denom_controlled),

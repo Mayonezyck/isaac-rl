@@ -20,6 +20,8 @@ class StepInfo:
     success: np.ndarray       # (N,) bool     (latched)
     newly_success: np.ndarray # (N,) bool
     road_contact_done: np.ndarray  # (N,) bool
+    road_contact_hit: np.ndarray  # (N,) bool
+    road_edge_latched: np.ndarray  # (N,) bool
     vehicle_contact_done: np.ndarray  # (N,) bool
     collided: np.ndarray      # (N,) bool
     road_collided: np.ndarray # (N,) bool
@@ -142,6 +144,9 @@ class ChocolateEnv:
         collision_debug: bool = False,
         road_contact_done_types: Optional[List[int]] = None,
         road_contact_done_penalty: float = -1.0,
+        road_edge_latched_penalty_enable: bool = False,
+        road_edge_latched_penalty_per_step: float = -5.0,
+        road_edge_latched_clear_types: Optional[List[int]] = None,
         lane_center_reward_enable: bool = False,
         lane_center_reward_type: int = 2,
         lane_center_reward_per_step: float = 0.05,
@@ -231,6 +236,8 @@ class ChocolateEnv:
         self.collision_debug = bool(collision_debug)
         self.road_contact_done_types = set(int(x) for x in (road_contact_done_types or []))
         self.road_contact_done_penalty = float(road_contact_done_penalty)
+        self.road_edge_latched_penalty_enable = bool(road_edge_latched_penalty_enable)
+        self.road_edge_latched_penalty_per_step = float(road_edge_latched_penalty_per_step)
         self.lane_center_reward_enable = bool(lane_center_reward_enable)
         if isinstance(lane_center_reward_type, (list, tuple, set)):
             self.lane_center_reward_types = set(int(x) for x in lane_center_reward_type)
@@ -248,6 +255,21 @@ class ChocolateEnv:
         self.geom_offroad_distance_threshold_m = max(1e-3, float(geom_offroad_distance_threshold_m))
         self.geom_lane_types = set(int(x) for x in (geom_lane_types or [1, 2]))
         self.geom_road_edge_types = set(int(x) for x in (geom_road_edge_types or [15, 16]))
+        if road_edge_latched_clear_types is None:
+            self.road_edge_latched_clear_types = set(self.geom_lane_types)
+        else:
+            self.road_edge_latched_clear_types = set(int(x) for x in road_edge_latched_clear_types)
+        if self.road_edge_latched_penalty_enable and not self.road_contact_done_types:
+            print(
+                "[warn][fallback] road_edge_latched_penalty_enable=true but "
+                "road_contact_done_types is empty; latch will never activate."
+            )
+        if self.road_edge_latched_penalty_enable and not self.road_edge_latched_clear_types:
+            self.road_edge_latched_clear_types = set(self.geom_lane_types)
+            print(
+                "[warn][fallback] road_edge_latched_clear_types is empty; "
+                "falling back to geom_lane_types for latch clearing."
+            )
         self.survival_reward_per_step = float(survival_reward_per_step)
         self.idle_penalty_enable = bool(idle_penalty_enable)
         self.idle_penalty_per_step = float(idle_penalty_per_step)
@@ -383,6 +405,7 @@ class ChocolateEnv:
         self._prev_dist_m: np.ndarray = np.zeros((0,), dtype=np.float32)
         self._done: np.ndarray = np.zeros((0,), dtype=bool)
         self._success_latched: np.ndarray = np.zeros((0,), dtype=bool)
+        self._road_edge_latched: np.ndarray = np.zeros((0,), dtype=bool)
 
         # --- per-agent cached reset pose ---
         self._start_local_translate: Dict[object, Tuple[float, float, float]] = {}
@@ -2538,6 +2561,11 @@ class ChocolateEnv:
             if isinstance(self._success_latched, np.ndarray)
             else np.zeros((len(old_keys),), dtype=bool)
         )
+        old_latched = (
+            self._road_edge_latched.copy()
+            if isinstance(self._road_edge_latched, np.ndarray)
+            else np.zeros((len(old_keys),), dtype=bool)
+        )
         old_prev_dist = (
             self._prev_dist_m.copy()
             if isinstance(self._prev_dist_m, np.ndarray)
@@ -2558,6 +2586,7 @@ class ChocolateEnv:
         N2 = len(keys2)
         new_done = np.zeros((N2,), dtype=bool)
         new_success = np.zeros((N2,), dtype=bool)
+        new_latched = np.zeros((N2,), dtype=bool)
         new_prev_dist = dist_m2.copy()
 
         for j, k in enumerate(keys2):
@@ -2568,11 +2597,14 @@ class ChocolateEnv:
                 new_done[j] = bool(old_done[old_idx])
             if 0 <= old_idx < old_success.shape[0]:
                 new_success[j] = bool(old_success[old_idx])
+            if 0 <= old_idx < old_latched.shape[0]:
+                new_latched[j] = bool(old_latched[old_idx])
             if 0 <= old_idx < old_prev_dist.shape[0]:
                 new_prev_dist[j] = float(old_prev_dist[old_idx])
 
         self._done = new_done
         self._success_latched = new_success
+        self._road_edge_latched = new_latched
         self._prev_dist_m = new_prev_dist
 
     def _get_contact_types(self, h) -> List[int]:
@@ -2856,6 +2888,7 @@ class ChocolateEnv:
             if self._done.shape[0] != len(self._keys):
                 self._done = np.zeros((len(self._keys),), dtype=bool)
                 self._success_latched = np.zeros((len(self._keys),), dtype=bool)
+                self._road_edge_latched = np.zeros((len(self._keys),), dtype=bool)
                 self._prev_dist_m = dist_m.copy()
             token_to_new_idx = {
                 self._agent_token_from_key(k): i for i, k in enumerate(self._keys)
@@ -2865,6 +2898,7 @@ class ChocolateEnv:
                 reset_idx_arr = np.asarray(reset_idx, dtype=np.int64)
                 self._done[reset_idx_arr] = False
                 self._success_latched[reset_idx_arr] = False
+                self._road_edge_latched[reset_idx_arr] = False
                 self._prev_dist_m[reset_idx_arr] = dist_m[reset_idx_arr]
             for tok in done_tokens:
                 j = token_to_new_idx.get(tok, None)
@@ -2887,6 +2921,8 @@ class ChocolateEnv:
         # clear episode bookkeeping
         self._done[idx] = False
         self._success_latched[idx] = False
+        if isinstance(self._road_edge_latched, np.ndarray) and self._road_edge_latched.shape[0] == len(self._keys):
+            self._road_edge_latched[idx] = False
 
         # IMPORTANT: clear obs-builder velocity memory for those keys
         st = getattr(self.obs_builder, "state", None)
@@ -2949,6 +2985,7 @@ class ChocolateEnv:
         # init per-agent episode state
         self._done = np.zeros((N,), dtype=bool)
         self._success_latched = np.zeros((N,), dtype=bool)
+        self._road_edge_latched = np.zeros((N,), dtype=bool)
 
         dist_n = obs[:, 4].astype(np.float32)
         dist_m = dist_n * (self.bounds_size_m * math.sqrt(2.0))
@@ -2974,6 +3011,8 @@ class ChocolateEnv:
         U = np.asarray(U, dtype=np.float32)
         keys = self._keys
         N = len(keys)
+        if self._road_edge_latched.shape[0] != N:
+            self._road_edge_latched = np.zeros((N,), dtype=bool)
 
         if U.ndim != 2 or U.shape[0] != N or U.shape[1] not in (2, 3):
             raise ValueError(f"Action must be shape (N,2) or (N,3). got {U.shape}, N={N}")
@@ -3030,6 +3069,7 @@ class ChocolateEnv:
             N = len(keys2)
             self._done = np.zeros((N,), dtype=bool)
             self._success_latched = np.zeros((N,), dtype=bool)
+            self._road_edge_latched = np.zeros((N,), dtype=bool)
             self._prev_dist_m = (
                 obs[:, 4].astype(np.float32) * (self.bounds_size_m * math.sqrt(2.0))
             )
@@ -3141,7 +3181,8 @@ class ChocolateEnv:
                 self._done[below_min_z] = True
 
         road_contact_done = np.zeros((N,), dtype=bool)
-        # Road-contact termination based on trigger contact list
+        road_contact_hit = np.zeros((N,), dtype=bool)
+        # Road-contact trigger hits (and optional termination/latch behavior).
         if self.road_contact_done_types:
             for i, k in enumerate(keys):
                 if not active[i]:
@@ -3151,10 +3192,35 @@ class ChocolateEnv:
                     continue
                 contact_types = self._get_contact_types(h)
                 if any(t in self.road_contact_done_types for t in contact_types):
-                    road_contact_done[i] = True
-            if road_contact_done.any():
-                reward[road_contact_done] += float(self.road_contact_done_penalty)
-                self._done[road_contact_done] = True
+                    road_contact_hit[i] = True
+
+            if self.road_edge_latched_penalty_enable:
+                # Edge-touch latches a per-step penalty until cleared by lane-center contact.
+                self._road_edge_latched = np.logical_or(self._road_edge_latched, road_contact_hit)
+                if self.road_edge_latched_clear_types:
+                    clear_latch = np.zeros((N,), dtype=bool)
+                    for i, k in enumerate(keys):
+                        if not active[i]:
+                            continue
+                        if not self._road_edge_latched[i]:
+                            continue
+                        h = self.ctrl.get(k.world_idx, k.agent_id)
+                        if h is None:
+                            continue
+                        contact_types = self._get_contact_types(h)
+                        if any(t in self.road_edge_latched_clear_types for t in contact_types):
+                            clear_latch[i] = True
+                    if clear_latch.any():
+                        self._road_edge_latched[clear_latch] = False
+
+                latched_active = self._road_edge_latched & active
+                if latched_active.any():
+                    reward[latched_active] += float(self.road_edge_latched_penalty_per_step)
+            else:
+                road_contact_done = road_contact_hit.copy()
+                if road_contact_done.any():
+                    reward[road_contact_done] += float(self.road_contact_done_penalty)
+                    self._done[road_contact_done] = True
 
         # Lane-center per-step reward (contact-type proxy, legacy path)
         lane_hit_contact = np.zeros((N,), dtype=bool)
@@ -3289,6 +3355,8 @@ class ChocolateEnv:
             success=self._success_latched.copy(),
             newly_success=newly_success.copy(),
             road_contact_done=road_contact_done.copy(),
+            road_contact_hit=road_contact_hit.copy(),
+            road_edge_latched=self._road_edge_latched.copy(),
             vehicle_contact_done=vehicle_contact_done.copy(),
             collided=collided_flags.copy(),
             road_collided=road_collided.copy(),
