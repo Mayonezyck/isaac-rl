@@ -1,0 +1,31 @@
+{
+  "segments": [
+    {
+      "duration_s": 1.0,
+      "label": "idle",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 4.0,
+      "label": "constant_steer",
+      "command": {
+        "accelerator": 0.35,
+        "steering": 0.18,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 1.5,
+      "label": "service_brake",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.65
+      }
+    }
+  ]
+}

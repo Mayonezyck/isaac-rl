@@ -1,0 +1,130 @@
+{
+  "dt_s": 0.016666666666666666,
+  "max_steps": 450,
+  "settle_steps": 60,
+  "command_program_source": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/step_steer_right.json",
+  "vehicle_root_path": "/World/PatchTrack/Teacher/Vehicle",
+  "controller_path": "/World/PatchTrack/Teacher/Vehicle/Vehicle",
+  "vehicle_body_path": "/World/PatchTrack/Teacher/Vehicle/Vehicle",
+  "wheel_attachments": [
+    {
+      "index": 0,
+      "label": "front_left",
+      "path": "/World/PatchTrack/Teacher/Vehicle/Vehicle/LeftWheel1References"
+    },
+    {
+      "index": 1,
+      "label": "front_right",
+      "path": "/World/PatchTrack/Teacher/Vehicle/Vehicle/RightWheel1References"
+    },
+    {
+      "index": 2,
+      "label": "rear_left",
+      "path": "/World/PatchTrack/Teacher/Vehicle/Vehicle/LeftWheel2References"
+    },
+    {
+      "index": 3,
+      "label": "rear_right",
+      "path": "/World/PatchTrack/Teacher/Vehicle/Vehicle/RightWheel2References"
+    }
+  ],
+  "surface_patches": [
+    {
+      "name": "dry_asphalt",
+      "x_center_m": -12.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 1.0,
+      "dynamic_friction": 0.95,
+      "tire_friction": 1.0,
+      "color_srgb": [
+        0.28,
+        0.28,
+        0.3
+      ]
+    },
+    {
+      "name": "wet_asphalt",
+      "x_center_m": 0.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 0.75,
+      "dynamic_friction": 0.7,
+      "tire_friction": 0.72,
+      "color_srgb": [
+        0.22,
+        0.31,
+        0.4
+      ]
+    },
+    {
+      "name": "gravel",
+      "x_center_m": 12.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 0.6,
+      "dynamic_friction": 0.55,
+      "tire_friction": 0.58,
+      "color_srgb": [
+        0.55,
+        0.48,
+        0.36
+      ]
+    }
+  ],
+  "material_paths": {
+    "dry_asphalt": "/World/PatchTrack/Materials/dry_asphalt",
+    "wet_asphalt": "/World/PatchTrack/Materials/wet_asphalt",
+    "gravel": "/World/PatchTrack/Materials/gravel"
+  },
+  "command_program": [
+    {
+      "duration_s": 1.0,
+      "label": "idle",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 2.0,
+      "label": "entry",
+      "command": {
+        "accelerator": 0.45,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 2.0,
+      "label": "step_steer",
+      "command": {
+        "accelerator": 0.45,
+        "steering": -0.25,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 1.0,
+      "label": "recenter",
+      "command": {
+        "accelerator": 0.45,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 1.5,
+      "label": "service_brake",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.65
+      }
+    }
+  ]
+}

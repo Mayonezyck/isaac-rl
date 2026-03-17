@@ -178,6 +178,8 @@ class ChocolateEnv:
         road_points_include_dirs: bool = False,
         vehicle_obs_enable: bool = False,
         vehicle_obs_k: int = 63,
+        vehicle_obs_include_ttc: bool = False,
+        vehicle_obs_ttc_max_s: float = 10.0,
         ttc_penalty_enable: bool = False,
         ttc_penalty_alpha: float = 1.0,
         ttc_penalty_max: float = 1.0,
@@ -288,6 +290,9 @@ class ChocolateEnv:
         self.road_point_feat_dim = 5 if self.road_points_include_dirs else 3
         self.vehicle_obs_enable = bool(vehicle_obs_enable)
         self.vehicle_obs_k = int(vehicle_obs_k)
+        self.vehicle_obs_include_ttc = bool(vehicle_obs_include_ttc)
+        self.vehicle_obs_ttc_max_s = max(0.1, float(vehicle_obs_ttc_max_s))
+        self.vehicle_obs_feat_dim = 7 if self.vehicle_obs_include_ttc else 6
         self.ttc_penalty_enable = bool(ttc_penalty_enable)
         self.ttc_penalty_alpha = float(ttc_penalty_alpha)
         self.ttc_penalty_max = float(ttc_penalty_max)
@@ -967,8 +972,12 @@ class ChocolateEnv:
             )
             width_u = 2.0 / mpu
 
-        # Three-circle TTC model: each circle radius follows the vehicle width.
-        radius_u = max(0.0, 0.5 * width_u)
+        # Three-circle TTC model: radius follows configured width scale + margin.
+        radius_u = max(
+            0.0,
+            0.5 * width_u * float(self.ttc_vehicle_radius_scale)
+            + float(self.ttc_vehicle_radius_margin_m) / mpu,
+        )
         self._vehicle_shape_u_cache[token] = (float(length_u), float(width_u), float(radius_u))
         self._vehicle_radius_u_cache[token] = float(radius_u)
         return (float(length_u), float(width_u), float(radius_u))
@@ -1940,6 +1949,11 @@ class ChocolateEnv:
             road_points_include_dirs=self.road_points_include_dirs,
             vehicle_obs_enable=self.vehicle_obs_enable,
             vehicle_obs_k=self.vehicle_obs_k,
+            vehicle_obs_include_ttc=self.vehicle_obs_include_ttc,
+            vehicle_obs_ttc_max_s=self.vehicle_obs_ttc_max_s,
+            ttc_use_vehicle_size=self.ttc_use_vehicle_size,
+            ttc_vehicle_radius_scale=self.ttc_vehicle_radius_scale,
+            ttc_vehicle_radius_margin_m=self.ttc_vehicle_radius_margin_m,
         )
         return obs, mask, keys
 
@@ -2064,7 +2078,7 @@ class ChocolateEnv:
                 else 0
             )
             k = int(self.vehicle_obs_k)
-            feat = 6
+            feat = int(self.vehicle_obs_feat_dim)
             for j in range(k):
                 off = base + feat * j
                 rx = float(obs_vec[off + 0]) * L

@@ -1,0 +1,49 @@
+{
+  "segments": [
+    {
+      "label": "launch",
+      "duration_s": 1.0,
+      "command": {
+        "accelerator": 0.2,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "cross_dry",
+      "duration_s": 3.5,
+      "command": {
+        "accelerator": 0.65,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "wet_patch_left",
+      "duration_s": 2.0,
+      "command": {
+        "accelerator": 0.55,
+        "steering": 0.24,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "gravel_patch_right",
+      "duration_s": 2.0,
+      "command": {
+        "accelerator": 0.55,
+        "steering": -0.24,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "brake",
+      "duration_s": 1.5,
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.6
+      }
+    }
+  ]
+}

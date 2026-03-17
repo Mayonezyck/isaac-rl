@@ -121,6 +121,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             road_points_include_dirs=bool(cfg_env.get("road_points_include_dirs", False)),
             vehicle_obs_enable=bool(cfg_env["vehicle_obs_enable"]),
             vehicle_obs_k=int(cfg_env["vehicle_obs_k"]),
+            vehicle_obs_include_ttc=bool(cfg_env.get("vehicle_obs_include_ttc", False)),
+            vehicle_obs_ttc_max_s=float(cfg_env.get("vehicle_obs_ttc_max_s", 10.0)),
             ttc_penalty_enable=bool(cfg_env.get("ttc_penalty_enable", False)),
             ttc_penalty_alpha=float(cfg_env.get("ttc_penalty_alpha", 1.0)),
             ttc_penalty_max=float(cfg_env.get("ttc_penalty_max", 1.0)),
@@ -878,8 +880,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self._step_count += 1
         spawned_count_step = int(self._pending_initial_spawn_count)
         self._pending_initial_spawn_count = 0
-        if self._dynamic_key_mapping:
-            self._sync_slot_mapping_from_env()
+        prev_flat_slot_keys = list(self.flat_slot_keys)
         if torch.is_tensor(actions):
             actions_np = actions.detach().cpu().numpy()
         else:
@@ -888,29 +889,52 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         if actions_np.ndim == 1:
             actions_np = actions_np.reshape(-1, self.action_dim)
 
+        action_by_token = None
         if self._dynamic_key_mapping:
-            expected_envs = int(len(self.flat_slot_keys))
+            expected_prev_envs = int(len(prev_flat_slot_keys))
             input_rows = int(actions_np.shape[0])
-            if actions_np.shape[0] != expected_envs:
-                if actions_np.shape[0] > expected_envs:
-                    actions_np = actions_np[:expected_envs, :]
-                else:
-                    pad = np.zeros((expected_envs - actions_np.shape[0], self.action_dim), dtype=np.float32)
-                    actions_np = np.concatenate([actions_np, pad], axis=0)
-                if self.verbose:
-                    print(
-                        "[sb3] adjusted action batch to current env size "
-                        f"got={input_rows} "
-                        f"expected={expected_envs}"
-                    )
+            if input_rows != expected_prev_envs and self.verbose:
+                print(
+                    "[sb3] action batch size differs from previous env size "
+                    f"got={input_rows} expected_prev={expected_prev_envs}"
+                )
+
+            # Map actions by stable token from the previous observation order.
+            # This keeps action-to-agent alignment correct even when env keys were
+            # remapped between steps due to hard-removal in the underlying env.
+            action_by_token = {}
+            common = min(input_rows, expected_prev_envs)
+            for env_idx in range(common):
+                key = prev_flat_slot_keys[env_idx]
+                token = (int(getattr(key, "world_idx")), int(getattr(key, "agent_id")))
+                action_by_token[token] = actions_np[env_idx, :]
+
+            self._sync_slot_mapping_from_env()
+            expected_envs = int(len(self.flat_slot_keys))
+            if self.verbose and expected_envs != expected_prev_envs:
+                print(
+                    "[sb3] env remap changed env size "
+                    f"prev={expected_prev_envs} current={expected_envs}"
+                )
 
         U = np.zeros((len(self._keys), self.action_dim), dtype=np.float32)
 
-        for env_idx, key in enumerate(self.flat_slot_keys):
-            key_idx = self._key_index.get(key)
-            if key_idx is None:
-                continue
-            U[key_idx, :] = actions_np[env_idx, :]
+        if self._dynamic_key_mapping and action_by_token is not None:
+            for key in self.flat_slot_keys:
+                key_idx = self._key_index.get(key)
+                if key_idx is None:
+                    continue
+                token = (int(getattr(key, "world_idx")), int(getattr(key, "agent_id")))
+                act = action_by_token.get(token, None)
+                if act is None:
+                    continue
+                U[key_idx, :] = act
+        else:
+            for env_idx, key in enumerate(self.flat_slot_keys):
+                key_idx = self._key_index.get(key)
+                if key_idx is None:
+                    continue
+                U[key_idx, :] = actions_np[env_idx, :]
 
         obs, base_reward, done, info = self.choco_env.step(U)
         self.last_step_info_raw = info

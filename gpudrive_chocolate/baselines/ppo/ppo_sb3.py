@@ -104,8 +104,14 @@ def _align_curriculum_obs_to_resume(exp_config: Box) -> dict | None:
     ckpt_road_k = ckpt_pk.get("road_point_k", None)
     ckpt_vehicle_k = ckpt_pk.get("vehicle_k", None)
     ckpt_road_dim = ckpt_pk.get("road_point_dim", None)
+    ckpt_vehicle_dim = ckpt_pk.get("vehicle_dim", None)
 
-    if ckpt_road_k is None and ckpt_vehicle_k is None and ckpt_road_dim is None:
+    if (
+        ckpt_road_k is None
+        and ckpt_vehicle_k is None
+        and ckpt_road_dim is None
+        and ckpt_vehicle_dim is None
+    ):
         return ckpt_pk
 
     with open(str(exp_config.choco_config_path), "r", encoding="utf-8") as f:
@@ -135,6 +141,12 @@ def _align_curriculum_obs_to_resume(exp_config: Box) -> dict | None:
         if cur_dirs != want_dirs:
             env_cfg["road_points_include_dirs"] = want_dirs
             changed = True
+    if ckpt_vehicle_dim in (6, 7):
+        want_vehicle_ttc = bool(int(ckpt_vehicle_dim) >= 7)
+        cur_vehicle_ttc = bool(env_cfg.get("vehicle_obs_include_ttc", False))
+        if cur_vehicle_ttc != want_vehicle_ttc:
+            env_cfg["vehicle_obs_include_ttc"] = want_vehicle_ttc
+            changed = True
 
     if changed:
         os.makedirs("runs/autofix_curriculum", exist_ok=True)
@@ -150,6 +162,7 @@ def _align_curriculum_obs_to_resume(exp_config: Box) -> dict | None:
             f"road_points_k={env_cfg.get('road_points_k')} "
             f"vehicle_obs_k={env_cfg.get('vehicle_obs_k')} "
             f"road_points_include_dirs={env_cfg.get('road_points_include_dirs')} "
+            f"vehicle_obs_include_ttc={env_cfg.get('vehicle_obs_include_ttc', False)} "
             f"path={out_path}",
             flush=True,
         )
@@ -197,8 +210,22 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
         road_points_enable = bool(env_cfg.get("road_points_enable", False))
         road_points_include_dirs = bool(env_cfg.get("road_points_include_dirs", False))
         vehicle_obs_enable = bool(env_cfg.get("vehicle_obs_enable", False))
+        vehicle_obs_include_ttc = bool(env_cfg.get("vehicle_obs_include_ttc", False))
         point_layers = lf_cfg.get("point_layers", [64, 64])
         policy = LateFusionPolicy
+        default_vehicle_dim = (
+            7
+            if (vehicle_obs_enable and vehicle_obs_include_ttc)
+            else (6 if vehicle_obs_enable else 0)
+        )
+        vehicle_dim = int(lf_cfg.get("vehicle_dim", default_vehicle_dim))
+        if vehicle_obs_enable and vehicle_dim != default_vehicle_dim:
+            print(
+                "[train] overriding late_fusion.vehicle_dim to match env observation layout: "
+                f"config={vehicle_dim} env_expected={default_vehicle_dim}",
+                flush=True,
+            )
+            vehicle_dim = int(default_vehicle_dim)
         policy_kwargs.update(
             {
                 "ego_dim": int(lf_cfg.get("ego_dim", 11)),
@@ -217,7 +244,7 @@ def train(exp_config: Box, *, run_id_override: str | None = None, runs_root_over
                     )
                 ),
                 "vehicle_dim": int(
-                    lf_cfg.get("vehicle_dim", 6 if vehicle_obs_enable else 0)
+                    vehicle_dim
                 ),
                 "vehicle_k": int(
                     lf_cfg.get(

@@ -1,0 +1,49 @@
+{
+  "segments": [
+    {
+      "duration_s": 1.0,
+      "label": "idle",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 2.0,
+      "label": "entry",
+      "command": {
+        "accelerator": 0.45,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 2.0,
+      "label": "step_steer",
+      "command": {
+        "accelerator": 0.45,
+        "steering": 0.25,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 1.0,
+      "label": "recenter",
+      "command": {
+        "accelerator": 0.45,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 1.5,
+      "label": "service_brake",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.65
+      }
+    }
+  ]
+}

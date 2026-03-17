@@ -1,0 +1,562 @@
+{
+  "segments": [
+    {
+      "duration_s": 1.0,
+      "label": "idle",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0000",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0001",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.06180339887498948,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0002",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.11755705045849463,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0003",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.1618033988749895,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0004",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.1902113032590307,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0005",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.2,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0006",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.1902113032590307,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0007",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.1618033988749895,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0008",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.11755705045849466,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0009",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.06180339887498951,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0010",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 2.4492935982947065e-17,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0011",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.06180339887498955,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0012",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.11755705045849468,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0013",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.16180339887498948,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0014",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.1902113032590307,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0015",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.2,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0016",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.19021130325903074,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0017",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.1618033988749894,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0018",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.11755705045849468,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0019",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.06180339887498953,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0020",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -4.898587196589413e-17,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0021",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.06180339887498944,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0022",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.11755705045849472,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0023",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.16180339887498957,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0024",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.19021130325903077,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0025",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.2,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0026",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.19021130325903074,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0027",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.16180339887498954,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0028",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.11755705045849468,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0029",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.061803398874989215,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0030",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 7.347880794884119e-17,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0031",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.06180339887498942,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0032",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.11755705045849457,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0033",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.16180339887498946,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0034",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.1902113032590308,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0035",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.2,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0036",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.19021130325903077,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0037",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.16180339887498954,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0038",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.1175570504584947,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0039",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.061803398874989236,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0040",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -9.797174393178826e-17,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0041",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.06180339887498973,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0042",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.11755705045849454,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0043",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.16180339887498943,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0044",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.1902113032590308,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0045",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.2,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0046",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.19021130325903066,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0047",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.16180339887498957,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0048",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.11755705045849443,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0049",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 0.06180339887498926,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0050",
+      "command": {
+        "accelerator": 0.42,
+        "steering": 1.2246467991473532e-16,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0051",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.0618033988749897,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0052",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.11755705045849452,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0053",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.16180339887498962,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0054",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.19021130325903068,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0055",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.2,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0056",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.19021130325903077,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0057",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.16180339887498937,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.1,
+      "label": "sine_steer_0058",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.11755705045849417,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 0.09999999999999964,
+      "label": "sine_steer_0059",
+      "command": {
+        "accelerator": 0.42,
+        "steering": -0.061803398874989285,
+        "brake": 0.0
+      }
+    },
+    {
+      "duration_s": 1.5,
+      "label": "service_brake",
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.65
+      }
+    }
+  ]
+}

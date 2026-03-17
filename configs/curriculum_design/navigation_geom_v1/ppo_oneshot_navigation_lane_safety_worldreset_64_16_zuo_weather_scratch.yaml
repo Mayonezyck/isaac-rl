@@ -1,4 +1,4 @@
-choco_config_path: "configs/curriculum_design/navigation_geom_v1/curriculum_oneshot_navigation_lane_safety_worldreset_32.yaml"
+choco_config_path: "configs/curriculum_design/navigation_geom_v1/curriculum_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather.yaml"
 
 device: "cuda:1"
 
@@ -39,16 +39,16 @@ n_epochs: 5
 
 render_every_updates: 1000
 render_rollout_steps: 0
-render_dir: "runs/capture_oneshot_navigation_lane_safety_worldreset_32"
+render_dir: "runs/capture_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
 render_during_training: false
 record_training_video: false
 video_fps: 30
-video_name_prefix: "ppo_oneshot_navigation_lane_safety_worldreset_32"
+video_name_prefix: "ppo_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
 video_keep_frames: false
 
 save_freq: 3125
-save_dir: "runs/checkpoints_oneshot_navigation_lane_safety_worldreset_32"
-save_prefix: "ppo_oneshot_navigation_lane_safety_worldreset_32"
+save_dir: "runs/checkpoints_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
+save_prefix: "ppo_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
 resume_from: null
 
 log_step_metrics: false

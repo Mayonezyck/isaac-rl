@@ -50,6 +50,135 @@ def _world_to_ego_xy(dx: float, dy: float, yaw: float) -> Tuple[float, float]:
     y_ego = -sy * dx + cy * dy
     return x_ego, y_ego
 
+def _build_vehicle_ttc_circles_m(
+    *,
+    px_m: float,
+    py_m: float,
+    yaw_rad: float,
+    length_m: float,
+    width_m: float,
+    use_vehicle_size: bool,
+    radius_scale: float,
+    radius_margin_m: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build TTC proxy circles in meters for one vehicle.
+    Returns:
+      centers_m: (C, 2) float32
+      radii_m:   (C,) float32
+    """
+    if not bool(use_vehicle_size):
+        return (
+            np.asarray([[float(px_m), float(py_m)]], dtype=np.float32),
+            np.asarray([0.0], dtype=np.float32),
+        )
+
+    length_m = max(0.0, float(length_m))
+    width_m = max(0.0, float(width_m))
+    radius_scale = max(0.0, float(radius_scale))
+    radius_margin_m = max(0.0, float(radius_margin_m))
+    radius_m = max(0.0, 0.5 * width_m * radius_scale + radius_margin_m)
+
+    # Degenerate fallback: one center point with available radius.
+    if radius_m <= 0.0 or length_m <= 0.0:
+        return (
+            np.asarray([[float(px_m), float(py_m)]], dtype=np.float32),
+            np.asarray([float(max(0.0, radius_m))], dtype=np.float32),
+        )
+
+    fwd_x = float(math.cos(float(yaw_rad)))
+    fwd_y = float(math.sin(float(yaw_rad)))
+    fwd_norm = math.hypot(fwd_x, fwd_y)
+    if fwd_norm <= 1e-6:
+        fwd_x, fwd_y = 1.0, 0.0
+    else:
+        fwd_x /= fwd_norm
+        fwd_y /= fwd_norm
+
+    spine_offset_m = max(0.0, 0.5 * length_m - radius_m)
+    offsets_m = np.asarray([-spine_offset_m, 0.0, spine_offset_m], dtype=np.float32)
+    cx = float(px_m) + offsets_m * float(fwd_x)
+    cy = float(py_m) + offsets_m * float(fwd_y)
+    centers_m = np.stack([cx, cy], axis=-1).astype(np.float32)
+    radii_m = np.full((3,), float(radius_m), dtype=np.float32)
+    return centers_m, radii_m
+
+def _compute_min_vehicle_ttc_s(
+    *,
+    ego_centers_m: np.ndarray,
+    ego_radii_m: np.ndarray,
+    ego_vel_mps: np.ndarray,
+    ego_fwd: np.ndarray,
+    other_centers_m: np.ndarray,
+    other_radii_m: np.ndarray,
+    other_vel_mps: np.ndarray,
+    forward_only: bool = True,
+) -> float:
+    """
+    Continuous TTC between two vehicles modeled as circle sets.
+    Returns np.inf when there is no approaching solution.
+    """
+    if ego_centers_m.size == 0 or other_centers_m.size == 0:
+        return float("inf")
+
+    rel = other_centers_m[None, :, :] - ego_centers_m[:, None, :]
+    rx = rel[:, :, 0]
+    ry = rel[:, :, 1]
+
+    rvx = float(other_vel_mps[0]) - float(ego_vel_mps[0])
+    rvy = float(other_vel_mps[1]) - float(ego_vel_mps[1])
+
+    r2 = rx * rx + ry * ry
+    v2 = rvx * rvx + rvy * rvy
+    rdotv = rx * rvx + ry * rvy
+    combined_r = ego_radii_m[:, None] + other_radii_m[None, :]
+    combined_r2 = combined_r * combined_r
+
+    if bool(forward_only):
+        fwd_x = float(ego_fwd[0])
+        fwd_y = float(ego_fwd[1])
+        forward_dot = rx * fwd_x + ry * fwd_y
+        forward_mask = forward_dot > 0.0
+    else:
+        forward_mask = np.ones_like(r2, dtype=bool)
+
+    ttc = np.full(r2.shape, np.inf, dtype=np.float32)
+    overlap_mask = forward_mask & (r2 <= combined_r2)
+    ttc[overlap_mask] = 0.0
+
+    moving_mask = forward_mask & (~overlap_mask) & (v2 > 1e-6)
+    if np.any(moving_mask):
+        a = np.where(moving_mask, v2, 1.0)
+        b = np.where(moving_mask, 2.0 * rdotv, 0.0)
+        c = np.where(moving_mask, r2 - combined_r2, 0.0)
+        disc = b * b - 4.0 * a * c
+        valid_quad = moving_mask & (disc >= 0.0)
+        sqrt_disc = np.sqrt(np.maximum(disc, 0.0))
+        denom = 2.0 * np.maximum(a, 1e-6)
+        t_enter = (-b - sqrt_disc) / denom
+        t_exit = (-b + sqrt_disc) / denom
+        valid_enter = valid_quad & (t_exit >= 0.0)
+        ttc_quad = np.where(valid_enter, np.maximum(0.0, t_enter), np.inf).astype(np.float32)
+        ttc = np.minimum(ttc, ttc_quad)
+
+        unresolved = moving_mask & (~np.isfinite(ttc))
+        if np.any(unresolved):
+            dist = np.sqrt(np.maximum(r2, 1e-9))
+            closing_speed = -rdotv / np.maximum(dist, 1e-6)
+            clearance = np.maximum(0.0, dist - combined_r)
+            valid_fb = unresolved & (rdotv < 0.0) & (closing_speed > 1e-6)
+            ttc_fb = np.where(
+                valid_fb,
+                clearance / np.maximum(closing_speed, 1e-6),
+                np.inf,
+            ).astype(np.float32)
+            ttc = np.minimum(ttc, ttc_fb)
+
+    finite_ttc = ttc[np.isfinite(ttc)]
+    if finite_ttc.size == 0:
+        return float("inf")
+    return float(np.min(finite_ttc))
+
 def _get_rb_linear_velocity_world(rb_prim: Usd.Prim, tc: Usd.TimeCode) -> Tuple[float, float, float]:
     """
     Returns linear velocity in WORLD frame (stage units/sec), (vx, vy, vz).
@@ -369,10 +498,15 @@ class ChocolateObsBuilder:
         road_points_include_dirs: bool = False,
         vehicle_obs_enable: bool,
         vehicle_obs_k: int,
+        vehicle_obs_include_ttc: bool = False,
+        vehicle_obs_ttc_max_s: float = 10.0,
+        ttc_use_vehicle_size: bool = True,
+        ttc_vehicle_radius_scale: float = 0.75,
+        ttc_vehicle_radius_margin_m: float = 0.20,
     ) -> Tuple[np.ndarray, np.ndarray, List[object]]:
         """
         Returns:
-          obs:  (N, 11 + road_points*(3|5) + vehicle_obs_k*6) float32
+          obs:  (N, 11 + road_points*(3|5) + vehicle_obs_k*(6|7)) float32
           mask: (N,) bool  (True if goal + pose valid)
           keys: length N (AgentKey list aligned with obs rows)
         """
@@ -381,7 +515,7 @@ class ChocolateObsBuilder:
         mpu = _meters_per_unit(stage)
         base_dim = 7 + weather_context_dim()
         road_point_feat_dim = 5 if road_points_include_dirs else 3
-        vehicle_feat_dim = 6
+        vehicle_feat_dim = 7 if bool(vehicle_obs_include_ttc) else 6
         extra_dim = 0
         if road_points_enable:
             extra_dim = int(road_points_k) * int(road_point_feat_dim)
@@ -411,6 +545,7 @@ class ChocolateObsBuilder:
         # Precompute per-agent state for neighbor observations
         per_agent = {}
         world_to_indices: Dict[int, List[int]] = {}
+        per_agent_ttc: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         if vehicle_obs_enable and vehicle_dim > 0:
             tc = Usd.TimeCode.Default()
             bbox_cache = UsdGeom.BBoxCache(tc, [UsdGeom.Tokens.default_], useExtentsHint=True)
@@ -465,6 +600,25 @@ class ChocolateObsBuilder:
 
                 per_agent[i] = (k.world_idx, px, py, yaw, vx_w, vy_w, length_m, width_m)
                 world_to_indices.setdefault(k.world_idx, []).append(i)
+                if bool(vehicle_obs_include_ttc):
+                    centers_m, radii_m = _build_vehicle_ttc_circles_m(
+                        px_m=float(px),
+                        py_m=float(py),
+                        yaw_rad=float(yaw),
+                        length_m=float(length_m),
+                        width_m=float(width_m),
+                        use_vehicle_size=bool(ttc_use_vehicle_size),
+                        radius_scale=float(ttc_vehicle_radius_scale),
+                        radius_margin_m=float(ttc_vehicle_radius_margin_m),
+                    )
+                    fwd = np.asarray([math.cos(float(yaw)), math.sin(float(yaw))], dtype=np.float32)
+                    fwd_norm = float(np.linalg.norm(fwd))
+                    if fwd_norm <= 1e-6:
+                        fwd = np.asarray([1.0, 0.0], dtype=np.float32)
+                    else:
+                        fwd = fwd / fwd_norm
+                    vel = np.asarray([float(vx_w), float(vy_w)], dtype=np.float32)
+                    per_agent_ttc[i] = (centers_m, radii_m, fwd, vel)
 
         for i, k in enumerate(keys):
             h = ctrl.get(k.world_idx, k.agent_id)
@@ -630,13 +784,20 @@ class ChocolateObsBuilder:
                     dx = px_j - px_i
                     dy = py_j - py_i
                     dist2 = dx * dx + dy * dy
-                    candidates.append((dist2, j, dx, dy, yaw_j, vx_j, vy_j, len_j, wid_j))
+                    # Tie-break neighbors by stable agent_id to avoid slot flapping
+                    # when distances are numerically equal/near-equal.
+                    try:
+                        neigh_agent_id = int(getattr(keys[j], "agent_id"))
+                    except Exception:
+                        neigh_agent_id = int(j)
+                    candidates.append((dist2, neigh_agent_id, j, dx, dy, yaw_j, vx_j, vy_j, len_j, wid_j))
                 if candidates:
-                    candidates.sort(key=lambda x: x[0])
+                    candidates.sort(key=lambda x: (x[0], x[1]))
                     L = float(bounds_size_m)
                     max_yaw = math.pi
                     speed_scale = 10.0
-                    for n, (_, j, dx, dy, yaw_j, vx_j, vy_j, len_j, wid_j) in enumerate(candidates[:vehicle_obs_k]):
+                    ttc_max_s = max(0.1, float(vehicle_obs_ttc_max_s))
+                    for n, (_, _aid, j, dx, dy, yaw_j, vx_j, vy_j, len_j, wid_j) in enumerate(candidates[:vehicle_obs_k]):
                         relx, rely = _world_to_ego_xy(dx, dy, yaw_i)
                         rel_yaw = _wrap_pi(yaw_j - yaw_i)
                         speed = math.sqrt(vx_j * vx_j + vy_j * vy_j)
@@ -653,5 +814,25 @@ class ChocolateObsBuilder:
                         obs[i, idx + 3] = float(wid_n)
                         obs[i, idx + 4] = float(yaw_n)
                         obs[i, idx + 5] = float(speed_n)
+                        if vehicle_feat_dim >= 7:
+                            ttc_n = 1.0
+                            ego_ttc_state = per_agent_ttc.get(i, None)
+                            other_ttc_state = per_agent_ttc.get(j, None)
+                            if ego_ttc_state is not None and other_ttc_state is not None:
+                                ego_centers_m, ego_radii_m, ego_fwd, ego_vel = ego_ttc_state
+                                other_centers_m, other_radii_m, _other_fwd, other_vel = other_ttc_state
+                                ttc_s = _compute_min_vehicle_ttc_s(
+                                    ego_centers_m=ego_centers_m,
+                                    ego_radii_m=ego_radii_m,
+                                    ego_vel_mps=ego_vel,
+                                    ego_fwd=ego_fwd,
+                                    other_centers_m=other_centers_m,
+                                    other_radii_m=other_radii_m,
+                                    other_vel_mps=other_vel,
+                                    forward_only=True,
+                                )
+                                if np.isfinite(float(ttc_s)):
+                                    ttc_n = float(np.clip(float(ttc_s), 0.0, ttc_max_s) / ttc_max_s)
+                            obs[i, idx + 6] = float(ttc_n)
             mask[i] = True
         return obs, mask, keys

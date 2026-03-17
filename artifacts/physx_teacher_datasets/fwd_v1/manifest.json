@@ -1,0 +1,328 @@
+{
+  "dataset_name": "fwd_v1",
+  "suite_name": "sysid-basic-fwd",
+  "dataset_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1",
+  "created_utc": "2026-03-17T02:01:55Z",
+  "teacher_recording": {
+    "record_python": "/home/yz8733/miniforge3/envs/isaac/bin/python",
+    "headless": true,
+    "dt_s": 0.016666666666666666,
+    "track_width_m": 10.0,
+    "patch_length_m": 12.0,
+    "spawn_height_m": 1.2,
+    "warmup_steps": 20,
+    "settle_steps": 60,
+    "max_steps": 0
+  },
+  "surface_patches": [
+    {
+      "name": "dry_asphalt",
+      "x_center_m": -12.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 1.0,
+      "dynamic_friction": 0.95,
+      "tire_friction": 1.0,
+      "color_srgb": [
+        0.28,
+        0.28,
+        0.3
+      ]
+    },
+    {
+      "name": "wet_asphalt",
+      "x_center_m": 0.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 0.75,
+      "dynamic_friction": 0.7,
+      "tire_friction": 0.72,
+      "color_srgb": [
+        0.22,
+        0.31,
+        0.4
+      ]
+    },
+    {
+      "name": "gravel",
+      "x_center_m": 12.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 0.6,
+      "dynamic_friction": 0.55,
+      "tire_friction": 0.58,
+      "color_srgb": [
+        0.55,
+        0.48,
+        0.36
+      ]
+    }
+  ],
+  "programs": [
+    {
+      "name": "straight_accel_brake",
+      "preset": "straight-accel-brake",
+      "description": "Straight launch, coast-down, and service brake.",
+      "params": {
+        "idle_s": 1.0,
+        "accel_s": 4.0,
+        "coast_s": 1.0,
+        "brake_s": 2.0,
+        "throttle": 0.6,
+        "brake": 0.65
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/straight_accel_brake.json"
+    },
+    {
+      "name": "step_steer_left",
+      "preset": "step-steer",
+      "description": "Step steer left at constant throttle, then recenter and brake.",
+      "params": {
+        "idle_s": 1.0,
+        "entry_s": 2.0,
+        "step_hold_s": 2.0,
+        "recenter_s": 1.0,
+        "throttle": 0.45,
+        "steer": 0.25,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/step_steer_left.json"
+    },
+    {
+      "name": "step_steer_right",
+      "preset": "step-steer",
+      "description": "Step steer right at constant throttle, then recenter and brake.",
+      "params": {
+        "idle_s": 1.0,
+        "entry_s": 2.0,
+        "step_hold_s": 2.0,
+        "recenter_s": 1.0,
+        "throttle": 0.45,
+        "steer": -0.25,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/step_steer_right.json"
+    },
+    {
+      "name": "constant_steer_left",
+      "preset": "constant-steer",
+      "description": "Constant-radius left turn at fixed throttle.",
+      "params": {
+        "idle_s": 1.0,
+        "hold_s": 4.0,
+        "throttle": 0.35,
+        "steer": 0.18,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/constant_steer_left.json"
+    },
+    {
+      "name": "constant_steer_right",
+      "preset": "constant-steer",
+      "description": "Constant-radius right turn at fixed throttle.",
+      "params": {
+        "idle_s": 1.0,
+        "hold_s": 4.0,
+        "throttle": 0.35,
+        "steer": -0.18,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/constant_steer_right.json"
+    },
+    {
+      "name": "sine_steer",
+      "preset": "sine-steer",
+      "description": "Constant-throttle sine steering for frequency response and lateral fit.",
+      "params": {
+        "idle_s": 1.0,
+        "run_s": 6.0,
+        "sample_dt_s": 0.1,
+        "throttle": 0.42,
+        "amplitude": 0.2,
+        "frequency_hz": 0.5,
+        "phase_deg": 0.0,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/sine_steer.json"
+    },
+    {
+      "name": "surface_transition_s",
+      "preset": "surface-transition-s",
+      "description": "Cross dry, wet, and gravel patches with an S-turn and brake.",
+      "params": {
+        "launch_s": 1.0,
+        "dry_s": 3.5,
+        "wet_s": 2.0,
+        "gravel_s": 2.0,
+        "brake_s": 1.5,
+        "launch_throttle": 0.2,
+        "cruise_throttle": 0.55,
+        "wet_steer": 0.24,
+        "gravel_steer": -0.24,
+        "brake": 0.6
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/surface_transition_s.json"
+    }
+  ],
+  "rollouts": [
+    {
+      "name": "straight_accel_brake",
+      "preset": "straight-accel-brake",
+      "description": "Straight launch, coast-down, and service brake.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/straight_accel_brake.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/straight_accel_brake",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/straight_accel_brake/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/straight_accel_brake/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/straight_accel_brake/replay.html",
+      "status": "recorded",
+      "params": {
+        "idle_s": 1.0,
+        "accel_s": 4.0,
+        "coast_s": 1.0,
+        "brake_s": 2.0,
+        "throttle": 0.6,
+        "brake": 0.65
+      },
+      "completed_utc": "2026-03-17T02:02:13Z"
+    },
+    {
+      "name": "step_steer_left",
+      "preset": "step-steer",
+      "description": "Step steer left at constant throttle, then recenter and brake.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/step_steer_left.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_left",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_left/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_left/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_left/replay.html",
+      "status": "recorded",
+      "params": {
+        "idle_s": 1.0,
+        "entry_s": 2.0,
+        "step_hold_s": 2.0,
+        "recenter_s": 1.0,
+        "throttle": 0.45,
+        "steer": 0.25,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "completed_utc": "2026-03-17T02:02:31Z"
+    },
+    {
+      "name": "step_steer_right",
+      "preset": "step-steer",
+      "description": "Step steer right at constant throttle, then recenter and brake.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/step_steer_right.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_right",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_right/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_right/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/step_steer_right/replay.html",
+      "status": "recorded",
+      "params": {
+        "idle_s": 1.0,
+        "entry_s": 2.0,
+        "step_hold_s": 2.0,
+        "recenter_s": 1.0,
+        "throttle": 0.45,
+        "steer": -0.25,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "completed_utc": "2026-03-17T02:02:49Z"
+    },
+    {
+      "name": "constant_steer_left",
+      "preset": "constant-steer",
+      "description": "Constant-radius left turn at fixed throttle.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/constant_steer_left.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_left",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_left/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_left/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_left/replay.html",
+      "status": "recorded",
+      "params": {
+        "idle_s": 1.0,
+        "hold_s": 4.0,
+        "throttle": 0.35,
+        "steer": 0.18,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "completed_utc": "2026-03-17T02:03:06Z"
+    },
+    {
+      "name": "constant_steer_right",
+      "preset": "constant-steer",
+      "description": "Constant-radius right turn at fixed throttle.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/constant_steer_right.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_right",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_right/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_right/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/constant_steer_right/replay.html",
+      "status": "recorded",
+      "params": {
+        "idle_s": 1.0,
+        "hold_s": 4.0,
+        "throttle": 0.35,
+        "steer": -0.18,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "completed_utc": "2026-03-17T02:03:22Z"
+    },
+    {
+      "name": "sine_steer",
+      "preset": "sine-steer",
+      "description": "Constant-throttle sine steering for frequency response and lateral fit.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/sine_steer.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/sine_steer",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/sine_steer/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/sine_steer/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/sine_steer/replay.html",
+      "status": "recorded",
+      "params": {
+        "idle_s": 1.0,
+        "run_s": 6.0,
+        "sample_dt_s": 0.1,
+        "throttle": 0.42,
+        "amplitude": 0.2,
+        "frequency_hz": 0.5,
+        "phase_deg": 0.0,
+        "brake_s": 1.5,
+        "brake": 0.65
+      },
+      "completed_utc": "2026-03-17T02:03:40Z"
+    },
+    {
+      "name": "surface_transition_s",
+      "preset": "surface-transition-s",
+      "description": "Cross dry, wet, and gravel patches with an S-turn and brake.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/programs/surface_transition_s.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/surface_transition_s",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/surface_transition_s/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/surface_transition_s/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/fwd_v1/rollouts/surface_transition_s/replay.html",
+      "status": "recorded",
+      "params": {
+        "launch_s": 1.0,
+        "dry_s": 3.5,
+        "wet_s": 2.0,
+        "gravel_s": 2.0,
+        "brake_s": 1.5,
+        "launch_throttle": 0.2,
+        "cruise_throttle": 0.55,
+        "wet_steer": 0.24,
+        "gravel_steer": -0.24,
+        "brake": 0.6
+      },
+      "completed_utc": "2026-03-17T02:03:59Z"
+    }
+  ]
+}

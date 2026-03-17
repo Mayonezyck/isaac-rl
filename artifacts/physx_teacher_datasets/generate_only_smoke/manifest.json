@@ -1,0 +1,101 @@
+{
+  "dataset_name": "generate_only_smoke",
+  "suite_name": "smoke",
+  "dataset_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke",
+  "created_utc": "2026-03-17T01:38:56Z",
+  "teacher_recording": {
+    "record_python": "/home/yz8733/miniforge3/bin/python",
+    "headless": false,
+    "dt_s": 0.016666666666666666,
+    "track_width_m": 10.0,
+    "patch_length_m": 12.0,
+    "spawn_height_m": 1.2,
+    "warmup_steps": 20,
+    "settle_steps": 60,
+    "max_steps": 0
+  },
+  "surface_patches": [
+    {
+      "name": "dry_asphalt",
+      "x_center_m": -12.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 1.0,
+      "dynamic_friction": 0.95,
+      "tire_friction": 1.0,
+      "color_srgb": [
+        0.28,
+        0.28,
+        0.3
+      ]
+    },
+    {
+      "name": "wet_asphalt",
+      "x_center_m": 0.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 0.75,
+      "dynamic_friction": 0.7,
+      "tire_friction": 0.72,
+      "color_srgb": [
+        0.22,
+        0.31,
+        0.4
+      ]
+    },
+    {
+      "name": "gravel",
+      "x_center_m": 12.0,
+      "y_center_m": 0.0,
+      "length_m": 12.0,
+      "width_m": 10.0,
+      "static_friction": 0.6,
+      "dynamic_friction": 0.55,
+      "tire_friction": 0.58,
+      "color_srgb": [
+        0.55,
+        0.48,
+        0.36
+      ]
+    }
+  ],
+  "programs": [
+    {
+      "name": "straight_accel_brake_smoke",
+      "preset": "straight-accel-brake",
+      "description": "Minimal smoke maneuver with accel, coast, and brake.",
+      "params": {
+        "idle_s": 1.0,
+        "accel_s": 2.0,
+        "coast_s": 0.5,
+        "brake_s": 1.0,
+        "throttle": 0.45,
+        "brake": 0.55
+      },
+      "path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke/programs/straight_accel_brake_smoke.json"
+    }
+  ],
+  "rollouts": [
+    {
+      "name": "straight_accel_brake_smoke",
+      "preset": "straight-accel-brake",
+      "description": "Minimal smoke maneuver with accel, coast, and brake.",
+      "program_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke/programs/straight_accel_brake_smoke.json",
+      "rollout_dir": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke/rollouts/straight_accel_brake_smoke",
+      "rollout_meta_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke/rollouts/straight_accel_brake_smoke/rollout_meta.json",
+      "rollout_frames_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke/rollouts/straight_accel_brake_smoke/rollout_frames.jsonl",
+      "replay_html_path": "/home/yz8733/Github/isaac-rl/artifacts/physx_teacher_datasets/generate_only_smoke/rollouts/straight_accel_brake_smoke/replay.html",
+      "status": "pending",
+      "params": {
+        "idle_s": 1.0,
+        "accel_s": 2.0,
+        "coast_s": 0.5,
+        "brake_s": 1.0,
+        "throttle": 0.45,
+        "brake": 0.55
+      }
+    }
+  ]
+}

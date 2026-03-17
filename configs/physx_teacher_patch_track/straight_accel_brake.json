@@ -1,0 +1,40 @@
+{
+  "segments": [
+    {
+      "label": "settle_idle",
+      "duration_s": 1.0,
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "straight_accel",
+      "duration_s": 4.0,
+      "command": {
+        "accelerator": 0.6,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "coast",
+      "duration_s": 1.0,
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.0
+      }
+    },
+    {
+      "label": "service_brake",
+      "duration_s": 2.0,
+      "command": {
+        "accelerator": 0.0,
+        "steering": 0.0,
+        "brake": 0.65
+      }
+    }
+  ]
+}

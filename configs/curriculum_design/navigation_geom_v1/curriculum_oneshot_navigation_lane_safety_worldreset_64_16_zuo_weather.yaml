@@ -13,80 +13,144 @@ io:
 
 world:
   root_container: "/World/MiniWorlds"
-  world_count: 32
-  grid_cols: 4
+  world_count: 64
+  grid_cols: 8
   rows: 8
   world_size_m: [200.0, 200.0]
-  padding_m: 200.0
+  padding_m: 100.0
   base_z_m: 0.0
   bounds_size_m: 200.0
   origin_mode: "center"
-  max_agents_per_world: 8
+  max_agents_per_world: 16
   assignments:
-    - scene_json: "scene_000000.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000002.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000006.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000008.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000012.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000014.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
     - scene_json: "scene_000015.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000016.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000017.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000019.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000025.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000027.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000028.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000029.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000031.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000035.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000039.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000052.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+      friction: &wx_clear {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "scene_000114.json"
+      friction: &wx_drizzle {road_type: "AC", precip_type: "drizzle", precip_intensity_mmph: 0.3, water_film_mm: 0.015}
+    - scene_json: "scene_000073.json"
+      friction: &wx_rain_light {road_type: "AC", precip_type: "rain", precip_intensity_mmph: 0.5, water_film_mm: 0.025}
+    - scene_json: "scene_000082.json"
+      friction: &wx_rain_moderate {road_type: "AC", precip_type: "rain", precip_intensity_mmph: 1.0, water_film_mm: 0.050}
     - scene_json: "scene_000053.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000059.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000064.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000067.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000071.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000080.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000085.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000090.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000098.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000099.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000103.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+      friction: &wx_rain_heavy {road_type: "AC", precip_type: "rain", precip_intensity_mmph: 1.5, water_film_mm: 0.075}
+    - scene_json: "scene_000019.json"
+      friction: &wx_shower {road_type: "AC", precip_type: "shower", precip_intensity_mmph: 2.0, water_film_mm: 0.100}
+    - scene_json: "scene_000022.json"
+      friction: &wx_rain_extreme {road_type: "AC", precip_type: "rain", precip_intensity_mmph: 3.0, water_film_mm: 0.200}
     - scene_json: "scene_000108.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
-    - scene_json: "scene_000114.json" 
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+      friction: &wx_rain_storm {road_type: "AC", precip_type: "rain", precip_intensity_mmph: 5.0, water_film_mm: 0.350}
+    - scene_json: "scene_000083.json"
+      friction: *wx_clear
+    - scene_json: "scene_000103.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000006.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000031.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000119.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000070.json"
+      friction: *wx_shower
+    - scene_json: "scene_000035.json"
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000043.json"
+      friction: *wx_rain_storm
+    - scene_json: "scene_000016.json"
+      friction: *wx_clear
+    - scene_json: "scene_000076.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000077.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000059.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000118.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000116.json"
+      friction: *wx_shower
+    - scene_json: "scene_000079.json"
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000087.json"
+      friction: *wx_rain_storm
+    - scene_json: "scene_000099.json"
+      friction: *wx_clear
+    - scene_json: "scene_000030.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000088.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000026.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000027.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000060.json"
+      friction: *wx_shower
     - scene_json: "scene_000117.json"
-      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000038.json"
+      friction: *wx_rain_storm
+    - scene_json: "scene_000058.json"
+      friction: *wx_clear
+    - scene_json: "scene_000005.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000089.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000098.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000032.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000055.json"
+      friction: *wx_shower
+    - scene_json: "scene_000034.json"
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000105.json"
+      friction: *wx_rain_storm
+    - scene_json: "scene_000051.json"
+      friction: *wx_clear
+    - scene_json: "scene_000001.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000090.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000102.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000047.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000075.json"
+      friction: *wx_shower
+    - scene_json: "scene_000084.json"
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000092.json"
+      friction: *wx_rain_storm
+    - scene_json: "scene_000020.json"
+      friction: *wx_clear
+    - scene_json: "scene_000037.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000042.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000096.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000046.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000074.json"
+      friction: *wx_shower
+    - scene_json: "scene_000086.json"
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000049.json"
+      friction: *wx_rain_storm
+    - scene_json: "scene_000061.json"
+      friction: *wx_clear
+    - scene_json: "scene_000072.json"
+      friction: *wx_drizzle
+    - scene_json: "scene_000048.json"
+      friction: *wx_rain_light
+    - scene_json: "scene_000101.json"
+      friction: *wx_rain_moderate
+    - scene_json: "scene_000003.json"
+      friction: *wx_rain_heavy
+    - scene_json: "scene_000008.json"
+      friction: *wx_shower
+    - scene_json: "scene_000013.json"
+      friction: *wx_rain_extreme
+    - scene_json: "scene_000057.json"
+      friction: *wx_rain_storm
 
 road:
   jump_break_m: 3.0
@@ -232,7 +296,7 @@ env:
   idle_penalty_per_step: 0.03
   idle_speed_threshold_mps: 0.5
   vehicle_contact_done: true
-  vehicle_contact_done_penalty: -6.0
+  vehicle_contact_done_penalty: -20.0
   vehicle_contact_done_mark_both: true
   road_contact_debug: false
   road_contact_debug_every: 100
@@ -247,17 +311,21 @@ env:
   vehicle_obs_include_ttc: true
   vehicle_obs_ttc_max_s: 10.0
   ttc_penalty_enable: true
-  ttc_penalty_alpha: 0.15
+  ttc_penalty_alpha: 2.0
   ttc_penalty_max: 0.50
   ttc_penalty_min_ttc: 0.5
-  ttc_penalty_function: "inverse"
+  ttc_penalty_function: "proximity_zuo"
+  ttc_proximity_zuo_a: 2.0
+  ttc_proximity_zuo_b: 5.0
   road_edge_ttc_penalty_enable: true
-  road_edge_ttc_penalty_alpha: 0.10
+  road_edge_ttc_penalty_alpha: 0.5
   road_edge_ttc_penalty_max: 0.60
   road_edge_ttc_penalty_min_ttc: 0.5
   road_edge_ttc_hard_min_ttc: 0.5
   road_edge_ttc_radius_m: 40.0
-  road_edge_ttc_penalty_function: "inverse"
+  road_edge_ttc_penalty_function: "proximity_zuo"
+  road_edge_ttc_proximity_zuo_a: 0.5
+  road_edge_ttc_proximity_zuo_b: 5.0
   ttc_delta_penalty_enable: false
   ttc_delta_penalty_alpha: 0.0
   ttc_delta_penalty_max: 0.5
