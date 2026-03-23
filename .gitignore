@@ -2,6 +2,8 @@
 data/
 out/
 runs/
+logs/
+artifacts/
 _captures_300/
 .conda/
 

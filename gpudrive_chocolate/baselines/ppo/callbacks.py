@@ -102,6 +102,24 @@ class RolloutCaptureCallback(BaseCallback):
         self._rollout_ep_below_min_z = 0.0
         self._rollout_ep_other_done = 0.0
         self._rollout_ep_vehicle_any = 0.0
+        self._rollout_perf_env_step_total_ms = 0.0
+        self._rollout_perf_env_action_prep_ms = 0.0
+        self._rollout_perf_env_apply_control_ms = 0.0
+        self._rollout_perf_env_physics_ms = 0.0
+        self._rollout_perf_env_obs_build_ms = 0.0
+        self._rollout_perf_env_ttc_state_ms = 0.0
+        self._rollout_perf_env_ttc_vehicle_ms = 0.0
+        self._rollout_perf_env_ttc_road_ms = 0.0
+        self._rollout_perf_env_geom_lane_ms = 0.0
+        self._rollout_perf_env_contact_scan_ms = 0.0
+        self._rollout_perf_wrapper_step_total_ms = 0.0
+        self._rollout_perf_wrapper_action_to_numpy_ms = 0.0
+        self._rollout_perf_wrapper_action_map_ms = 0.0
+        self._rollout_perf_wrapper_env_step_ms = 0.0
+        self._rollout_perf_wrapper_reward_ms = 0.0
+        self._rollout_perf_wrapper_mask_build_ms = 0.0
+        self._rollout_perf_wrapper_reset_logic_ms = 0.0
+        self._rollout_perf_wrapper_pack_ms = 0.0
 
     def _set_render_enabled(self, enabled: bool) -> None:
         try:
@@ -322,6 +340,44 @@ class RolloutCaptureCallback(BaseCallback):
                     float(info.get("mean_route_progress_m", 0.0))
                     * float(info.get("num_active_agents", 0.0))
                 )
+                self._rollout_perf_env_step_total_ms += float(info.get("perf/env_step_total_ms", 0.0))
+                self._rollout_perf_env_action_prep_ms += float(info.get("perf/env_action_prep_ms", 0.0))
+                self._rollout_perf_env_apply_control_ms += float(
+                    info.get("perf/env_apply_control_ms", 0.0)
+                )
+                self._rollout_perf_env_physics_ms += float(info.get("perf/env_physics_ms", 0.0))
+                self._rollout_perf_env_obs_build_ms += float(info.get("perf/env_obs_build_ms", 0.0))
+                self._rollout_perf_env_ttc_state_ms += float(info.get("perf/env_ttc_state_ms", 0.0))
+                self._rollout_perf_env_ttc_vehicle_ms += float(
+                    info.get("perf/env_ttc_vehicle_ms", 0.0)
+                )
+                self._rollout_perf_env_ttc_road_ms += float(info.get("perf/env_ttc_road_ms", 0.0))
+                self._rollout_perf_env_geom_lane_ms += float(info.get("perf/env_geom_lane_ms", 0.0))
+                self._rollout_perf_env_contact_scan_ms += float(
+                    info.get("perf/env_contact_scan_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_step_total_ms += float(
+                    info.get("perf/wrapper_step_total_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_action_to_numpy_ms += float(
+                    info.get("perf/wrapper_action_to_numpy_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_action_map_ms += float(
+                    info.get("perf/wrapper_action_map_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_env_step_ms += float(
+                    info.get("perf/wrapper_env_step_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_reward_ms += float(
+                    info.get("perf/wrapper_reward_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_mask_build_ms += float(
+                    info.get("perf/wrapper_mask_build_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_reset_logic_ms += float(
+                    info.get("perf/wrapper_reset_logic_ms", 0.0)
+                )
+                self._rollout_perf_wrapper_pack_ms += float(info.get("perf/wrapper_pack_ms", 0.0))
 
                 if self.log_step_metrics:
                     self.logger.record("step/mean_reward", avg_reward if rewards is not None else 0.0)
@@ -493,6 +549,78 @@ class RolloutCaptureCallback(BaseCallback):
                         "perf/env_steps_per_sec",
                         self._rollout_steps / rollout_duration,
                     )
+                self.logger.record(
+                    "perf/env_step_total_ms",
+                    self._rollout_perf_env_step_total_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_action_prep_ms",
+                    self._rollout_perf_env_action_prep_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_apply_control_ms",
+                    self._rollout_perf_env_apply_control_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_physics_ms",
+                    self._rollout_perf_env_physics_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_obs_build_ms",
+                    self._rollout_perf_env_obs_build_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_ttc_state_ms",
+                    self._rollout_perf_env_ttc_state_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_ttc_vehicle_ms",
+                    self._rollout_perf_env_ttc_vehicle_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_ttc_road_ms",
+                    self._rollout_perf_env_ttc_road_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_geom_lane_ms",
+                    self._rollout_perf_env_geom_lane_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/env_contact_scan_ms",
+                    self._rollout_perf_env_contact_scan_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_step_total_ms",
+                    self._rollout_perf_wrapper_step_total_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_action_to_numpy_ms",
+                    self._rollout_perf_wrapper_action_to_numpy_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_action_map_ms",
+                    self._rollout_perf_wrapper_action_map_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_env_step_ms",
+                    self._rollout_perf_wrapper_env_step_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_reward_ms",
+                    self._rollout_perf_wrapper_reward_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_mask_build_ms",
+                    self._rollout_perf_wrapper_mask_build_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_reset_logic_ms",
+                    self._rollout_perf_wrapper_reset_logic_ms / self._rollout_steps,
+                )
+                self.logger.record(
+                    "perf/wrapper_pack_ms",
+                    self._rollout_perf_wrapper_pack_ms / self._rollout_steps,
+                )
             if self._rollout_valid_agent_steps > 0:
                 self.logger.record(
                     "rollout/mean_dist_to_goal_m",

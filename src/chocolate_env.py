@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import math
 import numpy as np
+from time import perf_counter
 
 from pxr import Gf, Usd, UsdGeom, UsdPhysics, Sdf, Vt
 
@@ -36,6 +37,16 @@ class StepInfo:
     pending: np.ndarray       # (N,) bool
     timeout: bool
     t_env: int
+    timing_step_total_ms: float
+    timing_action_prep_ms: float
+    timing_apply_control_ms: float
+    timing_physics_ms: float
+    timing_obs_build_ms: float
+    timing_ttc_state_ms: float
+    timing_ttc_vehicle_ms: float
+    timing_ttc_road_ms: float
+    timing_geom_lane_ms: float
+    timing_contact_scan_ms: float
 
 
 def _yaw_from_xform(M: Gf.Matrix4d) -> float:
@@ -214,6 +225,8 @@ class ChocolateEnv:
         respawn_on_reset: bool = False,
         respawn_mode: str = "rebuild",
         respawn_params: Optional[Dict[str, Any]] = None,
+        timing_debug_enable: bool = False,
+        timing_debug_every_steps: int = 200,
         verbose: bool = False,
     ):
         self.sim = sim
@@ -386,6 +399,8 @@ class ChocolateEnv:
             0,
             int(self.respawn_params.get("startup_below_min_z_preflight_steps", 0)),
         )
+        self.timing_debug_enable = bool(timing_debug_enable)
+        self.timing_debug_every_steps = max(1, int(timing_debug_every_steps))
         self.verbose = bool(verbose)
         self._fallback_warn_counts: Dict[str, int] = {}
         self._fallback_warn_limit = 3
@@ -2522,8 +2537,9 @@ class ChocolateEnv:
                 goal_suffix = f"_id{int(k.agent_id)}"
                 for goal_prim in list(goals_root.GetAllChildren()):
                     goal_name = goal_prim.GetName()
-                    goal_path = goal_prim.GetPath().pathString
-                    if goal_name.endswith(goal_suffix) or goal_suffix in goal_name or goal_suffix in goal_path:
+                    # Use strict matching to avoid accidental cross-id removals
+                    # (e.g. deleting id=1 should not remove id=10/11/... goals).
+                    if goal_name.endswith(goal_suffix):
                         try:
                             self.stage.RemovePrim(goal_prim.GetPath())
                             removed_any = True
@@ -3017,6 +3033,17 @@ class ChocolateEnv:
         return obs, mask, keys
 
     def step(self, U: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, StepInfo]:
+        _t_step_start = perf_counter()
+        _t_action_prep_ms = 0.0
+        _t_apply_control_ms = 0.0
+        _t_physics_ms = 0.0
+        _t_obs_build_ms = 0.0
+        _t_ttc_state_ms = 0.0
+        _t_ttc_vehicle_ms = 0.0
+        _t_ttc_road_ms = 0.0
+        _t_geom_lane_ms = 0.0
+        _t_contact_scan_ms = 0.0
+
         if self.t == 0 and (self._keys is None or len(self._keys) == 0):
             if self.verbose:
                 print("[env.step] called before reset(); auto-resetting ...")
@@ -3031,6 +3058,7 @@ class ChocolateEnv:
         if U.ndim != 2 or U.shape[0] != N or U.shape[1] not in (2, 3):
             raise ValueError(f"Action must be shape (N,2) or (N,3). got {U.shape}, N={N}")
 
+        _t_action_prep_start = perf_counter()
         # Convert 2D -> 3D controller action: [thr, steer, brake]
         if U.shape[1] == 2:
             a_long = np.clip(U[:, 0], -1.0, 1.0)
@@ -3060,17 +3088,24 @@ class ChocolateEnv:
                     continue
                 U3[idx, :] = 0.0
                 U3[idx, 2] = 1.0
+        _t_action_prep_ms += (perf_counter() - _t_action_prep_start) * 1000.0
         # Apply controls once per env step
+        _t_apply_start = perf_counter()
         self.ctrl.apply_all(U3)
+        _t_apply_control_ms += (perf_counter() - _t_apply_start) * 1000.0
 
         # Step physics action_repeat times
+        _t_physics_start = perf_counter()
         for _ in range(self.action_repeat):
             self.sim.step(render=self.render)
+        _t_physics_ms += (perf_counter() - _t_physics_start) * 1000.0
 
         self.t += 1
 
         # Observe
+        _t_obs_start = perf_counter()
         obs, mask, keys2 = self._build_obs()
+        _t_obs_build_ms += (perf_counter() - _t_obs_start) * 1000.0
         if self.obs_viz_enable:
             self._debug_viz_obs_first_agent(obs, keys2)
 
@@ -3148,14 +3183,20 @@ class ChocolateEnv:
             or self.ttc_delta_penalty_enable
             or self.road_edge_ttc_penalty_enable
         ):
+            _t_ttc_state_start = perf_counter()
             states_by_world = self._collect_all_vehicle_states()
+            _t_ttc_state_ms += (perf_counter() - _t_ttc_state_start) * 1000.0
         if self.ttc_penalty_enable or self.ttc_delta_penalty_enable:
+            _t_ttc_vehicle_start = perf_counter()
             ttc_pen = self._compute_ttc_penalty(keys, active, states_by_world=states_by_world)
+            _t_ttc_vehicle_ms += (perf_counter() - _t_ttc_vehicle_start) * 1000.0
             reward[active] += ttc_pen[active]
         if self.road_edge_ttc_penalty_enable:
+            _t_ttc_road_start = perf_counter()
             edge_ttc_pen = self._compute_road_edge_ttc_penalty(
                 keys, active, states_by_world=states_by_world
             )
+            _t_ttc_road_ms += (perf_counter() - _t_ttc_road_start) * 1000.0
             reward[active] += edge_ttc_pen[active]
         # Per-step survival reward (only for active rows)
         if self.survival_reward_per_step != 0.0:
@@ -3178,6 +3219,7 @@ class ChocolateEnv:
                 if debug_hits:
                     print(f"[collision] t={self.t} hits={debug_hits}")
 
+        _t_contact_scan_start = perf_counter()
         below_min_z = np.zeros((N,), dtype=bool)
         if self.min_vehicle_z_m is not None:
             for i, k in enumerate(keys):
@@ -3250,10 +3292,13 @@ class ChocolateEnv:
                     lane_hit_contact[i] = True
             if lane_hit_contact.any():
                 reward[lane_hit_contact] += float(self.lane_center_reward_per_step)
+        _t_contact_scan_ms += (perf_counter() - _t_contact_scan_start) * 1000.0
 
+        _t_geom_lane_start = perf_counter()
         geom_lane_hit, geom_off_road, lane_error_m, heading_alignment, route_progress_m = (
             self._compute_geometric_lane_features(keys, obs, active)
         )
+        _t_geom_lane_ms += (perf_counter() - _t_geom_lane_start) * 1000.0
         if self.geom_lane_reward_enable:
             lane_quality = np.exp(
                 -np.square(lane_error_m / max(self.geom_lane_tolerance_m, 1e-3))
@@ -3270,6 +3315,7 @@ class ChocolateEnv:
                 2.0,
             )
 
+        _t_contact_scan_vehicle_start = perf_counter()
         vehicle_contact_done = np.zeros((N,), dtype=bool)
         # Vehicle-trigger termination based on vehicle contact list
         if self.vehicle_contact_done:
@@ -3292,6 +3338,7 @@ class ChocolateEnv:
             if vehicle_contact_done.any():
                 reward[vehicle_contact_done] += float(self.vehicle_contact_done_penalty)
                 self._done[vehicle_contact_done] = True
+        _t_contact_scan_ms += (perf_counter() - _t_contact_scan_vehicle_start) * 1000.0
 
         # Apply terminal handling for non-success failures as soon as they become done.
         # This keeps behavior consistent with success terminals when clear_on_done is enabled.
@@ -3362,6 +3409,22 @@ class ChocolateEnv:
             if sample_idx is None:
                 print(f"[road-contact] t={self.t} no active agents")
 
+        timing_step_total_ms = (perf_counter() - _t_step_start) * 1000.0
+        if self.timing_debug_enable and (self.t % self.timing_debug_every_steps == 0):
+            print(
+                "[timing][env] "
+                f"t={self.t} total_ms={timing_step_total_ms:.2f} "
+                f"action_prep_ms={_t_action_prep_ms:.2f} "
+                f"apply_ms={_t_apply_control_ms:.2f} "
+                f"physics_ms={_t_physics_ms:.2f} "
+                f"obs_ms={_t_obs_build_ms:.2f} "
+                f"ttc_state_ms={_t_ttc_state_ms:.2f} "
+                f"ttc_vehicle_ms={_t_ttc_vehicle_ms:.2f} "
+                f"ttc_road_ms={_t_ttc_road_ms:.2f} "
+                f"geom_lane_ms={_t_geom_lane_ms:.2f} "
+                f"contact_scan_ms={_t_contact_scan_ms:.2f}"
+            )
+
         info = StepInfo(
             keys=keys,
             mask=mask,
@@ -3385,6 +3448,16 @@ class ChocolateEnv:
             pending=pending_mask.copy(),
             timeout=bool(timeout),
             t_env=int(self.t),
+            timing_step_total_ms=float(timing_step_total_ms),
+            timing_action_prep_ms=float(_t_action_prep_ms),
+            timing_apply_control_ms=float(_t_apply_control_ms),
+            timing_physics_ms=float(_t_physics_ms),
+            timing_obs_build_ms=float(_t_obs_build_ms),
+            timing_ttc_state_ms=float(_t_ttc_state_ms),
+            timing_ttc_vehicle_ms=float(_t_ttc_vehicle_ms),
+            timing_ttc_road_ms=float(_t_ttc_road_ms),
+            timing_geom_lane_ms=float(_t_geom_lane_ms),
+            timing_contact_scan_ms=float(_t_contact_scan_ms),
         )
         if removed_agents_this_step and self.hard_remove_done_agents and (not self.respawn_on_reset):
             self._sync_keyed_state_from_stage()

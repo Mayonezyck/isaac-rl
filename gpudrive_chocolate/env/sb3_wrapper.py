@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence
 
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -212,6 +213,8 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     cfg_env.get("startup_below_min_z_preflight_steps", 0)
                 ),
             },
+            timing_debug_enable=bool(cfg_env.get("timing_debug_enable", False)),
+            timing_debug_every_steps=int(cfg_env.get("timing_debug_every_steps", 200)),
             verbose=bool(cfg_env.get("verbose", False)),
         )
 
@@ -240,6 +243,9 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         self.obs_vis_every_steps = max(1, int(cfg_env.get("obs_vis_every_steps", 2000)))
         self.obs_vis_out_dir = str(cfg_env.get("obs_vis_out_dir", "runs/obs_vis"))
         self.obs_vis_agent_index = max(0, int(cfg_env.get("obs_vis_agent_index", 0)))
+        self.timing_debug_enable = bool(cfg_env.get("timing_debug_enable", False))
+        self.timing_debug_every_steps = max(1, int(cfg_env.get("timing_debug_every_steps", 200)))
+        self._last_wrapper_timing: Dict[str, float] = {}
         self._step_count = 0
 
         self._keys: List[object] = []
@@ -825,6 +831,28 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             "off_road_given_active_rate_step": float(off_road_count) / float(denom_active),
             "collision_given_active_rate_step": float(collided_count) / float(denom_active),
             "t_env": int(getattr(info, "t_env", 0)),
+            "perf/env_step_total_ms": float(getattr(info, "timing_step_total_ms", 0.0)),
+            "perf/env_action_prep_ms": float(getattr(info, "timing_action_prep_ms", 0.0)),
+            "perf/env_apply_control_ms": float(getattr(info, "timing_apply_control_ms", 0.0)),
+            "perf/env_physics_ms": float(getattr(info, "timing_physics_ms", 0.0)),
+            "perf/env_obs_build_ms": float(getattr(info, "timing_obs_build_ms", 0.0)),
+            "perf/env_ttc_state_ms": float(getattr(info, "timing_ttc_state_ms", 0.0)),
+            "perf/env_ttc_vehicle_ms": float(getattr(info, "timing_ttc_vehicle_ms", 0.0)),
+            "perf/env_ttc_road_ms": float(getattr(info, "timing_ttc_road_ms", 0.0)),
+            "perf/env_geom_lane_ms": float(getattr(info, "timing_geom_lane_ms", 0.0)),
+            "perf/env_contact_scan_ms": float(getattr(info, "timing_contact_scan_ms", 0.0)),
+            "perf/wrapper_step_total_ms": float(self._last_wrapper_timing.get("step_total_ms", 0.0)),
+            "perf/wrapper_action_to_numpy_ms": float(
+                self._last_wrapper_timing.get("action_to_numpy_ms", 0.0)
+            ),
+            "perf/wrapper_action_map_ms": float(self._last_wrapper_timing.get("action_map_ms", 0.0)),
+            "perf/wrapper_env_step_ms": float(self._last_wrapper_timing.get("env_step_ms", 0.0)),
+            "perf/wrapper_reward_ms": float(self._last_wrapper_timing.get("reward_ms", 0.0)),
+            "perf/wrapper_mask_build_ms": float(self._last_wrapper_timing.get("mask_build_ms", 0.0)),
+            "perf/wrapper_reset_logic_ms": float(
+                self._last_wrapper_timing.get("reset_logic_ms", 0.0)
+            ),
+            "perf/wrapper_pack_ms": float(self._last_wrapper_timing.get("pack_ms", 0.0)),
         }
         if episode_summary is None:
             episode_summary = self._empty_episode_completion_summary()
@@ -878,17 +906,28 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
     def step(self, actions) -> VecEnvStepReturn:
         self._step_count += 1
+        _t_step_start = perf_counter()
+        _t_action_to_numpy_ms = 0.0
+        _t_action_map_ms = 0.0
+        _t_env_step_ms = 0.0
+        _t_reward_ms = 0.0
+        _t_mask_build_ms = 0.0
+        _t_reset_logic_ms = 0.0
+        _t_pack_ms = 0.0
         spawned_count_step = int(self._pending_initial_spawn_count)
         self._pending_initial_spawn_count = 0
         prev_flat_slot_keys = list(self.flat_slot_keys)
+        _t_action_to_numpy_start = perf_counter()
         if torch.is_tensor(actions):
             actions_np = actions.detach().cpu().numpy()
         else:
             actions_np = np.asarray(actions, dtype=np.float32)
+        _t_action_to_numpy_ms += (perf_counter() - _t_action_to_numpy_start) * 1000.0
 
         if actions_np.ndim == 1:
             actions_np = actions_np.reshape(-1, self.action_dim)
 
+        _t_action_map_start = perf_counter()
         action_by_token = None
         if self._dynamic_key_mapping:
             expected_prev_envs = int(len(prev_flat_slot_keys))
@@ -935,11 +974,17 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                 if key_idx is None:
                     continue
                 U[key_idx, :] = actions_np[env_idx, :]
+        _t_action_map_ms += (perf_counter() - _t_action_map_start) * 1000.0
 
+        _t_env_step_start = perf_counter()
         obs, base_reward, done, info = self.choco_env.step(U)
+        _t_env_step_ms += (perf_counter() - _t_env_step_start) * 1000.0
         self.last_step_info_raw = info
+        _t_reward_start = perf_counter()
         reward = self._compute_rewards(obs, base_reward, done, info)
+        _t_reward_ms += (perf_counter() - _t_reward_start) * 1000.0
 
+        _t_mask_build_start = perf_counter()
         done_mask = np.zeros((self.num_worlds, self.max_agent_count), dtype=bool)
         reward_mask = np.full(
             (self.num_worlds, self.max_agent_count), fill_value=np.nan, dtype=np.float32
@@ -961,6 +1006,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
         reward_mask_t = torch.tensor(reward_mask, device=self.device)
         done_for_info = np.asarray(done, dtype=bool).copy()
         completed_worlds: List[int] = []
+        _t_mask_build_ms += (perf_counter() - _t_mask_build_start) * 1000.0
 
         if self.done_reset_mode == "world":
             prev_dead_mask = self.dead_agent_mask.clone()
@@ -1003,6 +1049,7 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
 
         self._accumulate_world_episode_events(info=info, done=done_for_info)
 
+        _t_reset_logic_start = perf_counter()
         if hasattr(info, "timeout") and info.timeout:
             if self.auto_reset_timeout:
                 if self.done_reset_mode == "world":
@@ -1049,9 +1096,11 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
                     spawned_count_step += done_respawn_count
                     self.choco_env.reset_done(done)
                     obs, _, _ = self.choco_env._build_obs()
+        _t_reset_logic_ms += (perf_counter() - _t_reset_logic_start) * 1000.0
 
         episode_summary = self._finalize_completed_world_episodes(completed_worlds)
 
+        _t_pack_start = perf_counter()
         obs_flat = obs[self.flat_key_indices]
         if self.verbose:
             print(f"[sb3] step obs shape={tuple(obs_flat.shape)}")
@@ -1082,6 +1131,40 @@ class ChocolateSB3MultiAgentEnv(VecEnv):
             .numpy()
             .astype(bool)
         )
+        _t_pack_ms += (perf_counter() - _t_pack_start) * 1000.0
+
+        timing_step_total_ms = (perf_counter() - _t_step_start) * 1000.0
+        self._last_wrapper_timing = {
+            "step_total_ms": float(timing_step_total_ms),
+            "action_to_numpy_ms": float(_t_action_to_numpy_ms),
+            "action_map_ms": float(_t_action_map_ms),
+            "env_step_ms": float(_t_env_step_ms),
+            "reward_ms": float(_t_reward_ms),
+            "mask_build_ms": float(_t_mask_build_ms),
+            "reset_logic_ms": float(_t_reset_logic_ms),
+            "pack_ms": float(_t_pack_ms),
+        }
+        if isinstance(self.info_dict, dict):
+            self.info_dict["perf/wrapper_step_total_ms"] = float(timing_step_total_ms)
+            self.info_dict["perf/wrapper_action_to_numpy_ms"] = float(_t_action_to_numpy_ms)
+            self.info_dict["perf/wrapper_action_map_ms"] = float(_t_action_map_ms)
+            self.info_dict["perf/wrapper_env_step_ms"] = float(_t_env_step_ms)
+            self.info_dict["perf/wrapper_reward_ms"] = float(_t_reward_ms)
+            self.info_dict["perf/wrapper_mask_build_ms"] = float(_t_mask_build_ms)
+            self.info_dict["perf/wrapper_reset_logic_ms"] = float(_t_reset_logic_ms)
+            self.info_dict["perf/wrapper_pack_ms"] = float(_t_pack_ms)
+        if self.timing_debug_enable and (self._step_count % self.timing_debug_every_steps == 0):
+            print(
+                "[timing][wrapper] "
+                f"step={self._step_count} total_ms={timing_step_total_ms:.2f} "
+                f"act_np_ms={_t_action_to_numpy_ms:.2f} "
+                f"act_map_ms={_t_action_map_ms:.2f} "
+                f"env_step_ms={_t_env_step_ms:.2f} "
+                f"reward_ms={_t_reward_ms:.2f} "
+                f"mask_ms={_t_mask_build_ms:.2f} "
+                f"reset_ms={_t_reset_logic_ms:.2f} "
+                f"pack_ms={_t_pack_ms:.2f}"
+            )
 
         if self.obs_vis_enable and (self._step_count % self.obs_vis_every_steps == 0):
             out_dir = Path(self.obs_vis_out_dir)

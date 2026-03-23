@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
@@ -9,29 +9,50 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 from xml.etree import ElementTree as ET
 
 
+# Match the PhysX vehicle wizard reference car used by the teacher path:
+# chassis = 4.0 x 2.0 x 1.0 m, tire radius = 0.35 m, tire width = 0.15 m.
+# For the 2-axle layout, the wizard places wheel centers at +/- (0.5 * chassis_length - 2 * wheel_radius)
+# longitudinally and at +/- 0.5 * chassis_width laterally.
+PHYSX_WIZARD_DEFAULT_CHASSIS_LENGTH_M = 4.0
+PHYSX_WIZARD_DEFAULT_CHASSIS_WIDTH_M = 2.0
+PHYSX_WIZARD_DEFAULT_CHASSIS_HEIGHT_M = 1.0
+PHYSX_WIZARD_DEFAULT_CHASSIS_MASS_KG = 1800.0
+PHYSX_WIZARD_DEFAULT_WHEEL_RADIUS_M = 0.35
+PHYSX_WIZARD_DEFAULT_WHEEL_WIDTH_M = 0.15
+PHYSX_WIZARD_DEFAULT_WHEEL_MASS_KG = 20.0
+PHYSX_WIZARD_DEFAULT_CHASSIS_RGBA = (0.2784314, 0.64705884, 1.0, 1.0)
+PHYSX_WIZARD_DEFAULT_WHEELBASE_M = (
+    PHYSX_WIZARD_DEFAULT_CHASSIS_LENGTH_M - 4.0 * PHYSX_WIZARD_DEFAULT_WHEEL_RADIUS_M
+)
+PHYSX_WIZARD_DEFAULT_TRACK_WIDTH_M = PHYSX_WIZARD_DEFAULT_CHASSIS_WIDTH_M
+PHYSX_WIZARD_DEFAULT_GROUND_CLEARANCE_M = PHYSX_WIZARD_DEFAULT_WHEEL_RADIUS_M
+PHYSX_WIZARD_DEFAULT_SUSPENSION_REST_LENGTH_M = 0.5 * PHYSX_WIZARD_DEFAULT_WHEEL_RADIUS_M
+PHYSX_WIZARD_DEFAULT_SUSPENSION_TRAVEL_M = PHYSX_WIZARD_DEFAULT_WHEEL_RADIUS_M
+
+
 @dataclass(frozen=True)
 class StudentVehicleSpec:
     name: str = "student_fwd_vehicle"
-    chassis_length_m: float = 1.70
-    chassis_width_m: float = 0.96
-    chassis_height_m: float = 0.30
-    chassis_mass_kg: float = 520.0
-    wheelbase_m: float = 1.28
-    track_width_m: float = 0.92
-    wheel_radius_m: float = 0.24
-    wheel_width_m: float = 0.14
-    wheel_mass_kg: float = 18.0
-    ground_clearance_m: float = 0.12
-    suspension_mount_from_bottom_m: float = 0.18
-    suspension_travel_m: float = 0.16
+    chassis_length_m: float = PHYSX_WIZARD_DEFAULT_CHASSIS_LENGTH_M
+    chassis_width_m: float = PHYSX_WIZARD_DEFAULT_CHASSIS_WIDTH_M
+    chassis_height_m: float = PHYSX_WIZARD_DEFAULT_CHASSIS_HEIGHT_M
+    chassis_mass_kg: float = PHYSX_WIZARD_DEFAULT_CHASSIS_MASS_KG
+    wheelbase_m: float = PHYSX_WIZARD_DEFAULT_WHEELBASE_M
+    track_width_m: float = PHYSX_WIZARD_DEFAULT_TRACK_WIDTH_M
+    wheel_radius_m: float = PHYSX_WIZARD_DEFAULT_WHEEL_RADIUS_M
+    wheel_width_m: float = PHYSX_WIZARD_DEFAULT_WHEEL_WIDTH_M
+    wheel_mass_kg: float = PHYSX_WIZARD_DEFAULT_WHEEL_MASS_KG
+    ground_clearance_m: float = PHYSX_WIZARD_DEFAULT_GROUND_CLEARANCE_M
+    suspension_mount_from_bottom_m: float = PHYSX_WIZARD_DEFAULT_SUSPENSION_REST_LENGTH_M
+    suspension_travel_m: float = PHYSX_WIZARD_DEFAULT_SUSPENSION_TRAVEL_M
     suspension_link_mass_kg: float = 6.0
     steering_knuckle_mass_kg: float = 3.0
-    steering_limit_deg: float = 30.0
+    steering_limit_deg: float = 32.0
     steering_damping: float = 25.0
     steering_friction: float = 1.0
     suspension_damping: float = 2200.0
     suspension_friction: float = 120.0
-    wheel_damping: float = 1.5
+    wheel_damping: float = 0.25
     suspension_effort_limit_n: float = 15000.0
     suspension_velocity_limit_mps: float = 3.0
     steering_effort_limit_nm: float = 1200.0
@@ -134,8 +155,8 @@ def validate_student_vehicle_spec(spec: StudentVehicleSpec) -> None:
         raise ValueError("suspension_mount_from_bottom_m must be inside the chassis height")
     if not 0.0 < float(spec.steering_limit_deg) < 89.0:
         raise ValueError("steering_limit_deg must be in (0, 89)")
-    if float(spec.ground_clearance_m) >= float(spec.wheel_radius_m):
-        raise ValueError("ground_clearance_m must be smaller than wheel_radius_m")
+    if float(spec.ground_clearance_m) > float(spec.wheel_radius_m):
+        raise ValueError("ground_clearance_m must not exceed wheel_radius_m")
     if suspension_rest_length_m(spec) <= 0.0:
         raise ValueError("Suspension rest length must be positive; adjust chassis or suspension geometry")
 
@@ -202,44 +223,75 @@ def _add_inertial(link: ET.Element, *, mass_kg: float, diagonal_inertia: Sequenc
     )
 
 
-def _add_box_geometry(parent: ET.Element, *, size_xyz_m: Sequence[float], material_name: str) -> None:
-    visual = ET.SubElement(parent, "visual")
-    ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
-    geometry = ET.SubElement(visual, "geometry")
-    ET.SubElement(geometry, "box", {"size": _format_triplet(size_xyz_m)})
-    ET.SubElement(visual, "material", {"name": str(material_name)})
+def _add_box_geometry(
+    parent: ET.Element,
+    *,
+    size_xyz_m: Sequence[float],
+    material_name: str | None = None,
+    include_visual: bool = True,
+    include_collision: bool = True,
+) -> None:
+    if include_visual:
+        visual = ET.SubElement(parent, "visual")
+        ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+        geometry = ET.SubElement(visual, "geometry")
+        ET.SubElement(geometry, "box", {"size": _format_triplet(size_xyz_m)})
+        if material_name is not None:
+            ET.SubElement(visual, "material", {"name": str(material_name)})
 
-    collision = ET.SubElement(parent, "collision")
-    ET.SubElement(collision, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
-    geometry = ET.SubElement(collision, "geometry")
-    ET.SubElement(geometry, "box", {"size": _format_triplet(size_xyz_m)})
-
-
-def _add_sphere_geometry(parent: ET.Element, *, radius_m: float, material_name: str) -> None:
-    visual = ET.SubElement(parent, "visual")
-    ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
-    geometry = ET.SubElement(visual, "geometry")
-    ET.SubElement(geometry, "sphere", {"radius": f"{float(radius_m):.9g}"})
-    ET.SubElement(visual, "material", {"name": str(material_name)})
-
-    collision = ET.SubElement(parent, "collision")
-    ET.SubElement(collision, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
-    geometry = ET.SubElement(collision, "geometry")
-    ET.SubElement(geometry, "sphere", {"radius": f"{float(radius_m):.9g}"})
+    if include_collision:
+        collision = ET.SubElement(parent, "collision")
+        ET.SubElement(collision, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+        geometry = ET.SubElement(collision, "geometry")
+        ET.SubElement(geometry, "box", {"size": _format_triplet(size_xyz_m)})
 
 
-def _add_cylinder_y_geometry(parent: ET.Element, *, radius_m: float, length_m: float, material_name: str) -> None:
+def _add_sphere_geometry(
+    parent: ET.Element,
+    *,
+    radius_m: float,
+    material_name: str | None = None,
+    include_visual: bool = True,
+    include_collision: bool = True,
+) -> None:
+    if include_visual:
+        visual = ET.SubElement(parent, "visual")
+        ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+        geometry = ET.SubElement(visual, "geometry")
+        ET.SubElement(geometry, "sphere", {"radius": f"{float(radius_m):.9g}"})
+        if material_name is not None:
+            ET.SubElement(visual, "material", {"name": str(material_name)})
+
+    if include_collision:
+        collision = ET.SubElement(parent, "collision")
+        ET.SubElement(collision, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+        geometry = ET.SubElement(collision, "geometry")
+        ET.SubElement(geometry, "sphere", {"radius": f"{float(radius_m):.9g}"})
+
+
+def _add_cylinder_y_geometry(
+    parent: ET.Element,
+    *,
+    radius_m: float,
+    length_m: float,
+    material_name: str | None = None,
+    include_visual: bool = True,
+    include_collision: bool = True,
+) -> None:
     rpy = f"{0.5 * math.pi:.9g} 0 0"
-    visual = ET.SubElement(parent, "visual")
-    ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": rpy})
-    geometry = ET.SubElement(visual, "geometry")
-    ET.SubElement(geometry, "cylinder", {"radius": f"{float(radius_m):.9g}", "length": f"{float(length_m):.9g}"})
-    ET.SubElement(visual, "material", {"name": str(material_name)})
+    if include_visual:
+        visual = ET.SubElement(parent, "visual")
+        ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": rpy})
+        geometry = ET.SubElement(visual, "geometry")
+        ET.SubElement(geometry, "cylinder", {"radius": f"{float(radius_m):.9g}", "length": f"{float(length_m):.9g}"})
+        if material_name is not None:
+            ET.SubElement(visual, "material", {"name": str(material_name)})
 
-    collision = ET.SubElement(parent, "collision")
-    ET.SubElement(collision, "origin", {"xyz": "0 0 0", "rpy": rpy})
-    geometry = ET.SubElement(collision, "geometry")
-    ET.SubElement(geometry, "cylinder", {"radius": f"{float(radius_m):.9g}", "length": f"{float(length_m):.9g}"})
+    if include_collision:
+        collision = ET.SubElement(parent, "collision")
+        ET.SubElement(collision, "origin", {"xyz": "0 0 0", "rpy": rpy})
+        geometry = ET.SubElement(collision, "geometry")
+        ET.SubElement(geometry, "cylinder", {"radius": f"{float(radius_m):.9g}", "length": f"{float(length_m):.9g}"})
 
 
 def _add_joint(
@@ -298,19 +350,23 @@ def build_student_vehicle_urdf(spec: StudentVehicleSpec) -> str:
     )
 
     robot = ET.Element("robot", {"name": str(spec.name)})
-    _add_material(robot, name="chassis_gray", rgba=(0.20, 0.22, 0.24, 1.0))
-    _add_material(robot, name="suspension_orange", rgba=(0.88, 0.42, 0.14, 1.0))
-    _add_material(robot, name="knuckle_blue", rgba=(0.18, 0.46, 0.82, 1.0))
+    _add_material(robot, name="wizard_chassis_blue", rgba=PHYSX_WIZARD_DEFAULT_CHASSIS_RGBA)
+    _add_material(robot, name="hidden_helper", rgba=(0.0, 0.0, 0.0, 0.0))
     _add_material(robot, name="wheel_black", rgba=(0.06, 0.06, 0.06, 1.0))
 
     chassis = ET.SubElement(robot, "link", {"name": "base_link"})
-    _add_box_geometry(chassis, size_xyz_m=chassis_size, material_name="chassis_gray")
+    _add_box_geometry(chassis, size_xyz_m=chassis_size, material_name="wizard_chassis_blue")
     _add_inertial(chassis, mass_kg=float(spec.chassis_mass_kg), diagonal_inertia=_box_inertia(float(spec.chassis_mass_kg), chassis_size))
 
     for corner in build_corner_specs(spec):
         suspension_link_name = f"{corner.name}_suspension_link"
         suspension_link = ET.SubElement(robot, "link", {"name": suspension_link_name})
-        _add_box_geometry(suspension_link, size_xyz_m=suspension_link_size, material_name="suspension_orange")
+        _add_box_geometry(
+            suspension_link,
+            size_xyz_m=suspension_link_size,
+            material_name="hidden_helper",
+            include_collision=False,
+        )
         _add_inertial(
             suspension_link,
             mass_kg=float(spec.suspension_link_mass_kg),
@@ -338,10 +394,16 @@ def build_student_vehicle_urdf(spec: StudentVehicleSpec) -> str:
         )
 
         wheel_parent_link = suspension_link_name
+        wheel_joint_z_m = -suspension_rest_m + 0.5 * suspension_link_height_m
         if corner.is_front:
             steer_link_name = f"{corner.name}_steer_link"
             steer_link = ET.SubElement(robot, "link", {"name": steer_link_name})
-            _add_sphere_geometry(steer_link, radius_m=steering_knuckle_radius_m, material_name="knuckle_blue")
+            _add_sphere_geometry(
+                steer_link,
+                radius_m=steering_knuckle_radius_m,
+                material_name="hidden_helper",
+                include_collision=False,
+            )
             _add_inertial(
                 steer_link,
                 mass_kg=float(spec.steering_knuckle_mass_kg),
@@ -370,6 +432,8 @@ def build_student_vehicle_urdf(spec: StudentVehicleSpec) -> str:
                 },
             )
             wheel_parent_link = steer_link_name
+            # Keep front and rear wheel centers at the same nominal height.
+            wheel_joint_z_m = -suspension_rest_m + suspension_link_height_m
 
         wheel_link_name = f"{corner.name}_wheel_link"
         wheel_link = ET.SubElement(robot, "link", {"name": wheel_link_name})
@@ -387,7 +451,7 @@ def build_student_vehicle_urdf(spec: StudentVehicleSpec) -> str:
             joint_type="continuous",
             parent_link=wheel_parent_link,
             child_link=wheel_link_name,
-            xyz=(0.0, 0.0, -suspension_rest_m + 0.5 * suspension_link_height_m),
+            xyz=(0.0, 0.0, wheel_joint_z_m),
             axis_xyz=(0.0, 1.0, 0.0),
             limit={
                 "effort": float(spec.wheel_effort_limit_nm),

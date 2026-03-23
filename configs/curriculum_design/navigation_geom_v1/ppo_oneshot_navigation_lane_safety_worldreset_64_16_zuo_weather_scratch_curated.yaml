@@ -1,0 +1,55 @@
+choco_config_path: "configs/curriculum_design/navigation_geom_v1/curriculum_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather_curated.yaml"
+
+device: "cuda:1"
+
+reward_type: "weighted_combination"
+collision_weight: -0.1
+goal_achieved_weight: 0.0
+off_road_weight: -0.1
+log_distance_weight: 0.0
+policy_type: "late_fusion"
+
+late_fusion:
+  ego_dim: 11
+  road_point_dim: 5
+  vehicle_dim: 6
+  ego_layers: [64, 64]
+  road_layers: [96, 96]
+  vehicle_layers: [96, 96]
+  shared_layers: [128, 64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: "relu"
+  dropout: 0.0
+  pool: "max"
+  vehicle_dim: 7
+
+seed: 42
+gamma: 0.99
+gae_lambda: 0.98
+clip_range: 0.15
+vf_coef: 0.5
+n_steps: 128
+num_minibatches: 16
+verbose: 1
+total_timesteps: 100_000_000
+ent_coef: 3.0e-05
+lr: 0.00020924001030314093
+n_epochs: 5
+
+render_every_updates: 1000
+render_rollout_steps: 0
+render_dir: "runs/capture_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
+render_during_training: false
+record_training_video: false
+video_fps: 30
+video_name_prefix: "ppo_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
+video_keep_frames: false
+
+save_freq: 3125
+save_dir: "runs/checkpoints_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
+save_prefix: "ppo_oneshot_navigation_lane_safety_worldreset_64_16_zuo_weather"
+resume_from: null
+
+log_step_metrics: false
+log_detailed_metrics: false

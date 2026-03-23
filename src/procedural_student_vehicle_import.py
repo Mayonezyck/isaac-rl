@@ -23,11 +23,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="artifacts/student_vehicle_assets/default")
     parser.add_argument("--spec-json", type=str, default="", help="Optional JSON file overriding StudentVehicleSpec fields.")
     parser.add_argument("--urdf-path", type=str, default="", help="Optional existing URDF to import instead of generating one.")
-    parser.add_argument("--save-stage-usd", type=str, default="", help="Optional explicit USD export path.")
+    parser.add_argument(
+        "--save-vehicle-usd",
+        type=str,
+        default="",
+        help="Optional explicit USD export path for the vehicle-only asset. Defaults to <output-dir>/<vehicle-name>.usd.",
+    )
+    parser.add_argument(
+        "--save-stage-usd",
+        type=str,
+        default="",
+        help="Optional explicit USD export path for the full debug stage. If omitted, only the vehicle asset is saved.",
+    )
     parser.add_argument("--sim-steps", type=int, default=180)
     parser.add_argument("--spawn-x-m", type=float, default=0.0)
     parser.add_argument("--spawn-y-m", type=float, default=0.0)
     parser.add_argument("--spawn-yaw-deg", type=float, default=0.0)
+    parser.add_argument(
+        "--spawn-clearance-m",
+        type=float,
+        default=0.25,
+        help="Extra vertical clearance above the nominal wheel-contact pose so settling under gravity is visible.",
+    )
     return parser.parse_args()
 
 
@@ -49,6 +66,132 @@ def _write_artifacts(output_dir: str | Path, spec: StudentVehicleSpec, urdf_path
     return urdf_path, spec_path
 
 
+def _spawn_height_m(spec: StudentVehicleSpec, spawn_clearance_m: float) -> float:
+    return float(nominal_root_height_m(spec)) + max(0.0, float(spawn_clearance_m))
+
+
+def _vehicle_asset_root_path(robot_root_path: str) -> str:
+    root_name = str(robot_root_path).rstrip("/").split("/")[-1]
+    if not root_name:
+        raise ValueError(f"Unable to derive a vehicle asset root from robot path: {robot_root_path!r}")
+    return f"/{root_name}"
+
+
+def _default_vehicle_usd_path(output_dir: str | Path, spec: StudentVehicleSpec) -> Path:
+    output_root = Path(output_dir).expanduser().resolve()
+    return output_root / f"{spec.name}.usd"
+
+
+def _vehicle_physics_material_root_path(asset_root_path: str) -> str:
+    return f"{str(asset_root_path).rstrip('/')}/PhysicsMaterials"
+
+
+def _vehicle_physics_material_paths(asset_root_path: str) -> dict[str, str]:
+    root_path = _vehicle_physics_material_root_path(asset_root_path)
+    return {
+        "wheel": f"{root_path}/wheel_contact_material",
+        "chassis": f"{root_path}/chassis_contact_material",
+    }
+
+
+def _vehicle_collision_material_bind_targets(asset_root_path: str) -> dict[str, list[str]]:
+    root_path = str(asset_root_path).rstrip("/")
+    return {
+        "wheel": [
+            f"{root_path}/front_left_wheel_link",
+            f"{root_path}/front_right_wheel_link",
+            f"{root_path}/rear_left_wheel_link",
+            f"{root_path}/rear_right_wheel_link",
+        ],
+        "chassis": [
+            f"{root_path}/base_link",
+        ],
+    }
+
+
+def _rewrite_layer_material_bindings(
+    layer,
+    *,
+    source_vehicle_path,
+    asset_root_path,
+) -> int:
+    from pxr import Sdf
+
+    source_looks_prefix = Sdf.Path(f"{str(source_vehicle_path)}/Looks")
+    asset_looks_prefix = Sdf.Path(f"{str(asset_root_path)}/Looks")
+    rewritten_count = 0
+
+    def _visit_prim_spec(prim_spec) -> None:
+        nonlocal rewritten_count
+        for property_name in list(prim_spec.properties.keys()):
+            if not property_name.startswith("material:binding"):
+                continue
+            relationship_spec = prim_spec.relationships[property_name]
+            targets = list(relationship_spec.targetPathList.explicitItems)
+            if not targets:
+                continue
+            updated_targets = []
+            changed = False
+            for target in targets:
+                updated_target = target
+                if target.HasPrefix(source_looks_prefix):
+                    updated_target = target.ReplacePrefix(source_looks_prefix, asset_looks_prefix)
+                if updated_target != target:
+                    changed = True
+                updated_targets.append(updated_target)
+            if changed:
+                relationship_spec.targetPathList.explicitItems = updated_targets
+                rewritten_count += 1
+        for child_spec in prim_spec.nameChildren.values():
+            _visit_prim_spec(child_spec)
+
+    for root_spec in layer.rootPrims:
+        _visit_prim_spec(root_spec)
+    return rewritten_count
+
+
+def _author_vehicle_physics_materials(vehicle_stage, *, asset_root_path: str) -> dict[str, str]:
+    from pxr import PhysxSchema, UsdPhysics, UsdShade
+
+    material_paths = _vehicle_physics_material_paths(asset_root_path)
+    bind_targets = _vehicle_collision_material_bind_targets(asset_root_path)
+
+    def _create_material(material_path: str, *, static_friction: float, dynamic_friction: float) -> UsdShade.Material:
+        material = UsdShade.Material.Define(vehicle_stage, material_path)
+        prim = material.GetPrim()
+
+        physics_material_api = UsdPhysics.MaterialAPI(prim)
+        if not physics_material_api:
+            physics_material_api = UsdPhysics.MaterialAPI.Apply(prim)
+        physics_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
+        physics_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+        physics_material_api.CreateRestitutionAttr().Set(0.0)
+
+        physx_material_api = PhysxSchema.PhysxMaterialAPI(prim)
+        if not physx_material_api:
+            physx_material_api = PhysxSchema.PhysxMaterialAPI.Apply(prim)
+        physx_material_api.CreateFrictionCombineModeAttr().Set("min")
+        physx_material_api.CreateRestitutionCombineModeAttr().Set("min")
+        return material
+
+    wheel_material = _create_material(material_paths["wheel"], static_friction=1.0, dynamic_friction=1.0)
+    chassis_material = _create_material(material_paths["chassis"], static_friction=1.0, dynamic_friction=1.0)
+
+    for link_path in bind_targets["wheel"]:
+        link_prim = vehicle_stage.GetPrimAtPath(link_path)
+        if not link_prim.IsValid():
+            raise RuntimeError(f"Wheel link is missing from exported vehicle asset: {link_path}")
+        UsdShade.MaterialBindingAPI(link_prim).Bind(wheel_material)
+
+    for link_path in bind_targets["chassis"]:
+        link_prim = vehicle_stage.GetPrimAtPath(link_path)
+        if not link_prim.IsValid():
+            raise RuntimeError(f"Chassis link is missing from exported vehicle asset: {link_path}")
+        UsdShade.MaterialBindingAPI(link_prim).Bind(chassis_material)
+
+    return material_paths
+
+
 def main() -> int:
     args = _parse_args()
     output_root = Path(args.output_dir).expanduser().resolve()
@@ -63,8 +206,9 @@ def main() -> int:
 
         import omni.kit.app
         import omni.kit.commands
+        import omni.timeline
         import omni.usd
-        from pxr import Gf, PhysicsSchemaTools, Sdf, UsdGeom, UsdLux
+        from pxr import Gf, PhysicsSchemaTools, Sdf, Usd, UsdGeom, UsdLux
 
         app = omni.kit.app.get_app()
         for _ in range(10):
@@ -117,43 +261,134 @@ def main() -> int:
         if not root_prim.IsValid():
             raise RuntimeError(f"Imported robot root does not exist: {robot_root_path}")
 
-        xform_api = UsdGeom.XformCommonAPI(root_prim)
-        xform_api.SetTranslate(
-            Gf.Vec3d(
-                float(args.spawn_x_m),
-                float(args.spawn_y_m),
-                float(nominal_root_height_m(spec)),
-            )
-        )
-        xform_api.SetRotate(
-            Gf.Vec3f(0.0, 0.0, float(args.spawn_yaw_deg)),
-            UsdGeom.XformCommonAPI.RotationOrderXYZ,
-        )
+        xformable = UsdGeom.Xformable(root_prim)
+        translate_op = None
+        rotate_op = None
+        for op in xformable.GetOrderedXformOps():
+            if op.IsInverseOp():
+                continue
+            if translate_op is None and op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                translate_op = op
+            if rotate_op is None and op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                rotate_op = op
+        if translate_op is None:
+            translate_op = xformable.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble, opSuffix="studentSpawn")
+        if rotate_op is None:
+            rotate_op = xformable.AddRotateXYZOp(precision=UsdGeom.XformOp.PrecisionFloat, opSuffix="studentSpawn")
 
-        for _ in range(max(1, int(args.sim_steps))):
+        spawn_z_m = _spawn_height_m(spec, args.spawn_clearance_m)
+        translate_op.Set(Gf.Vec3d(float(args.spawn_x_m), float(args.spawn_y_m), float(spawn_z_m)))
+        rotate_op.Set(Gf.Vec3f(0.0, 0.0, float(args.spawn_yaw_deg)))
+
+        for _ in range(5):
             simulation_app.update()
 
-        stage_usd_path = Path(args.save_stage_usd).expanduser().resolve() if str(args.save_stage_usd) else output_root / "student_vehicle_stage.usd"
-        stage.Export(str(stage_usd_path))
+        base_link_prim = stage.GetPrimAtPath(f"{robot_root_path}/base_link")
+        base_link_world_position_before_sim_m = None
+        if base_link_prim.IsValid():
+            before_translation = omni.usd.get_world_transform_matrix(base_link_prim).ExtractTranslation()
+            base_link_world_position_before_sim_m = [
+                float(before_translation[0]),
+                float(before_translation[1]),
+                float(before_translation[2]),
+            ]
+
+        timeline = omni.timeline.get_timeline_interface()
+        timeline.play()
+        for _ in range(max(1, int(args.sim_steps))):
+            simulation_app.update()
+        timeline.stop()
+
+        base_link_world_position_after_sim_m = None
+        if base_link_prim.IsValid():
+            after_translation = omni.usd.get_world_transform_matrix(base_link_prim).ExtractTranslation()
+            base_link_world_position_after_sim_m = [
+                float(after_translation[0]),
+                float(after_translation[1]),
+                float(after_translation[2]),
+            ]
+
+        def _export_vehicle_asset_usd(source_stage, source_robot_root_path: str, output_path: Path) -> tuple[Path, str]:
+            flattened_layer = source_stage.Flatten()
+            source_vehicle_path = Sdf.Path(str(source_robot_root_path))
+            if not flattened_layer.GetPrimAtPath(source_vehicle_path):
+                raise RuntimeError(f"Flattened stage is missing vehicle prim at {source_vehicle_path}")
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            vehicle_layer = Sdf.Layer.CreateNew(str(output_path))
+            if vehicle_layer is None:
+                raise RuntimeError(f"Failed to create vehicle asset layer: {output_path}")
+
+            asset_root_path = Sdf.Path(_vehicle_asset_root_path(source_robot_root_path))
+            if not Sdf.CopySpec(flattened_layer, source_vehicle_path, vehicle_layer, asset_root_path):
+                raise RuntimeError(f"Failed to copy vehicle prim from {source_vehicle_path} to {asset_root_path}")
+
+            for root_spec in flattened_layer.rootPrims:
+                root_spec_path = root_spec.path
+                if root_spec_path.name.startswith("Flattened_Prototype_"):
+                    if not Sdf.CopySpec(flattened_layer, root_spec_path, vehicle_layer, root_spec_path):
+                        raise RuntimeError(f"Failed to copy prototype prim {root_spec_path}")
+
+            _rewrite_layer_material_bindings(
+                vehicle_layer,
+                source_vehicle_path=source_vehicle_path,
+                asset_root_path=asset_root_path,
+            )
+
+            vehicle_stage = Usd.Stage.Open(vehicle_layer)
+            if vehicle_stage is None:
+                raise RuntimeError(f"Failed to open vehicle asset stage: {output_path}")
+            UsdGeom.SetStageUpAxis(vehicle_stage, UsdGeom.GetStageUpAxis(source_stage))
+            UsdGeom.SetStageMetersPerUnit(vehicle_stage, UsdGeom.GetStageMetersPerUnit(source_stage))
+
+            vehicle_root_prim = vehicle_stage.GetPrimAtPath(asset_root_path)
+            if not vehicle_root_prim.IsValid():
+                raise RuntimeError(f"Vehicle asset root does not exist in exported stage: {asset_root_path}")
+            _author_vehicle_physics_materials(vehicle_stage, asset_root_path=str(asset_root_path))
+            vehicle_stage.SetDefaultPrim(vehicle_root_prim)
+            vehicle_stage.GetRootLayer().Save()
+            return output_path, str(asset_root_path)
+
+        vehicle_usd_path = (
+            Path(args.save_vehicle_usd).expanduser().resolve()
+            if str(args.save_vehicle_usd)
+            else _default_vehicle_usd_path(output_root, spec)
+        )
+        vehicle_usd_path, vehicle_root_path = _export_vehicle_asset_usd(stage, robot_root_path, vehicle_usd_path)
+
+        stage_usd_path = ""
+        if str(args.save_stage_usd):
+            debug_stage_usd_path = Path(args.save_stage_usd).expanduser().resolve()
+            debug_stage_usd_path.parent.mkdir(parents=True, exist_ok=True)
+            stage.Export(str(debug_stage_usd_path))
+            stage_usd_path = str(debug_stage_usd_path)
 
         meta = {
             "robot_root_path": str(robot_root_path),
+            "vehicle_root_path": str(vehicle_root_path),
             "urdf_path": str(urdf_path),
             "spec_path": str(spec_path),
-            "stage_usd_path": str(stage_usd_path),
+            "vehicle_usd_path": str(vehicle_usd_path),
             "sim_steps": int(args.sim_steps),
             "spawn": {
                 "x_m": float(args.spawn_x_m),
                 "y_m": float(args.spawn_y_m),
                 "yaw_deg": float(args.spawn_yaw_deg),
-                "z_m": float(nominal_root_height_m(spec)),
+                "z_m": float(spawn_z_m),
+                "clearance_m": float(args.spawn_clearance_m),
             },
+            "base_link_world_position_before_sim_m": base_link_world_position_before_sim_m,
+            "base_link_world_position_after_sim_m": base_link_world_position_after_sim_m,
             "spec": asdict(spec),
         }
+        if stage_usd_path:
+            meta["stage_usd_path"] = stage_usd_path
         meta_path = output_root / "student_vehicle_import_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
         print(f"[procedural_student_vehicle_import] imported student vehicle to {robot_root_path}", flush=True)
-        print(f"[procedural_student_vehicle_import] wrote stage to {stage_usd_path}", flush=True)
+        print(f"[procedural_student_vehicle_import] wrote vehicle asset to {vehicle_usd_path}", flush=True)
+        if stage_usd_path:
+            print(f"[procedural_student_vehicle_import] wrote debug stage to {stage_usd_path}", flush=True)
         print(f"[procedural_student_vehicle_import] wrote metadata to {meta_path}", flush=True)
         return 0
     except Exception:

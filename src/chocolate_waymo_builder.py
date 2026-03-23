@@ -13,10 +13,28 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
 import omni.usd
 import omni.kit.app
 
-# ---- PhysX vehicle wizard imports (THE WORKING ONES you pasted) ----
-from omni.physxvehicle.scripts.wizards import physxVehicleWizard as VehicleWizard
-from omni.physxvehicle.scripts.helpers.UnitScale import UnitScale
-from omni.physxvehicle.scripts.commands import PhysXVehicleWizardCreateCommand
+# ---- PhysX vehicle wizard imports ----
+#
+# The road-only mini-world builder should remain usable even when the legacy vehicle wizard
+# Python module is not exposed on the current Isaac Sim install. Keep these imports optional
+# and fail only if the caller actually tries to spawn a wizard vehicle.
+try:
+    from omni.physxvehicle.scripts.wizards import physxVehicleWizard as VehicleWizard
+    from omni.physxvehicle.scripts.helpers.UnitScale import UnitScale
+    from omni.physxvehicle.scripts.commands import PhysXVehicleWizardCreateCommand
+except ModuleNotFoundError:
+    try:
+        from omni.physx.vehicle.scripts.wizards import physxVehicleWizard as VehicleWizard
+        from omni.physx.vehicle.scripts.helpers.UnitScale import UnitScale
+        from omni.physx.vehicle.scripts.commands import PhysXVehicleWizardCreateCommand
+    except ModuleNotFoundError:
+        VehicleWizard = None  # type: ignore[assignment]
+        PhysXVehicleWizardCreateCommand = None  # type: ignore[assignment]
+
+        @dataclass(frozen=True)
+        class UnitScale:  # type: ignore[override]
+            lengthScale: float
+            massScale: float
 
 # PhysX schema optional (for trigger API if available)
 try:
@@ -367,7 +385,9 @@ class WaymoJsonMiniWorldBuilder:
         if not all_pts:
             return np.zeros((3,), dtype=np.float32)
         pts = np.concatenate(all_pts, axis=0)
-        return pts.mean(axis=0)
+        mins = pts.min(axis=0)
+        maxs = pts.max(axis=0)
+        return 0.5 * (mins + maxs)
 
     def _to_local_xyz(self, x: float, y: float, z: float) -> Tuple[float, float, float]:
         return (float(x - self._scene_center[0]),
@@ -400,12 +420,14 @@ class WaymoJsonMiniWorldBuilder:
         trigger_offset_z_m: float = 0.5,
         trigger_match_segment: bool = True,
         trigger_script_enable: bool = True,
+        allowed_road_types: Optional[Sequence[int]] = None,
     ) -> None:
         road = (cfg.get("road", {}) or {})
         polylines = road.get("polylines", []) or []
         road_points_all: List[Gf.Vec3f] = []
         road_dirs_all: List[Gf.Vec3f] = []
         road_types_all: List[int] = []
+        allowed_types = None if allowed_road_types is None else {int(x) for x in allowed_road_types}
 
         # compute scene center (for origin_mode="center")
         if self.origin_mode == "center":
@@ -417,6 +439,8 @@ class WaymoJsonMiniWorldBuilder:
         by_type: Dict[int, List[np.ndarray]] = {}
         for pl in polylines:
             t = _safe_int(pl.get("type", -1), -1)
+            if allowed_types is not None and int(t) not in allowed_types:
+                continue
             xyz = pl.get("xyz", None)
             if not xyz:
                 continue
@@ -429,7 +453,6 @@ class WaymoJsonMiniWorldBuilder:
             pts_local = np.array([self._to_local_xyz(p[0], p[1], p[2]) for p in pts[:, :3]], dtype=np.float32)
             if flatten_road_z:
                 pts_local[:, 2] = float(road_z_m)
-            pts_local = self._filter_polyline_points(pts_local)
             if pts_local.shape[0] < 2:
                 continue
 
@@ -460,7 +483,10 @@ class WaymoJsonMiniWorldBuilder:
                     p0 = poly[i]
                     p1 = poly[i + 1]
 
-                    if not (self._in_bounds_xy(float(p0[0]), float(p0[1])) and self._in_bounds_xy(float(p1[0]), float(p1[1]))):
+                    if not (
+                        self._in_bounds_xy(float(p0[0]), float(p0[1]))
+                        and self._in_bounds_xy(float(p1[0]), float(p1[1]))
+                    ):
                         continue
 
                     dx = float(p1[0] - p0[0])
@@ -584,6 +610,12 @@ class WaymoJsonMiniWorldBuilder:
     def _spawn_vehicle_wizard_under(self, parent_path: str, position_m: Tuple[float, float, float], yaw_deg: float) -> Optional[str]:
         stage = self.stage
         _ensure_world_default_prim(stage)
+
+        if VehicleWizard is None or PhysXVehicleWizardCreateCommand is None:
+            raise RuntimeError(
+                "PhysX vehicle wizard Python modules are not available on this Isaac Sim install. "
+                "Road-only world building still works, but wizard vehicle spawning does not."
+            )
 
         parent_xform = UsdGeom.Xform.Define(stage, parent_path)
         xform_api = UsdGeom.XformCommonAPI(parent_xform)
@@ -1248,6 +1280,7 @@ class WaymoJsonMiniWorldBuilder:
         trigger_offset_z_m: float = 0.5,
         trigger_match_segment: bool = True,
         trigger_script_enable: bool = True,
+        allowed_road_types: Optional[Sequence[int]] = None,
 
         # agent params:
         spawn_z_m: float = 1.0,
@@ -1303,6 +1336,7 @@ class WaymoJsonMiniWorldBuilder:
             trigger_offset_z_m=trigger_offset_z_m,
             trigger_match_segment=trigger_match_segment,
             trigger_script_enable=trigger_script_enable,
+            allowed_road_types=allowed_road_types,
         )
         self.build_agents_with_goals(
             cfg,
@@ -1559,6 +1593,7 @@ class ChocolateBarConstructor:
         vehicle_trigger_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         vehicle_trigger_size_m: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         vehicle_trigger_script_enable: bool = True,
+        allowed_road_types: Optional[Sequence[int]] = None,
     ) -> None:
         json_list = [str(Path(p).expanduser().resolve()) for p in json_paths]
         if len(json_list) == 0:
@@ -1606,6 +1641,7 @@ class ChocolateBarConstructor:
                 trigger_offset_z_m=trigger_offset_z_m,
                 trigger_match_segment=trigger_match_segment,
                 trigger_script_enable=trigger_script_enable,
+                allowed_road_types=allowed_road_types,
 
                 # agents
                 spawn_z_m=spawn_z_m,
