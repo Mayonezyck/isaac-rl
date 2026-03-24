@@ -1,0 +1,75 @@
+# SceneFactory road-goal-reaching training preset with choco/gpudrive-style observations.
+# Usage:
+#   CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 conda run -n isaac-pytorch python -u \
+#     -m src.train_student_vehicle_goal_multiagent_rsl_rl \
+#     --config configs/scene_factory/goal_reaching_roads_choco_obs_train.yaml \
+#     --headless
+#
+# Observation structure:
+# - ego / goal core:
+#   [rel_goal_x_ego, rel_goal_y_ego, heading_error_sin, heading_error_cos, dist_to_goal, vx_ego, vy_ego]
+# - weather context:
+#   [water_film_norm, road_is_ac, road_is_sma, road_is_ogfc]
+# - road-point context:
+#   K nearest road samples with [rel_x, rel_y, road_type, dir_x_ego, dir_y_ego]
+# - neighbor context:
+#   K nearest vehicles with [rel_x, rel_y, length, width, rel_yaw, speed, ttc]
+
+env:
+  num_envs: 16
+  num_agents_per_env: 2
+  observation_mode: "choco_reference"
+  env_spacing: 240.0
+  spawn_height_m: 1.2
+  ground_mode: "plane"
+  use_scene_factory_roads: true
+  start_radius_m: 0.0
+  agent_spawn_circle_radius_m: 0.0
+  agent_spawn_jitter_m: 0.05
+  episode_length_s: 40.0
+  goal_radius_min_m: 5.0
+  goal_radius_max_m: 30.0
+  max_distance_from_origin_m: 100.0
+  agent_neighbor_obs_scale_m: 100.0
+  replicate_physics: true
+  clone_in_fabric: "auto"
+
+scene_factory:
+  config_path: "configs/scene_factory/multiworld_scene.yaml"
+  world_index: 0
+
+observation:
+  weather_context_enable: true
+  road_points_enable: true
+  road_points_k: 96
+  road_points_radius_m: 35.0
+  road_points_type_norm: 20.0
+  road_points_mode: "knn"
+  road_points_include_dirs: true
+  neighbor_enable: true
+  neighbor_k: 8
+  neighbor_include_ttc: true
+  neighbor_ttc_max_s: 10.0
+
+assets:
+  student_usd: "artifacts/student_vehicle_assets/vehicle_only_smoke/student_fwd_vehicle.usd"
+  tunable_config_json: "artifacts/student_vehicle_sysid/fwd_v1_staged_cem_anchor_overnight/best_config.json"
+
+runner:
+  log_dir: "logs/rsl_rl"
+  seed: 42
+  experiment_name: "scene_factory_goal_reaching_roads"
+  run_name: "choco_reference_obs"
+  max_iterations: 300
+  num_steps_per_env: 32
+  save_interval: 25
+  learning_rate: 3.0e-4
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  entropy_coef: 0.005
+  clip_param: 0.2
+  desired_kl: 0.01
+
+app:
+  device: "cuda:0"
+  rl_device: "cuda:0"

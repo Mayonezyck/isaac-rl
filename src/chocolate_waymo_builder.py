@@ -433,6 +433,8 @@ class WaymoJsonMiniWorldBuilder:
         road_points_all: List[Gf.Vec3f] = []
         road_dirs_all: List[Gf.Vec3f] = []
         road_types_all: List[int] = []
+        road_half_lengths_all: List[float] = []
+        road_half_widths_all: List[float] = []
         allowed_types = None if allowed_road_types is None else {int(x) for x in allowed_road_types}
         render_mode = str(road_render_mode).strip().lower()
         if render_mode not in {"point_instancer", "explicit_prims"}:
@@ -530,6 +532,8 @@ class WaymoJsonMiniWorldBuilder:
                         Gf.Vec3f(float(dx / length), float(dy / length), 0.0)
                     )
                     road_types_all.append(int(t))
+                    road_half_lengths_all.append(0.5 * float(length))
+                    road_half_widths_all.append(0.5 * float(seg_width))
                     if trigger_enable:
                         trigger_h = float(seg_height) if trigger_match_segment else float(trigger_height_m)
                         trigger_positions_py.append(
@@ -640,9 +644,7 @@ class WaymoJsonMiniWorldBuilder:
                 instancer.CreatePrototypesRel().SetTargets([cube.GetPath()])
                 instancer.GetProtoIndicesAttr().Set(Vt.IntArray([0]))
                 instancer.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.0)]))
-                instancer.GetOrientationsAttr().Set(
-                    Vt.QuathArray([Gf.Quath(Gf.Half(1.0), Gf.Half(0.0), Gf.Half(0.0), Gf.Half(0.0))])
-                )
+                instancer.GetOrientationsAttr().Set(Vt.QuathArray([_quath_from_yaw_z(0.0)]))
                 instancer.GetScalesAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0)]))
 
                 instancer.GetPositionsAttr().Set(Vt.Vec3fArray(seg_positions_py))
@@ -680,9 +682,7 @@ class WaymoJsonMiniWorldBuilder:
                     trig_inst.CreatePrototypesRel().SetTargets([trig_cube.GetPath()])
                     trig_inst.GetProtoIndicesAttr().Set(Vt.IntArray([0]))
                     trig_inst.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.0)]))
-                    trig_inst.GetOrientationsAttr().Set(
-                        Vt.QuathArray([Gf.Quath(Gf.Half(1.0), Gf.Half(0.0), Gf.Half(0.0), Gf.Half(0.0))])
-                    )
+                    trig_inst.GetOrientationsAttr().Set(Vt.QuathArray([_quath_from_yaw_z(0.0)]))
                     trig_inst.GetScalesAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0)]))
                     trig_inst.GetPositionsAttr().Set(Vt.Vec3fArray(trigger_positions_py))
                     trig_inst.GetOrientationsAttr().Set(Vt.QuathArray(seg_orients_py))
@@ -695,6 +695,8 @@ class WaymoJsonMiniWorldBuilder:
             root_prim.SetCustomDataByKey("road_points_m", Vt.Vec3fArray(road_points_all))
             root_prim.SetCustomDataByKey("road_point_dirs", Vt.Vec3fArray(road_dirs_all))
             root_prim.SetCustomDataByKey("road_point_types", Vt.IntArray(road_types_all))
+            root_prim.SetCustomDataByKey("road_point_half_lengths_m", Vt.FloatArray(road_half_lengths_all))
+            root_prim.SetCustomDataByKey("road_point_half_widths_m", Vt.FloatArray(road_half_widths_all))
 
     # -------- vehicles + parked cars --------
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from src.procedural_student_vehicle import build_default_student_vehicle_spec
 from src.procedural_student_vehicle_import import (
     _default_vehicle_usd_path,
+    _vehicle_subtree_should_be_deinstanced,
     _vehicle_asset_root_path,
     _vehicle_collision_material_bind_targets,
     _vehicle_physics_material_paths,
@@ -42,3 +43,31 @@ def test_vehicle_collision_material_bind_targets_cover_wheels_and_base_link():
             "/student_fwd_vehicle/base_link",
         ],
     }
+
+
+def test_vehicle_subtree_should_be_deinstanced_only_for_instanceable_reference_visuals_and_collisions():
+    assert _vehicle_subtree_should_be_deinstanced(
+        prim_name="visuals",
+        has_references=True,
+        is_instanceable=True,
+    )
+    assert _vehicle_subtree_should_be_deinstanced(
+        prim_name="collisions",
+        has_references=True,
+        is_instanceable=True,
+    )
+    assert not _vehicle_subtree_should_be_deinstanced(
+        prim_name="visuals",
+        has_references=False,
+        is_instanceable=True,
+    )
+    assert not _vehicle_subtree_should_be_deinstanced(
+        prim_name="base_link",
+        has_references=True,
+        is_instanceable=True,
+    )
+    assert not _vehicle_subtree_should_be_deinstanced(
+        prim_name="collisions",
+        has_references=True,
+        is_instanceable=False,
+    )

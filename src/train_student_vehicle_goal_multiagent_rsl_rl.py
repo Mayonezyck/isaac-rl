@@ -60,9 +60,65 @@ parser.add_argument("--log_dir", type=str, default=str(_cfg_value(file_cfg, "run
 parser.add_argument("--student_usd", type=str, default=str(_cfg_value(file_cfg, "assets", "student_usd", "")), help="Path to the student vehicle USD.")
 parser.add_argument(
     "--observation_mode",
-    choices=("full", "goal_reaching"),
+    choices=("full", "goal_reaching", "choco_reference"),
     default=str(_cfg_value(file_cfg, "env", "observation_mode", "goal_reaching")),
     help="Policy observation preset.",
+)
+parser.add_argument(
+    "--obs_weather_context_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "weather_context_enable", True)),
+    help="Include SceneFactory weather/friction context in the choco_reference observation mode.",
+)
+parser.add_argument(
+    "--obs_road_points_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "road_points_enable", True)),
+)
+parser.add_argument(
+    "--obs_road_points_k",
+    type=int,
+    default=int(_cfg_value(file_cfg, "observation", "road_points_k", 64)),
+)
+parser.add_argument(
+    "--obs_road_points_radius_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "observation", "road_points_radius_m", 35.0)),
+)
+parser.add_argument(
+    "--obs_road_points_type_norm",
+    type=float,
+    default=float(_cfg_value(file_cfg, "observation", "road_points_type_norm", 1.0)),
+)
+parser.add_argument(
+    "--obs_road_points_mode",
+    choices=("knn", "road_running"),
+    default=str(_cfg_value(file_cfg, "observation", "road_points_mode", "knn")),
+)
+parser.add_argument(
+    "--obs_road_points_include_dirs",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "road_points_include_dirs", True)),
+)
+parser.add_argument(
+    "--obs_neighbor_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "neighbor_enable", True)),
+)
+parser.add_argument(
+    "--obs_neighbor_k",
+    type=int,
+    default=int(_cfg_value(file_cfg, "observation", "neighbor_k", 8)),
+)
+parser.add_argument(
+    "--obs_neighbor_include_ttc",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_ttc", True)),
+)
+parser.add_argument(
+    "--obs_neighbor_ttc_max_s",
+    type=float,
+    default=float(_cfg_value(file_cfg, "observation", "neighbor_ttc_max_s", 10.0)),
 )
 parser.add_argument(
     "--tunable_config_json",
@@ -94,6 +150,18 @@ parser.add_argument(
     type=int,
     default=int(_cfg_value(file_cfg, "scene_factory", "world_index", 0)),
     help="Which resolved SceneFactory world to use as the cloned source world.",
+)
+parser.add_argument(
+    "--test_mode",
+    choices=("none", "collision_test", "scene_factory_collision_test", "scene_factory_multiworld_random_steer_test"),
+    default=str(_cfg_value(file_cfg, "test", "mode", "none")),
+    help=(
+        "Optional deterministic debug rollout mode. "
+        "'collision_test' runs a flat-world head-on crash. "
+        "'scene_factory_collision_test' runs the same head-on crash with SceneFactory roads enabled. "
+        "'scene_factory_multiworld_random_steer_test' runs multiple SceneFactory worlds with full throttle and "
+        "random steering."
+    ),
 )
 parser.add_argument("--env_spacing", type=float, default=float(_cfg_value(file_cfg, "env", "env_spacing", 18.0)), help="Spacing between vectorized environments.")
 parser.add_argument("--start_radius_m", type=float, default=float(_cfg_value(file_cfg, "env", "start_radius_m", 0.5)), help="Shared per-world spawn offset radius.")
@@ -139,6 +207,12 @@ parser.add_argument(
     type=str,
     default=str(_cfg_value(file_cfg, "app", "rl_device", "")),
     help="Device for the PPO runner. Empty defaults to sim device.",
+)
+parser.add_argument(
+    "--silence_runtime_warnings",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "app", "silence_runtime_warnings", False)),
+    help="Suppress Isaac Kit warning-level runtime logs in the terminal for this run.",
 )
 parser.add_argument(
     "--use_fabric",
@@ -260,6 +334,22 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 
+def _configure_runtime_warning_filter() -> None:
+    if not bool(getattr(args_cli, "silence_runtime_warnings", False)):
+        return
+    try:
+        import carb.settings
+
+        carb_settings = carb.settings.get_settings()
+        carb_settings.set_string("/log/outputStreamLevel", "Error")
+        print("[INFO][SceneFactory] Suppressing Kit warning-level runtime logs for this run.")
+    except Exception as exc:
+        print(f"[WARN][SceneFactory] Failed to configure runtime warning filter: {exc}")
+
+
+_configure_runtime_warning_filter()
+
+
 import torch
 import gymnasium as gym
 from rsl_rl.runners import OnPolicyRunner
@@ -350,6 +440,34 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.max_distance_from_origin_m = float(args_cli.max_distance_from_origin_m)
     cfg.agent_neighbor_obs_scale_m = float(args_cli.agent_neighbor_obs_scale_m)
     cfg.observation_mode = str(args_cli.observation_mode)
+    cfg.obs_weather_context_enable = bool(args_cli.obs_weather_context_enable)
+    cfg.obs_road_points_enable = bool(args_cli.obs_road_points_enable)
+    cfg.obs_road_points_k = int(args_cli.obs_road_points_k)
+    cfg.obs_road_points_radius_m = float(args_cli.obs_road_points_radius_m)
+    cfg.obs_road_points_type_norm = float(args_cli.obs_road_points_type_norm)
+    cfg.obs_road_points_mode = str(args_cli.obs_road_points_mode)
+    cfg.obs_road_points_include_dirs = bool(args_cli.obs_road_points_include_dirs)
+    cfg.obs_neighbor_enable = bool(args_cli.obs_neighbor_enable)
+    cfg.obs_neighbor_k = int(args_cli.obs_neighbor_k)
+    cfg.obs_neighbor_include_ttc = bool(args_cli.obs_neighbor_include_ttc)
+    cfg.obs_neighbor_ttc_max_s = float(args_cli.obs_neighbor_ttc_max_s)
+    cfg.test_mode = str(args_cli.test_mode).strip().lower()
+    cfg.collision_test_post_collision_steps = int(_cfg_value(file_cfg, "test", "post_collision_steps", 120))
+    cfg.collision_test_post_collision_throttle = float(
+        _cfg_value(file_cfg, "test", "post_collision_throttle", 0.0)
+    )
+    cfg.collision_test_post_collision_steering = float(
+        _cfg_value(file_cfg, "test", "post_collision_steering", 0.0)
+    )
+    cfg.collision_test_post_collision_brake = float(_cfg_value(file_cfg, "test", "post_collision_brake", 1.0))
+    cfg.random_steer_test_settle_steps = int(_cfg_value(file_cfg, "test", "settle_steps", 24))
+    cfg.random_steer_test_drive_steps = int(_cfg_value(file_cfg, "test", "drive_steps", 600))
+    cfg.random_steer_test_throttle = float(_cfg_value(file_cfg, "test", "throttle", 1.0))
+    cfg.random_steer_test_brake = float(_cfg_value(file_cfg, "test", "brake", 0.0))
+    cfg.random_steer_test_steering_min = float(_cfg_value(file_cfg, "test", "steering_min", -1.0))
+    cfg.random_steer_test_steering_max = float(_cfg_value(file_cfg, "test", "steering_max", 1.0))
+    cfg.random_steer_test_steering_hold_steps = int(_cfg_value(file_cfg, "test", "steering_hold_steps", 12))
+    cfg.random_steer_test_seed = int(_cfg_value(file_cfg, "test", "seed", 123))
     cfg.capture_camera_enabled = bool(args_cli.video)
     cfg.capture_camera_width = int(args_cli.video_width)
     cfg.capture_camera_height = int(args_cli.video_height)
@@ -358,6 +476,45 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.student_usd_path = str(Path(args_cli.student_usd or DEFAULT_STUDENT_VEHICLE_USD).expanduser().resolve())
     if str(args_cli.tunable_config_json):
         cfg.tunable_config_json = str(Path(args_cli.tunable_config_json).expanduser().resolve())
+    if cfg.test_mode == "collision_test":
+        if cfg.scene.num_envs != 1:
+            print("[INFO][SceneFactory] collision_test forces num_envs=1.")
+        cfg.scene.num_envs = 1
+        if int(args_cli.num_agents_per_env) != 2:
+            print("[INFO][SceneFactory] collision_test forces num_agents_per_env=2.")
+        args_cli.num_agents_per_env = 2
+        if cfg.use_scene_factory_roads:
+            print(
+                "[INFO][SceneFactory] collision_test disables SceneFactory roads and uses a flat plane "
+                "to isolate vehicle-vehicle contact and rendering."
+            )
+        cfg.use_scene_factory_roads = False
+        if bool(args_cli.video) and not bool(args_cli.use_fabric):
+            print("[INFO][SceneFactory] collision_test enables Fabric for headless vehicle video capture.")
+        cfg.sim.use_fabric = True if bool(args_cli.video) else bool(args_cli.use_fabric)
+    elif cfg.test_mode == "scene_factory_collision_test":
+        if cfg.scene.num_envs != 1:
+            print("[INFO][SceneFactory] scene_factory_collision_test forces num_envs=1.")
+        cfg.scene.num_envs = 1
+        if int(args_cli.num_agents_per_env) != 2:
+            print("[INFO][SceneFactory] scene_factory_collision_test forces num_agents_per_env=2.")
+        args_cli.num_agents_per_env = 2
+        if not cfg.use_scene_factory_roads:
+            print("[INFO][SceneFactory] scene_factory_collision_test enables SceneFactory roads.")
+        cfg.use_scene_factory_roads = True
+        if bool(args_cli.video) and not bool(args_cli.use_fabric):
+            print("[INFO][SceneFactory] scene_factory_collision_test enables Fabric for headless vehicle video capture.")
+        cfg.sim.use_fabric = True if bool(args_cli.video) else bool(args_cli.use_fabric)
+    elif cfg.test_mode == "scene_factory_multiworld_random_steer_test":
+        if not cfg.use_scene_factory_roads:
+            print("[INFO][SceneFactory] scene_factory_multiworld_random_steer_test enables SceneFactory roads.")
+        cfg.use_scene_factory_roads = True
+        if bool(args_cli.video) and not bool(args_cli.use_fabric):
+            print(
+                "[INFO][SceneFactory] scene_factory_multiworld_random_steer_test enables Fabric "
+                "for headless vehicle video capture."
+            )
+        cfg.sim.use_fabric = True if bool(args_cli.video) else bool(args_cli.use_fabric)
     configure_multi_agent_spaces(cfg, int(args_cli.num_agents_per_env))
     return cfg
 
@@ -436,6 +593,35 @@ def _build_resolved_config(
             "config_path": str(env_cfg.scene_factory_config_path),
             "world_index": int(env_cfg.scene_factory_world_index),
         },
+        "observation": {
+            "weather_context_enable": bool(env_cfg.obs_weather_context_enable),
+            "road_points_enable": bool(env_cfg.obs_road_points_enable),
+            "road_points_k": int(env_cfg.obs_road_points_k),
+            "road_points_radius_m": float(env_cfg.obs_road_points_radius_m),
+            "road_points_type_norm": float(env_cfg.obs_road_points_type_norm),
+            "road_points_mode": str(env_cfg.obs_road_points_mode),
+            "road_points_include_dirs": bool(env_cfg.obs_road_points_include_dirs),
+            "neighbor_enable": bool(env_cfg.obs_neighbor_enable),
+            "neighbor_k": int(env_cfg.obs_neighbor_k),
+            "neighbor_include_ttc": bool(env_cfg.obs_neighbor_include_ttc),
+            "neighbor_ttc_max_s": float(env_cfg.obs_neighbor_ttc_max_s),
+        },
+        "test": {
+            "mode": str(env_cfg.test_mode),
+            "collision_force_threshold_n": float(env_cfg.agent_collision_force_threshold_n),
+            "post_collision_steps": int(env_cfg.collision_test_post_collision_steps),
+            "post_collision_throttle": float(env_cfg.collision_test_post_collision_throttle),
+            "post_collision_steering": float(env_cfg.collision_test_post_collision_steering),
+            "post_collision_brake": float(env_cfg.collision_test_post_collision_brake),
+            "settle_steps": int(env_cfg.random_steer_test_settle_steps),
+            "drive_steps": int(env_cfg.random_steer_test_drive_steps),
+            "throttle": float(env_cfg.random_steer_test_throttle),
+            "brake": float(env_cfg.random_steer_test_brake),
+            "steering_min": float(env_cfg.random_steer_test_steering_min),
+            "steering_max": float(env_cfg.random_steer_test_steering_max),
+            "steering_hold_steps": int(env_cfg.random_steer_test_steering_hold_steps),
+            "seed": int(env_cfg.random_steer_test_seed),
+        },
         "assets": {
             "student_usd": str(env_cfg.student_usd_path),
             "tunable_config_json": str(env_cfg.tunable_config_json),
@@ -471,6 +657,7 @@ def _build_resolved_config(
             "rl_device": str(runner_cfg.device),
             "headless": bool(getattr(args_cli, "headless", False)),
             "enable_cameras": bool(getattr(args_cli, "enable_cameras", False)),
+            "silence_runtime_warnings": bool(getattr(args_cli, "silence_runtime_warnings", False)),
         },
     }
 
@@ -492,18 +679,43 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "use_scene_factory_roads": env_cfg.use_scene_factory_roads,
             "scene_factory_config_path": env_cfg.scene_factory_config_path,
             "scene_factory_world_index": env_cfg.scene_factory_world_index,
+            "test_mode": env_cfg.test_mode,
+            "collision_test_post_collision_steps": env_cfg.collision_test_post_collision_steps,
+            "collision_test_post_collision_throttle": env_cfg.collision_test_post_collision_throttle,
+            "collision_test_post_collision_steering": env_cfg.collision_test_post_collision_steering,
+            "collision_test_post_collision_brake": env_cfg.collision_test_post_collision_brake,
+            "random_steer_test_settle_steps": env_cfg.random_steer_test_settle_steps,
+            "random_steer_test_drive_steps": env_cfg.random_steer_test_drive_steps,
+            "random_steer_test_throttle": env_cfg.random_steer_test_throttle,
+            "random_steer_test_brake": env_cfg.random_steer_test_brake,
+            "random_steer_test_steering_min": env_cfg.random_steer_test_steering_min,
+            "random_steer_test_steering_max": env_cfg.random_steer_test_steering_max,
+            "random_steer_test_steering_hold_steps": env_cfg.random_steer_test_steering_hold_steps,
+            "random_steer_test_seed": env_cfg.random_steer_test_seed,
             "start_radius_m": env_cfg.start_radius_m,
             "agent_spawn_circle_radius_m": env_cfg.agent_spawn_circle_radius_m,
             "agent_spawn_jitter_m": env_cfg.agent_spawn_jitter_m,
             "env_spacing": env_cfg.scene.env_spacing,
             "replicate_physics": env_cfg.scene.replicate_physics,
             "clone_in_fabric": env_cfg.scene.clone_in_fabric,
+            "agent_collision_force_threshold_n": env_cfg.agent_collision_force_threshold_n,
             "episode_length_s": env_cfg.episode_length_s,
             "goal_radius_min_m": env_cfg.goal_radius_min_m,
             "goal_radius_max_m": env_cfg.goal_radius_max_m,
             "max_distance_from_origin_m": env_cfg.max_distance_from_origin_m,
             "agent_neighbor_obs_scale_m": env_cfg.agent_neighbor_obs_scale_m,
             "observation_mode": env_cfg.observation_mode,
+            "obs_weather_context_enable": env_cfg.obs_weather_context_enable,
+            "obs_road_points_enable": env_cfg.obs_road_points_enable,
+            "obs_road_points_k": env_cfg.obs_road_points_k,
+            "obs_road_points_radius_m": env_cfg.obs_road_points_radius_m,
+            "obs_road_points_type_norm": env_cfg.obs_road_points_type_norm,
+            "obs_road_points_mode": env_cfg.obs_road_points_mode,
+            "obs_road_points_include_dirs": env_cfg.obs_road_points_include_dirs,
+            "obs_neighbor_enable": env_cfg.obs_neighbor_enable,
+            "obs_neighbor_k": env_cfg.obs_neighbor_k,
+            "obs_neighbor_include_ttc": env_cfg.obs_neighbor_include_ttc,
+            "obs_neighbor_ttc_max_s": env_cfg.obs_neighbor_ttc_max_s,
         },
         "runner_cfg": runner_cfg.to_dict(),
         "video_cfg": {
@@ -516,6 +728,9 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "fps": int(args_cli.video_fps),
             "view_mode": str(args_cli.video_view_mode),
             "env_index": int(args_cli.video_env_index),
+        },
+        "app_cfg": {
+            "silence_runtime_warnings": bool(getattr(args_cli, "silence_runtime_warnings", False)),
         },
     }
     (run_dir / "params" / "run.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -653,6 +868,310 @@ def _maybe_wrap_video(env, capture_env: StudentVehicleMultiAgentGoalEnv, run_dir
     return SensorVideoRecorderWrapper(env, capture_env=capture_env, run_dir=run_dir)
 
 
+def _collision_test_action_dict(
+    env: StudentVehicleMultiAgentGoalEnv,
+    throttle: float,
+    steering: float,
+    brake: float,
+) -> dict[str, torch.Tensor]:
+    action = torch.tensor(
+        [float(throttle), float(steering), float(brake)],
+        dtype=torch.float32,
+        device=env.device,
+    ).unsqueeze(0).repeat(env.num_envs, 1)
+    return {agent_id: action.clone() for agent_id in env.cfg.possible_agents}
+
+
+def _action_dict_from_components(
+    env: StudentVehicleMultiAgentGoalEnv,
+    throttle_by_agent: torch.Tensor,
+    steering_by_agent: torch.Tensor,
+    brake_by_agent: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    action_dict: dict[str, torch.Tensor] = {}
+    for agent_idx, agent_id in enumerate(env.cfg.possible_agents):
+        action_dict[agent_id] = torch.stack(
+            [
+                throttle_by_agent[agent_idx],
+                steering_by_agent[agent_idx],
+                brake_by_agent[agent_idx],
+            ],
+            dim=-1,
+        ).to(device=env.device, dtype=torch.float32)
+    return action_dict
+
+
+def _run_collision_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> None:
+    import imageio.v2 as imageio
+
+    test_mode_name = str(env.cfg.test_mode).strip().lower() or "collision_test"
+    metrics_path = run_dir / f"{test_mode_name}_metrics.jsonl"
+    summary_path = run_dir / f"{test_mode_name}_summary.json"
+    video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_writer = None
+    if bool(args_cli.video):
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+
+    def _write_frame() -> None:
+        if video_writer is None:
+            return
+        frame = env.capture_fixed_camera_frame()
+        if frame is not None:
+            video_writer.append_data(frame)
+
+    print(f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout.", flush=True)
+    obs, extras = env.reset()
+    _write_frame()
+    collision_step: int | None = None
+    max_collision_force_n = 0.0
+    raw_max_collision_force_n = 0.0
+    collision_detection_armed_step = int(env.cfg.collision_test_settle_steps)
+    total_steps = int(
+        env.cfg.collision_test_settle_steps
+        + env.cfg.collision_test_drive_steps
+        + env.cfg.collision_test_post_collision_steps
+    )
+    frames_written = 1
+    post_collision_steps_remaining = int(env.cfg.collision_test_post_collision_steps)
+
+    with metrics_path.open("w", encoding="utf-8") as handle:
+        for step in range(total_steps):
+            if step < int(env.cfg.collision_test_settle_steps):
+                action_dict = _collision_test_action_dict(env, throttle=0.0, steering=0.0, brake=0.0)
+            elif collision_step is not None:
+                action_dict = _collision_test_action_dict(
+                    env,
+                    throttle=float(env.cfg.collision_test_post_collision_throttle),
+                    steering=float(env.cfg.collision_test_post_collision_steering),
+                    brake=float(env.cfg.collision_test_post_collision_brake),
+                )
+            else:
+                action_dict = _collision_test_action_dict(
+                    env,
+                    throttle=float(env.cfg.collision_test_throttle),
+                    steering=float(env.cfg.collision_test_steering),
+                    brake=float(env.cfg.collision_test_brake),
+                )
+
+            obs, rewards, terminated, time_outs, extras = env.step(action_dict)
+            _write_frame()
+            frames_written += 1
+
+            collision_force_by_agent = env.collision_force_by_agent_n()
+            collision_world_force = env.collision_world_force_n()
+            lane_touch_types_by_agent = env.lane_touch_types_by_agent()
+            raw_collision_detected = bool(
+                torch.any(collision_world_force >= float(env.cfg.agent_collision_force_threshold_n))
+            )
+            raw_max_collision_force_n = max(raw_max_collision_force_n, float(collision_world_force.max().item()))
+            collision_detected = raw_collision_detected and step >= collision_detection_armed_step
+            if collision_detected:
+                max_collision_force_n = max(max_collision_force_n, float(collision_world_force.max().item()))
+            if collision_detected and collision_step is None:
+                collision_step = step
+                print(
+                    f"[INFO][SceneFactory] {test_mode_name} detected contact at "
+                    f"step={step} force_n={float(collision_world_force.max().item()):.2f}",
+                    flush=True,
+                )
+            elif collision_step is not None:
+                post_collision_steps_remaining -= 1
+
+            step_record: dict[str, Any] = {
+                "step": int(step),
+                "collision_detection_armed": bool(step >= collision_detection_armed_step),
+                "raw_collision_detected": raw_collision_detected,
+                "collision_detected": collision_detected,
+                "collision_step": collision_step,
+                "post_collision_steps_remaining": int(max(post_collision_steps_remaining, 0)),
+                "collision_world_force_n": [float(x) for x in collision_world_force.detach().cpu().tolist()],
+                "terminated": {agent_id: bool(terminated[agent_id][0].item()) for agent_id in env.cfg.possible_agents},
+                "time_outs": {agent_id: bool(time_outs[agent_id][0].item()) for agent_id in env.cfg.possible_agents},
+                "rewards": {agent_id: float(rewards[agent_id][0].item()) for agent_id in env.cfg.possible_agents},
+                "agents": {},
+            }
+            for agent_idx, agent_id in enumerate(env.cfg.possible_agents):
+                vehicle = env._vehicles[agent_idx]
+                root_pos_w = vehicle.data.root_pos_w[0]
+                root_lin_vel_w = vehicle.data.root_lin_vel_w[0]
+                step_record["agents"][agent_id] = {
+                    "root_pos_w": [float(x) for x in root_pos_w.detach().cpu().tolist()],
+                    "root_lin_vel_w": [float(x) for x in root_lin_vel_w.detach().cpu().tolist()],
+                    "planar_speed_mps": float(torch.linalg.norm(root_lin_vel_w[:2]).item()),
+                    "goal_distance_m": float(env._current_goal_distance[agent_idx, 0].item()),
+                    "collision_force_n": float(collision_force_by_agent[agent_id][0].item()),
+                    "lane_touch_types": list(lane_touch_types_by_agent.get(agent_id, [[]])[0]),
+            }
+            handle.write(json.dumps(step_record) + "\n")
+
+            if collision_step is not None and post_collision_steps_remaining <= 0:
+                break
+
+    if video_writer is not None:
+        video_writer.close()
+
+    summary = {
+        "test_mode": test_mode_name,
+        "collision_detection_armed_step": int(collision_detection_armed_step),
+        "collision_detected": collision_step is not None,
+        "collision_step": collision_step,
+        "max_collision_force_n": max_collision_force_n,
+        "raw_max_collision_force_n": raw_max_collision_force_n,
+        "frames_written": int(frames_written),
+        "video_fps": int(args_cli.video_fps) if bool(args_cli.video) else 0,
+        "video_duration_s": float(frames_written / max(1, int(args_cli.video_fps))) if bool(args_cli.video) else 0.0,
+        "metrics_path": str(metrics_path),
+        "video_path": str(video_path) if bool(args_cli.video) else "",
+        "config_path": str(Path(args_cli.config).expanduser().resolve()),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[INFO][SceneFactory] {test_mode_name} finished. "
+        f"collision_detected={summary['collision_detected']} max_force_n={max_collision_force_n:.2f}",
+        flush=True,
+    )
+
+
+def _run_scene_factory_multiworld_random_steer_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> None:
+    import imageio.v2 as imageio
+
+    test_mode_name = str(env.cfg.test_mode).strip().lower() or "scene_factory_multiworld_random_steer_test"
+    metrics_path = run_dir / f"{test_mode_name}_metrics.jsonl"
+    summary_path = run_dir / f"{test_mode_name}_summary.json"
+    video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_writer = None
+    if bool(args_cli.video):
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+
+    def _write_frame() -> None:
+        if video_writer is None:
+            return
+        frame = env.capture_fixed_camera_frame()
+        if frame is not None:
+            video_writer.append_data(frame)
+
+    print(f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout.", flush=True)
+    obs, extras = env.reset()
+    _write_frame()
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(env.cfg.random_steer_test_seed))
+    total_steps = int(env.cfg.random_steer_test_settle_steps + env.cfg.random_steer_test_drive_steps)
+    hold_steps = max(1, int(env.cfg.random_steer_test_steering_hold_steps))
+    steering_min = float(env.cfg.random_steer_test_steering_min)
+    steering_max = float(env.cfg.random_steer_test_steering_max)
+    frames_written = 1
+    max_collision_force_n = 0.0
+    collision_step_count = 0
+    worlds_with_collision: set[int] = set()
+    lane_types_touched_global: set[int] = set()
+    current_steering = torch.zeros((env._num_agents, env.num_envs), dtype=torch.float32, device=env.device)
+
+    with metrics_path.open("w", encoding="utf-8") as handle:
+        for step in range(total_steps):
+            if step < int(env.cfg.random_steer_test_settle_steps):
+                throttle_by_agent = torch.zeros((env._num_agents, env.num_envs), dtype=torch.float32, device=env.device)
+                steering_by_agent = torch.zeros((env._num_agents, env.num_envs), dtype=torch.float32, device=env.device)
+                brake_by_agent = torch.zeros((env._num_agents, env.num_envs), dtype=torch.float32, device=env.device)
+            else:
+                if (step - int(env.cfg.random_steer_test_settle_steps)) % hold_steps == 0:
+                    current_steering = (
+                        steering_min
+                        + (steering_max - steering_min)
+                        * torch.rand((env._num_agents, env.num_envs), generator=generator, dtype=torch.float32)
+                    ).to(env.device)
+                throttle_by_agent = torch.full(
+                    (env._num_agents, env.num_envs),
+                    float(env.cfg.random_steer_test_throttle),
+                    dtype=torch.float32,
+                    device=env.device,
+                )
+                steering_by_agent = current_steering
+                brake_by_agent = torch.full(
+                    (env._num_agents, env.num_envs),
+                    float(env.cfg.random_steer_test_brake),
+                    dtype=torch.float32,
+                    device=env.device,
+                )
+
+            action_dict = _action_dict_from_components(env, throttle_by_agent, steering_by_agent, brake_by_agent)
+            obs, rewards, terminated, time_outs, extras = env.step(action_dict)
+            _write_frame()
+            frames_written += 1
+
+            collision_force_by_agent = env.collision_force_by_agent_n()
+            collision_world_force = env.collision_world_force_n()
+            lane_touch_types_by_agent = env.lane_touch_types_by_agent()
+            collision_world_mask = collision_world_force >= float(env.cfg.agent_collision_force_threshold_n)
+            if bool(torch.any(collision_world_mask).item()):
+                collision_step_count += 1
+                hit_env_ids = torch.nonzero(collision_world_mask, as_tuple=False).view(-1).tolist()
+                for env_id in hit_env_ids:
+                    worlds_with_collision.add(int(env_id))
+            max_collision_force_n = max(max_collision_force_n, float(collision_world_force.max().item()))
+
+            step_record: dict[str, Any] = {
+                "step": int(step),
+                "collision_world_force_n": [float(x) for x in collision_world_force.detach().cpu().tolist()],
+                "collision_world_mask": [bool(x) for x in collision_world_mask.detach().cpu().tolist()],
+                "envs": [],
+            }
+            for env_idx in range(env.num_envs):
+                env_record: dict[str, Any] = {
+                    "env_index": int(env_idx),
+                    "collision_world_force_n": float(collision_world_force[env_idx].item()),
+                    "collision_world": bool(collision_world_mask[env_idx].item()),
+                    "agents": {},
+                }
+                for agent_idx, agent_id in enumerate(env.cfg.possible_agents):
+                    vehicle = env._vehicles[agent_idx]
+                    root_pos_w = vehicle.data.root_pos_w[env_idx]
+                    root_lin_vel_w = vehicle.data.root_lin_vel_w[env_idx]
+                    lane_types = list(lane_touch_types_by_agent.get(agent_id, [[]])[env_idx])
+                    lane_types_touched_global.update(int(t) for t in lane_types)
+                    env_record["agents"][agent_id] = {
+                        "root_pos_w": [float(x) for x in root_pos_w.detach().cpu().tolist()],
+                        "root_lin_vel_w": [float(x) for x in root_lin_vel_w.detach().cpu().tolist()],
+                        "planar_speed_mps": float(torch.linalg.norm(root_lin_vel_w[:2]).item()),
+                        "goal_distance_m": float(env._current_goal_distance[agent_idx, env_idx].item()),
+                        "collision_force_n": float(collision_force_by_agent[agent_id][env_idx].item()),
+                        "lane_touch_types": lane_types,
+                        "steering_cmd": float(steering_by_agent[agent_idx, env_idx].item()),
+                    }
+                step_record["envs"].append(env_record)
+            handle.write(json.dumps(step_record) + "\n")
+
+    if video_writer is not None:
+        video_writer.close()
+
+    summary = {
+        "test_mode": test_mode_name,
+        "num_envs": int(env.num_envs),
+        "num_agents_per_env": int(env._num_agents),
+        "total_steps": int(total_steps),
+        "collision_step_count": int(collision_step_count),
+        "worlds_with_collision": sorted(int(x) for x in worlds_with_collision),
+        "world_collision_count": int(len(worlds_with_collision)),
+        "max_collision_force_n": float(max_collision_force_n),
+        "lane_types_touched_global": sorted(int(x) for x in lane_types_touched_global),
+        "frames_written": int(frames_written),
+        "video_fps": int(args_cli.video_fps) if bool(args_cli.video) else 0,
+        "video_duration_s": float(frames_written / max(1, int(args_cli.video_fps))) if bool(args_cli.video) else 0.0,
+        "metrics_path": str(metrics_path),
+        "video_path": str(video_path) if bool(args_cli.video) else "",
+        "config_path": str(Path(args_cli.config).expanduser().resolve()),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[INFO][SceneFactory] {test_mode_name} finished. "
+        f"world_collision_count={summary['world_collision_count']} "
+        f"max_force_n={summary['max_collision_force_n']:.2f} "
+        f"lane_types={summary['lane_types_touched_global']}",
+        flush=True,
+    )
+
+
 def main():
     env_cfg = _build_env_cfg()
     runner_cfg = _build_runner_cfg(env_cfg.sim.device)
@@ -662,19 +1181,33 @@ def main():
 
     start_time = time.time()
     base_env = StudentVehicleMultiAgentGoalEnv(env_cfg, render_mode=None)
+    _write_run_metadata(run_dir, env_cfg, runner_cfg)
+    _maybe_save_stage_usd(args_cli.save_stage_usd)
+    if bool(args_cli.exit_after_stage_save):
+        base_env.close()
+        print("[INFO][SceneFactory] Exiting after stage save as requested.")
+        return
+    if str(args_cli.test_mode).strip().lower() in {"collision_test", "scene_factory_collision_test"}:
+        try:
+            _run_collision_test(base_env, run_dir)
+        finally:
+            base_env.close()
+            print(f"[INFO] Collision test finished in {time.time() - start_time:.2f}s")
+        return
+    if str(args_cli.test_mode).strip().lower() == "scene_factory_multiworld_random_steer_test":
+        try:
+            _run_scene_factory_multiworld_random_steer_test(base_env, run_dir)
+        finally:
+            base_env.close()
+            print(f"[INFO] Random steer test finished in {time.time() - start_time:.2f}s")
+        return
+
     env = base_env
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
         _patch_single_agent_marl_observation_bridge(env)
     env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
     env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
-
-    _write_run_metadata(run_dir, env_cfg, runner_cfg)
-    _maybe_save_stage_usd(args_cli.save_stage_usd)
-    if bool(args_cli.exit_after_stage_save):
-        env.close()
-        print("[INFO][SceneFactory] Exiting after stage save as requested.")
-        return
 
     runner = OnPolicyRunner(env, runner_cfg.to_dict(), log_dir=str(run_dir), device=str(runner_cfg.device))
     runner.add_git_repo_to_log(__file__)

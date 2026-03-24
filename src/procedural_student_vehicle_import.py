@@ -109,6 +109,10 @@ def _vehicle_collision_material_bind_targets(asset_root_path: str) -> dict[str, 
     }
 
 
+def _vehicle_subtree_should_be_deinstanced(*, prim_name: str, has_references: bool, is_instanceable: bool) -> bool:
+    return bool(is_instanceable and has_references and prim_name in {"visuals", "collisions"})
+
+
 def _rewrite_layer_material_bindings(
     layer,
     *,
@@ -190,6 +194,148 @@ def _author_vehicle_physics_materials(vehicle_stage, *, asset_root_path: str) ->
         UsdShade.MaterialBindingAPI(link_prim).Bind(chassis_material)
 
     return material_paths
+
+
+def _deinstance_vehicle_reference_subtrees(vehicle_stage, *, asset_root_path: str) -> int:
+    from pxr import Usd
+
+    asset_root_prim = vehicle_stage.GetPrimAtPath(str(asset_root_path))
+    if not asset_root_prim.IsValid():
+        raise RuntimeError(f"Vehicle asset root does not exist in exported stage: {asset_root_path}")
+
+    changed_count = 0
+    for prim in Usd.PrimRange(asset_root_prim):
+        if not prim.IsValid():
+            continue
+        if _vehicle_subtree_should_be_deinstanced(
+            prim_name=prim.GetName(),
+            has_references=prim.HasAuthoredReferences(),
+            is_instanceable=prim.IsInstanceable(),
+        ):
+            prim.SetInstanceable(False)
+            changed_count += 1
+    return changed_count
+
+
+def _inline_vehicle_reference_subtrees(vehicle_stage, *, asset_root_path: str) -> int:
+    from pxr import Sdf, Usd
+
+    layer = vehicle_stage.GetRootLayer()
+    asset_root_prim = vehicle_stage.GetPrimAtPath(str(asset_root_path))
+    if not asset_root_prim.IsValid():
+        raise RuntimeError(f"Vehicle asset root does not exist in exported stage: {asset_root_path}")
+
+    changed_count = 0
+
+    def _reference_prim_path(prim_spec) -> Sdf.Path | None:
+        list_op = prim_spec.referenceList
+        for attr_name in ("explicitItems", "prependedItems", "appendedItems", "addedItems", "orderedItems"):
+            ref_items = list(getattr(list_op, attr_name, []) or [])
+            if ref_items:
+                ref_path = ref_items[0].primPath
+                if ref_path and not ref_path.isEmpty:
+                    return ref_path
+        return None
+
+    for prim in Usd.PrimRange(asset_root_prim):
+        if not prim.IsValid():
+            continue
+        prim_path = prim.GetPath()
+        prim_spec = layer.GetPrimAtPath(prim_path)
+        if prim_spec is None:
+            continue
+        if not _vehicle_subtree_should_be_deinstanced(
+            prim_name=prim.GetName(),
+            has_references=prim.HasAuthoredReferences(),
+            is_instanceable=prim.IsInstanceable(),
+        ):
+            continue
+
+        source_ref_path = _reference_prim_path(prim_spec)
+        if source_ref_path is None:
+            prim.SetInstanceable(False)
+            changed_count += 1
+            continue
+
+        source_ref_prim = vehicle_stage.GetPrimAtPath(source_ref_path)
+        source_ref_spec = layer.GetPrimAtPath(source_ref_path)
+        if not source_ref_prim.IsValid() and source_ref_spec is None:
+            raise RuntimeError(f"Vehicle subtree reference target is missing: {source_ref_path}")
+
+        copied_any_child = False
+        if source_ref_spec is not None:
+            for child_spec in source_ref_spec.nameChildren.values():
+                dest_child_path = prim_path.AppendChild(child_spec.name)
+                if layer.GetPrimAtPath(dest_child_path) is None:
+                    if not Sdf.CopySpec(layer, child_spec.path, layer, dest_child_path):
+                        raise RuntimeError(f"Failed to inline {child_spec.path} into {dest_child_path}")
+                copied_any_child = True
+
+        if not copied_any_child:
+            # Some references point directly at a leaf prim rather than a container prim.
+            # In that case we inline that leaf under visuals/collisions as <leaf-name>.
+            dest_name = source_ref_path.name
+            dest_child_path = prim_path.AppendChild(dest_name)
+            if layer.GetPrimAtPath(dest_child_path) is None:
+                if not Sdf.CopySpec(layer, source_ref_path, layer, dest_child_path):
+                    raise RuntimeError(f"Failed to inline {source_ref_path} into {dest_child_path}")
+
+        prim.GetReferences().ClearReferences()
+        prim.SetInstanceable(False)
+        changed_count += 1
+
+    return changed_count
+
+
+def _validate_vehicle_subtrees_populated(vehicle_stage, *, asset_root_path: str) -> None:
+    from pxr import Usd
+
+    asset_root_prim = vehicle_stage.GetPrimAtPath(str(asset_root_path))
+    if not asset_root_prim.IsValid():
+        raise RuntimeError(f"Vehicle asset root does not exist in exported stage: {asset_root_path}")
+
+    empty_subtrees: list[str] = []
+    for prim in Usd.PrimRange(asset_root_prim):
+        if not prim.IsValid():
+            continue
+        prim_name = prim.GetName()
+        if prim_name not in {"visuals", "collisions"}:
+            continue
+        parent_name = prim.GetParent().GetName() if prim.GetParent().IsValid() else ""
+        if prim_name == "collisions" and parent_name not in {
+            "base_link",
+            "front_left_wheel_link",
+            "front_right_wheel_link",
+            "rear_left_wheel_link",
+            "rear_right_wheel_link",
+        }:
+            continue
+        if prim.HasAuthoredReferences():
+            continue
+        if any(True for _ in prim.GetChildren()):
+            continue
+        empty_subtrees.append(str(prim.GetPath()))
+
+    if empty_subtrees:
+        joined_paths = ", ".join(empty_subtrees[:8])
+        if len(empty_subtrees) > 8:
+            joined_paths += ", ..."
+        raise RuntimeError(
+            "Exported vehicle asset contains empty visuals/collisions subtrees after reference rewrite: "
+            f"{joined_paths}"
+        )
+
+
+def _remove_flattened_prototypes(vehicle_stage) -> int:
+    removed_count = 0
+    root_children = list(vehicle_stage.GetPseudoRoot().GetChildren())
+    for prim in root_children:
+        if not prim.IsValid():
+            continue
+        if prim.GetName().startswith("Flattened_Prototype_"):
+            vehicle_stage.RemovePrim(prim.GetPath())
+            removed_count += 1
+    return removed_count
 
 
 def main() -> int:
@@ -345,6 +491,10 @@ def main() -> int:
             if not vehicle_root_prim.IsValid():
                 raise RuntimeError(f"Vehicle asset root does not exist in exported stage: {asset_root_path}")
             _author_vehicle_physics_materials(vehicle_stage, asset_root_path=str(asset_root_path))
+            _inline_vehicle_reference_subtrees(vehicle_stage, asset_root_path=str(asset_root_path))
+            _deinstance_vehicle_reference_subtrees(vehicle_stage, asset_root_path=str(asset_root_path))
+            _validate_vehicle_subtrees_populated(vehicle_stage, asset_root_path=str(asset_root_path))
+            _remove_flattened_prototypes(vehicle_stage)
             vehicle_stage.SetDefaultPrim(vehicle_root_prim)
             vehicle_stage.GetRootLayer().Save()
             return output_path, str(asset_root_path)

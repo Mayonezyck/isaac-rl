@@ -36,6 +36,10 @@ _DEFAULT_TUNABLE_CONFIG_CANDIDATES = (
     "artifacts/student_vehicle_sysid/fwd_v1_staged_cem_anchor_overnight/best_config.json",
     "artifacts/student_vehicle_sysid/fwd_v1_staged_cem_big/best_config.json",
 )
+_GOAL_MARKER_POLE_SIZE = (0.34, 0.34, 2.20)
+_GOAL_MARKER_POLE_CENTER_Z_M = 1.10
+_GOAL_MARKER_CAP_RADIUS_M = 0.52
+_GOAL_MARKER_CAP_CENTER_Z_M = 2.15
 
 
 def _default_tunable_config_json() -> str:
@@ -43,6 +47,49 @@ def _default_tunable_config_json() -> str:
         if Path(candidate).is_file():
             return candidate
     return ""
+
+
+def build_goal_beacon_marker(prim_path: str) -> VisualizationMarkers:
+    marker_cfg = CUBOID_MARKER_CFG.copy()
+    marker_cfg.markers = {
+        "pole": sim_utils.CuboidCfg(
+            size=_GOAL_MARKER_POLE_SIZE,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.48, 0.08),
+                emissive_color=(0.35, 0.12, 0.02),
+                roughness=0.18,
+                metallic=0.0,
+            ),
+        ),
+        "cap": sim_utils.SphereCfg(
+            radius=_GOAL_MARKER_CAP_RADIUS_M,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.12, 1.0, 0.28),
+                emissive_color=(0.05, 0.42, 0.10),
+                roughness=0.10,
+                metallic=0.0,
+            ),
+        ),
+    }
+    marker_cfg.prim_path = str(prim_path)
+    return VisualizationMarkers(marker_cfg)
+
+
+def goal_beacon_visualization(goal_positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return marker positions and prototype indices for a tall goal beacon."""
+    pole_positions = goal_positions.clone()
+    cap_positions = goal_positions.clone()
+    pole_positions[:, 2] += float(_GOAL_MARKER_POLE_CENTER_Z_M)
+    cap_positions[:, 2] += float(_GOAL_MARKER_CAP_CENTER_Z_M)
+    positions = torch.cat([pole_positions, cap_positions], dim=0)
+    marker_indices = torch.cat(
+        [
+            torch.zeros(goal_positions.shape[0], dtype=torch.int32, device=goal_positions.device),
+            torch.ones(goal_positions.shape[0], dtype=torch.int32, device=goal_positions.device),
+        ],
+        dim=0,
+    )
+    return positions, marker_indices
 
 
 def build_student_vehicle_articulation_cfg(
@@ -54,6 +101,7 @@ def build_student_vehicle_articulation_cfg(
         prim_path=str(prim_path),
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(Path(usd_path).expanduser().resolve()),
+            activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 max_linear_velocity=200.0,
@@ -406,7 +454,7 @@ class StudentVehicleGoalEnv(DirectRLEnv):
             * float(self._dry_lateral_scale)
             * self.vehicle.data.root_ang_vel_b[:, 2]
         )
-        self.vehicle.set_external_force_and_torque(
+        self.vehicle.permanent_wrench_composer.set_forces_and_torques(
             forces=self._external_forces,
             torques=self._external_torques,
             body_ids=self._base_body_ids,
@@ -583,7 +631,7 @@ class StudentVehicleGoalEnv(DirectRLEnv):
         self.vehicle.write_root_velocity_to_sim(root_state[:, 7:], env_ids)
         self.vehicle.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self.vehicle.set_joint_effort_target(self._joint_effort_targets[env_ids], env_ids=env_ids)
-        self.vehicle.set_external_force_and_torque(
+        self.vehicle.permanent_wrench_composer.set_forces_and_torques(
             forces=self._external_forces[env_ids],
             torques=self._external_torques[env_ids],
             body_ids=self._base_body_ids,
@@ -594,10 +642,7 @@ class StudentVehicleGoalEnv(DirectRLEnv):
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
             if not hasattr(self, "_goal_marker"):
-                marker_cfg = CUBOID_MARKER_CFG.copy()
-                marker_cfg.markers["cuboid"].size = (0.35, 0.35, 0.10)
-                marker_cfg.prim_path = "/Visuals/GoalMarker"
-                self._goal_marker = VisualizationMarkers(marker_cfg)
+                self._goal_marker = build_goal_beacon_marker("/Visuals/GoalMarker")
             self._goal_marker.set_visibility(True)
         else:
             if hasattr(self, "_goal_marker"):
@@ -605,7 +650,8 @@ class StudentVehicleGoalEnv(DirectRLEnv):
 
     def _debug_vis_callback(self, event):
         if hasattr(self, "_goal_marker"):
-            self._goal_marker.visualize(self._goal_pos_w)
+            marker_positions, marker_indices = goal_beacon_visualization(self._goal_pos_w)
+            self._goal_marker.visualize(marker_positions, marker_indices=marker_indices)
 
     @property
     def tunable_config(self) -> StudentTunableConfig:

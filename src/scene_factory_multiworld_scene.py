@@ -246,24 +246,51 @@ def _spawn_goal_marker(
     height_m: float,
 ) -> None:
     import isaaclab.sim as sim_utils
+    from pxr import UsdGeom
 
-    goal_cfg = sim_utils.CylinderCfg(
-        radius=float(radius_m),
-        height=float(height_m),
+    root = UsdGeom.Xform.Define(sim_utils.get_current_stage(), prim_path)
+    pole_cfg = sim_utils.CylinderCfg(
+        radius=max(0.18, 0.35 * float(radius_m)),
+        height=max(2.0, 9.0 * float(height_m)),
         axis="Z",
         collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         rigid_props=None,
         visual_material=sim_utils.PreviewSurfaceCfg(
-            diffuse_color=(0.2, 0.85, 0.2),
-            emissive_color=(0.05, 0.20, 0.05),
-            roughness=0.3,
+            diffuse_color=(1.0, 0.48, 0.08),
+            emissive_color=(0.35, 0.12, 0.02),
+            roughness=0.18,
             metallic=0.0,
         ),
     )
-    goal_cfg.func(
-        prim_path,
-        goal_cfg,
-        translation=(float(goal_local_xyz[0]), float(goal_local_xyz[1]), float(goal_local_xyz[2]) + 0.5 * float(height_m)),
+    pole_height = max(2.0, 9.0 * float(height_m))
+    pole_cfg.func(
+        f"{prim_path}/Pole",
+        pole_cfg,
+        translation=(
+            float(goal_local_xyz[0]),
+            float(goal_local_xyz[1]),
+            float(goal_local_xyz[2]) + 0.5 * pole_height,
+        ),
+    )
+    cap_cfg = sim_utils.SphereCfg(
+        radius=max(0.55, 1.2 * float(radius_m)),
+        collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        rigid_props=None,
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.12, 1.0, 0.28),
+            emissive_color=(0.05, 0.42, 0.10),
+            roughness=0.10,
+            metallic=0.0,
+        ),
+    )
+    cap_cfg.func(
+        f"{prim_path}/Cap",
+        cap_cfg,
+        translation=(
+            float(goal_local_xyz[0]),
+            float(goal_local_xyz[1]),
+            float(goal_local_xyz[2]) + pole_height + max(0.35, 0.6 * float(radius_m)),
+        ),
     )
 
 
