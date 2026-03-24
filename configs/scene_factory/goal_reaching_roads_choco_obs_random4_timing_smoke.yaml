@@ -1,22 +1,17 @@
-# SceneFactory road-goal-reaching training preset with choco/gpudrive-style observations.
+# SceneFactory smoke-training preset:
+# - 4 parallel envs
+# - 4 random SceneFactory worlds (reproducible via seed)
+# - full choco/gpudrive-style observations
+# - terminal timing prints for observation build cost
+#
 # Usage:
 #   CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 conda run -n isaac-pytorch python -u \
 #     -m src.train_student_vehicle_goal_multiagent_rsl_rl \
-#     --config configs/scene_factory/goal_reaching_roads_choco_obs_train.yaml \
+#     --config configs/scene_factory/goal_reaching_roads_choco_obs_random4_timing_smoke.yaml \
 #     --headless
-#
-# Observation structure:
-# - ego / goal core:
-#   [rel_goal_x_ego, rel_goal_y_ego, heading_error_sin, heading_error_cos, dist_to_goal, vx_ego, vy_ego]
-# - weather context:
-#   [water_film_norm, road_is_ac, road_is_sma, road_is_ogfc]
-# - road-point context:
-#   K nearest road samples with [rel_x, rel_y, road_type, dir_x_ego, dir_y_ego]
-# - neighbor context:
-#   K nearest vehicles with [rel_x, rel_y, length, width, rel_yaw, speed, ttc, neighbor_index]
 
 env:
-  num_envs: 16
+  num_envs: 4
   num_agents_per_env: 2
   observation_mode: "choco_reference"
   env_spacing: 240.0
@@ -26,7 +21,7 @@ env:
   start_radius_m: 0.0
   agent_spawn_circle_radius_m: 0.0
   agent_spawn_jitter_m: 0.05
-  episode_length_s: 40.0
+  episode_length_s: 30.0
   goal_radius_min_m: 5.0
   goal_radius_max_m: 30.0
   max_distance_from_origin_m: 100.0
@@ -37,6 +32,8 @@ env:
 scene_factory:
   config_path: "configs/scene_factory/multiworld_scene.yaml"
   world_index: 0
+  world_selection_mode: "random_envs"
+  random_world_seed: 42
 
 observation:
   weather_context_enable: true
@@ -51,14 +48,8 @@ observation:
   neighbor_include_ttc: true
   neighbor_include_index: true
   neighbor_ttc_max_s: 10.0
-
-reward:
-  lane_center_enable: true
-  lane_center_types: [1, 2]
-  lane_center_per_step: 0.05
-  lane_forbidden_enable: true
-  lane_forbidden_types: [15, 16]
-  lane_forbidden_penalty: -30.0
+  timing_print_enable: true
+  timing_print_every_n: 8
 
 assets:
   student_usd: "artifacts/student_vehicle_assets/vehicle_only_smoke/student_fwd_vehicle.usd"
@@ -68,10 +59,10 @@ runner:
   log_dir: "logs/rsl_rl"
   seed: 42
   experiment_name: "scene_factory_goal_reaching_roads"
-  run_name: "choco_reference_obs"
-  max_iterations: 300
+  run_name: "choco_obs_random4_timing_smoke"
+  max_iterations: 5
   num_steps_per_env: 32
-  save_interval: 25
+  save_interval: 5
   learning_rate: 3.0e-4
   num_learning_epochs: 5
   num_mini_batches: 4
@@ -82,3 +73,4 @@ runner:
 app:
   device: "cuda:0"
   rl_device: "cuda:0"
+  silence_runtime_warnings: true

@@ -4,6 +4,8 @@ from dataclasses import asdict
 import json
 import math
 from pathlib import Path
+import random
+from time import perf_counter
 from typing import Sequence
 
 import gymnasium as gym
@@ -217,8 +219,13 @@ def _reference_road_point_feat_dim(include_dirs: bool) -> int:
     return 5 if bool(include_dirs) else 3
 
 
-def _reference_vehicle_feat_dim(include_ttc: bool) -> int:
-    return 7 if bool(include_ttc) else 6
+def _reference_vehicle_feat_dim(include_ttc: bool, include_index: bool) -> int:
+    dim = 6
+    if bool(include_ttc):
+        dim += 1
+    if bool(include_index):
+        dim += 1
+    return dim
 
 
 def _reference_observation_dim(cfg: "StudentVehicleMultiAgentGoalEnvCfg") -> int:
@@ -228,7 +235,9 @@ def _reference_observation_dim(cfg: "StudentVehicleMultiAgentGoalEnvCfg") -> int
     if bool(cfg.obs_road_points_enable):
         dim += int(cfg.obs_road_points_k) * int(_reference_road_point_feat_dim(cfg.obs_road_points_include_dirs))
     if bool(cfg.obs_neighbor_enable):
-        dim += int(cfg.obs_neighbor_k) * int(_reference_vehicle_feat_dim(cfg.obs_neighbor_include_ttc))
+        dim += int(cfg.obs_neighbor_k) * int(
+            _reference_vehicle_feat_dim(cfg.obs_neighbor_include_ttc, cfg.obs_neighbor_include_index)
+        )
     return int(dim)
 
 
@@ -306,6 +315,77 @@ def resolve_scene_factory_spawn_subset(cfg: "StudentVehicleMultiAgentGoalEnvCfg"
     return spawns
 
 
+def resolve_scene_factory_env_assignments(cfg: "StudentVehicleMultiAgentGoalEnvCfg"):
+    scene_factory_cfg = _load_yaml(cfg.scene_factory_config_path)
+    world_specs = prepare_stage_world_specs(scene_factory_cfg)
+    if not world_specs:
+        raise RuntimeError(f"No SceneFactory worlds resolved from {cfg.scene_factory_config_path}")
+
+    vehicles_cfg = dict(scene_factory_cfg.get("vehicles", {}) or {})
+    bounds_size_m = float((scene_factory_cfg.get("world", {}) or {}).get("bounds_size_m", 200.0))
+    origin_mode = str((scene_factory_cfg.get("world", {}) or {}).get("origin_mode", "center"))
+    origin_center_mode = str((scene_factory_cfg.get("world", {}) or {}).get("origin_center_mode", "mean"))
+    requested_agents = max(int(cfg.num_agents_per_env), 1)
+    num_envs = max(int(cfg.scene.num_envs), 1)
+    selection_mode = str(getattr(cfg, "scene_factory_world_selection_mode", "fixed")).strip().lower().replace("_", "-")
+    world_seed = int(getattr(cfg, "scene_factory_random_world_seed", cfg.seed if getattr(cfg, "seed", None) is not None else 0))
+
+    if selection_mode == "fixed":
+        requested_world_index = int(cfg.scene_factory_world_index)
+        selected_specs = [world_specs[requested_world_index % len(world_specs)] for _ in range(num_envs)]
+    elif selection_mode == "random-envs":
+        rng = random.Random(world_seed)
+        order = list(range(len(world_specs)))
+        selected_specs = []
+        while len(selected_specs) < num_envs:
+            rng.shuffle(order)
+            for spec_idx in order:
+                selected_specs.append(world_specs[spec_idx])
+                if len(selected_specs) >= num_envs:
+                    break
+    else:
+        raise ValueError(f"Unsupported scene_factory_world_selection_mode: {selection_mode!r}")
+
+    per_env_spawns: list[list] = []
+    per_env_specs: list = []
+    min_available = requested_agents
+    for env_index, world_spec in enumerate(selected_specs):
+        spawns = extract_vehicle_spawns_from_json(
+            world_spec.scene_json_path,
+            bounds_size_m=bounds_size_m,
+            origin_mode=origin_mode,
+            origin_center_mode=origin_center_mode,
+            max_controllable=requested_agents,
+            require_goal_in_bounds=bool(vehicles_cfg.get("require_goal_in_bounds", True)),
+            skip_if_start_in_goal=bool(vehicles_cfg.get("skip_if_start_in_goal", True)),
+            goal_radius_m=float(vehicles_cfg.get("goal_radius_m", cfg.goal_reached_threshold_m)),
+            start_goal_thresh_m=vehicles_cfg.get("start_goal_thresh_m"),
+        )
+        if len(spawns) <= 0:
+            raise RuntimeError(
+                "SceneFactory source world does not provide any controllable spawns "
+                f"for env_{env_index}: {world_spec.scene_json_name}"
+            )
+        min_available = min(min_available, len(spawns))
+        per_env_specs.append(world_spec)
+        per_env_spawns.append(list(spawns))
+
+    if min_available < requested_agents:
+        print(
+            "[WARN] SceneFactory selected worlds provide fewer controllable spawns than requested: "
+            f"requested={requested_agents}, available_min={min_available}. Training with {min_available} agents."
+        )
+
+    num_agents = min(requested_agents, min_available)
+    trimmed_spawns = [spawns[:num_agents] for spawns in per_env_spawns]
+    scenes = ", ".join(f"env_{env_idx}:{spec.scene_json_name}" for env_idx, spec in enumerate(per_env_specs))
+    print(
+        "[INFO] SceneFactory env assignments: "
+        f"selection_mode={selection_mode} num_envs={num_envs} agents={num_agents} scenes=[{scenes}]"
+    )
+    return per_env_specs, trimmed_spawns
+
+
 def _scene_factory_road_render_mode(cfg: "StudentVehicleMultiAgentGoalEnvCfg") -> str:
     scene_factory_cfg = _load_yaml(cfg.scene_factory_config_path)
     road_cfg = dict(scene_factory_cfg.get("road", {}) or {})
@@ -359,6 +439,8 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     use_scene_factory_roads: bool = False
     scene_factory_config_path: str = "configs/scene_factory/multiworld_scene.yaml"
     scene_factory_world_index: int = 0
+    scene_factory_world_selection_mode: str = "fixed"
+    scene_factory_random_world_seed: int = 42
     start_radius_m: float = 0.5
     agent_spawn_circle_radius_m: float = 3.5
     agent_spawn_jitter_m: float = 0.12
@@ -377,8 +459,15 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     agent_safe_distance_m: float = 2.0
     agent_collision_distance_m: float = 1.1
     agent_collision_force_threshold_n: float = 25.0
+    agent_collision_warmup_steps: int = 24
     lane_touch_enabled: bool = True
     lane_touch_margin_m: float = 0.40
+    reward_lane_center_enable: bool = True
+    reward_lane_center_types: tuple[int, ...] = (1, 2)
+    reward_lane_center_per_step: float = 0.05
+    reward_lane_forbidden_enable: bool = True
+    reward_lane_forbidden_types: tuple[int, ...] = (15, 16)
+    reward_lane_forbidden_penalty: float = -30.0
     obs_weather_context_enable: bool = True
     obs_road_points_enable: bool = True
     obs_road_points_k: int = 64
@@ -389,7 +478,10 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     obs_neighbor_enable: bool = True
     obs_neighbor_k: int = 8
     obs_neighbor_include_ttc: bool = True
+    obs_neighbor_include_index: bool = True
     obs_neighbor_ttc_max_s: float = 10.0
+    obs_timing_print_enable: bool = False
+    obs_timing_print_every_n: int = 32
 
     test_mode: str = "none"
     collision_test_half_distance_m: float = 12.0
@@ -445,10 +537,16 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
     def __init__(self, cfg: StudentVehicleMultiAgentGoalEnvCfg, render_mode: str | None = None, **kwargs):
         self._capture_camera: Camera | None = None
         self._scenario_spawns: list | None = None
+        self._scenario_spawns_by_env: list[list] | None = None
         self._scene_factory_scene_json_path: str | None = None
+        self._scene_factory_scene_json_paths_by_env: list[str] | None = None
+        self._scene_factory_specs_by_env: list | None = None
         self._scene_factory_bounds_size_m = float(_scene_factory_bounds_size_from_cfg(cfg))
         self._weather_context_np = np.zeros((weather_context_dim(),), dtype=np.float32)
         self._weather_context = torch.zeros((0, weather_context_dim()), dtype=torch.float32)
+        self._obs_timing_call_count = 0
+        self._obs_timing_last_ms = 0.0
+        self._obs_timing_ema_ms = 0.0
         self._collision_sensor_names_by_agent: list[list[str]] = []
         self._lane_touch_points_xy_m = torch.zeros((0, 0, 2), dtype=torch.float32)
         self._lane_touch_dirs_xy = torch.zeros((0, 0, 2), dtype=torch.float32)
@@ -461,24 +559,20 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._lane_touch_circle_radius_m = 1.0
         self._lane_touch_mask = torch.zeros((0, 0, 1), dtype=torch.bool)
         if bool(cfg.use_scene_factory_roads) and str(cfg.test_mode).strip().lower() != "collision_test":
-            resolved_spec, resolved_spawns = resolve_scene_factory_world_and_spawns(cfg)
-            self._weather_context_np = _scene_factory_weather_context_from_spec(cfg, resolved_spec)
-            cfg.scene_factory_world_index = int(resolved_spec.world_index)
-            self._scene_factory_scene_json_path = str(Path(resolved_spec.scene_json_path).expanduser().resolve())
-            available = len(resolved_spawns)
-            requested = int(cfg.num_agents_per_env)
-            if available <= 0:
-                raise RuntimeError(
-                    "SceneFactory source world does not provide any controllable spawns "
-                    f"for {cfg.scene_factory_config_path}"
-                )
-            if available < requested:
-                print(
-                    "[WARN] SceneFactory source world provides fewer controllable spawns than requested: "
-                    f"requested={requested}, available={available}. Training with {available} agents."
-                )
-            cfg.num_agents_per_env = min(requested, available)
-            self._scenario_spawns = resolved_spawns[: int(cfg.num_agents_per_env)]
+            resolved_specs, resolved_spawns_by_env = resolve_scene_factory_env_assignments(cfg)
+            cfg.scene_factory_world_index = int(resolved_specs[0].world_index)
+            cfg.num_agents_per_env = min(int(cfg.num_agents_per_env), len(resolved_spawns_by_env[0]))
+            self._scene_factory_specs_by_env = list(resolved_specs)
+            self._scenario_spawns_by_env = [list(spawns[: int(cfg.num_agents_per_env)]) for spawns in resolved_spawns_by_env]
+            self._scenario_spawns = list(self._scenario_spawns_by_env[0])
+            self._scene_factory_scene_json_paths_by_env = [
+                str(Path(spec.scene_json_path).expanduser().resolve()) for spec in resolved_specs
+            ]
+            self._scene_factory_scene_json_path = str(self._scene_factory_scene_json_paths_by_env[0])
+            self._weather_context_np = np.stack(
+                [_scene_factory_weather_context_from_spec(cfg, spec) for spec in resolved_specs],
+                axis=0,
+            ).astype(np.float32)
         configure_multi_agent_spaces(cfg, cfg.num_agents_per_env)
         self._tunable_config = normalize_tunable_config(
             load_tunable_config(cfg.tunable_config_json) if str(cfg.tunable_config_json) else StudentTunableConfig()
@@ -494,9 +588,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         super().__init__(cfg, render_mode, **kwargs)
         self._configure_capture_camera_pose()
         self._lane_touch_circle_centers_b = self._lane_touch_circle_centers_b.to(self.device)
-        self._weather_context = torch.as_tensor(
-            self._weather_context_np, dtype=torch.float32, device=self.device
-        ).unsqueeze(0).repeat(self.num_envs, 1)
+        weather_context = torch.as_tensor(self._weather_context_np, dtype=torch.float32, device=self.device)
+        if weather_context.ndim == 1:
+            weather_context = weather_context.unsqueeze(0).repeat(self.num_envs, 1)
+        self._weather_context = weather_context
 
         self._num_agents = len(self._agent_ids)
         self._vehicles = [self.scene.articulations[agent_id] for agent_id in self._agent_ids]
@@ -507,6 +602,20 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._goal_pos_w = torch.zeros(self._num_agents, self.num_envs, 3, device=self.device)
         self._previous_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
         self._current_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
+        self._terminal_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
+        self._agent_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._goal_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._collision_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._crash_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._lane_forbidden_done_mask = torch.zeros(
+            self._num_agents, self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._pending_goal_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_collision_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_crash_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_lane_forbidden_done_mask = torch.zeros(
+            self._num_agents, self.num_envs, dtype=torch.bool, device=self.device
+        )
 
         self._steer_joint_ids: list[list[int]] = []
         self._drive_joint_ids: list[list[int]] = []
@@ -602,6 +711,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             "goal_bonus",
             "collision_penalty",
             "crash_penalty",
+            "lane_center_bonus",
+            "lane_forbidden_penalty",
         )
         self._episode_sums = {
             key: torch.zeros(self._num_agents, self.num_envs, dtype=torch.float32, device=self.device)
@@ -766,11 +877,16 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             return None
         return rgb[0].detach().cpu().numpy().copy()
 
-    def _build_scene_factory_world(self, stage, *, world_root: str) -> None:
+    def _build_scene_factory_world(self, stage, *, world_root: str, env_index: int = 0) -> None:
         scene_factory_cfg = _load_yaml(self.cfg.scene_factory_config_path)
-        if not self._scene_factory_scene_json_path:
+        if self._scene_factory_scene_json_paths_by_env is not None:
+            scene_json_path = self._scene_factory_scene_json_paths_by_env[int(env_index)]
+        elif self._scene_factory_scene_json_path:
+            scene_json_path = self._scene_factory_scene_json_path
+        else:
             world_spec, _ = resolve_scene_factory_world_and_spawns(self.cfg)
-            self._scene_factory_scene_json_path = str(Path(world_spec.scene_json_path).expanduser().resolve())
+            scene_json_path = str(Path(world_spec.scene_json_path).expanduser().resolve())
+            self._scene_factory_scene_json_path = scene_json_path
         if self._scenario_spawns is None:
             self._scenario_spawns = resolve_scene_factory_spawn_subset(self.cfg)[: int(self.cfg.num_agents_per_env)]
         build_cfg = dict(scene_factory_cfg)
@@ -778,7 +894,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         _build_single_world_roads_only(
             stage=stage,
             cfg=build_cfg,
-            json_path=self._scene_factory_scene_json_path,
+            json_path=scene_json_path,
             world_root=world_root,
         )
         self._build_scene_factory_visual_floor(stage, world_root=world_root)
@@ -786,7 +902,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
     def _build_scene_factory_worlds(self, stage) -> None:
         for env_index in range(int(self.cfg.scene.num_envs)):
             world_root = f"/World/envs/env_{env_index}/SceneFactoryWorlds/world_000"
-            self._build_scene_factory_world(stage, world_root=world_root)
+            self._build_scene_factory_world(stage, world_root=world_root, env_index=env_index)
 
     def _initialize_lane_touch_metadata(self, stage) -> None:
         agent_count = len(self._agent_ids)
@@ -918,6 +1034,32 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             result[agent_id] = [torch.nonzero(mask[env_idx], as_tuple=False).view(-1).tolist() for env_idx in range(mask.shape[0])]
         return result
 
+    def _lane_touch_any_type_mask(self, agent_idx: int, lane_types: Sequence[int]) -> torch.Tensor:
+        if (
+            not bool(self.cfg.lane_touch_enabled)
+            or self._lane_touch_mask.numel() == 0
+            or self._lane_touch_mask.shape[-1] <= 0
+        ):
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        valid_types = []
+        type_dim = int(self._lane_touch_type_dim)
+        for road_type in lane_types:
+            road_type_int = int(road_type)
+            if 0 <= road_type_int < type_dim:
+                valid_types.append(road_type_int)
+        if not valid_types:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        return torch.any(self._lane_touch_mask[agent_idx, :, valid_types], dim=1)
+
+    def _done_vehicle_root_pose(self, agent_idx: int, env_ids: torch.Tensor) -> torch.Tensor:
+        vehicle = self._vehicles[agent_idx]
+        root_pose = vehicle.data.default_root_state[env_ids, :7].clone()
+        env_origins = self.scene.env_origins[env_ids]
+        root_pose[:, 0] = env_origins[:, 0] + 1000.0 + 40.0 * float(agent_idx)
+        root_pose[:, 1] = env_origins[:, 1] + 1000.0 + 25.0 * float(agent_idx)
+        root_pose[:, 2] = env_origins[:, 2] + 10.0
+        return root_pose
+
     def _build_scene_factory_visual_floor(self, stage, *, world_root: str) -> None:
         from pxr import Gf, UsdGeom
 
@@ -950,11 +1092,18 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._semantic_actions[agent_idx, :, 2] = torch.clamp(
                 self._raw_actions[agent_idx, :, 2], min=0.0, max=1.0
             )
+            done_mask = self._agent_done_mask[agent_idx]
+            if bool(torch.any(done_mask).item()):
+                self._raw_actions[agent_idx, done_mask] = 0.0
+                self._semantic_actions[agent_idx, done_mask, 0] = 0.0
+                self._semantic_actions[agent_idx, done_mask, 1] = 0.0
+                self._semantic_actions[agent_idx, done_mask, 2] = 0.0
 
     def _apply_action(self):
         for agent_idx, vehicle in enumerate(self._vehicles):
             joint_pos = vehicle.data.joint_pos
             joint_vel = vehicle.data.joint_vel
+            done_env_ids = torch.nonzero(self._agent_done_mask[agent_idx], as_tuple=False).squeeze(-1)
 
             self._joint_effort_targets[agent_idx].zero_()
 
@@ -1000,6 +1149,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._joint_effort_targets[agent_idx][:, self._brake_joint_ids[agent_idx][2:4]] -= (
                 rear_brake_effort * brake_sign[:, 2:4]
             )
+            if len(done_env_ids) > 0:
+                self._joint_effort_targets[agent_idx][done_env_ids] = 0.0
 
             vehicle.set_joint_effort_target(self._joint_effort_targets[agent_idx])
 
@@ -1016,12 +1167,23 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     * float(self._dry_lateral_scale)
                     * vehicle.data.root_ang_vel_b[:, 2]
                 )
+            if len(done_env_ids) > 0:
+                self._external_forces[agent_idx][done_env_ids] = 0.0
+                self._external_torques[agent_idx][done_env_ids] = 0.0
             vehicle.permanent_wrench_composer.set_forces_and_torques(
                 forces=self._external_forces[agent_idx],
                 torques=self._external_torques[agent_idx],
                 body_ids=self._base_body_ids[agent_idx],
                 is_global=False,
             )
+            if len(done_env_ids) > 0:
+                parked_root_pose = self._done_vehicle_root_pose(agent_idx, done_env_ids)
+                parked_root_velocity = torch.zeros((len(done_env_ids), 6), dtype=torch.float32, device=self.device)
+                parked_joint_pos = vehicle.data.default_joint_pos[done_env_ids].clone()
+                parked_joint_vel = torch.zeros_like(vehicle.data.default_joint_vel[done_env_ids])
+                vehicle.write_root_pose_to_sim(parked_root_pose, env_ids=done_env_ids)
+                vehicle.write_root_velocity_to_sim(parked_root_velocity, env_ids=done_env_ids)
+                vehicle.write_joint_state_to_sim(parked_joint_pos, parked_joint_vel, None, done_env_ids)
 
     def _compute_goal_position_body(self, agent_idx: int) -> torch.Tensor:
         goal_pos_b, _ = subtract_frame_transforms(
@@ -1056,19 +1218,28 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 if force_matrix_w is not None and force_matrix_w.numel() > 0:
                     sensor_force = torch.linalg.norm(force_matrix_w, dim=-1).amax(dim=(1, 2))
                 else:
-                    sensor_force = torch.linalg.norm(contact_sensor.data.net_forces_w, dim=-1).amax(dim=1)
+                    sensor_force = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
                 sensor_forces.append(sensor_force)
             if sensor_forces:
                 agent_forces.append(torch.stack(sensor_forces, dim=0).amax(dim=0))
             else:
                 agent_forces.append(torch.zeros(self.num_envs, dtype=torch.float32, device=self.device))
-        return torch.stack(agent_forces, dim=0)
+        forces = torch.stack(agent_forces, dim=0)
+        warmup_steps = max(0, int(self.cfg.agent_collision_warmup_steps))
+        if warmup_steps > 0:
+            warmup_mask = self.episode_length_buf < warmup_steps
+            if bool(torch.any(warmup_mask).item()):
+                forces[:, warmup_mask] = 0.0
+        return forces
 
     def _collision_world_mask(self) -> torch.Tensor:
         if self._num_agents <= 1:
             return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         max_force_per_world = self._collision_force_by_agent_n_tensor().amax(dim=0)
         return max_force_per_world >= float(self.cfg.agent_collision_force_threshold_n)
+
+    def _collision_by_agent_mask_tensor(self) -> torch.Tensor:
+        return self._collision_force_by_agent_n_tensor() >= float(self.cfg.agent_collision_force_threshold_n)
 
     def collision_force_by_agent_n(self) -> dict[str, torch.Tensor]:
         forces = self._collision_force_by_agent_n_tensor()
@@ -1180,7 +1351,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         pairwise_ttc_s: torch.Tensor | None,
     ) -> torch.Tensor:
         k = max(0, int(self.cfg.obs_neighbor_k))
-        feat_dim = _reference_vehicle_feat_dim(self.cfg.obs_neighbor_include_ttc)
+        feat_dim = _reference_vehicle_feat_dim(
+            self.cfg.obs_neighbor_include_ttc,
+            self.cfg.obs_neighbor_include_index,
+        )
         if (not bool(self.cfg.obs_neighbor_enable)) or k <= 0 or self._num_agents <= 1:
             return torch.zeros((self.num_envs, k * feat_dim), dtype=torch.float32, device=self.device)
 
@@ -1190,6 +1364,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         dy = root_pos_xy[:, :, 1] - root_pos_xy[agent_idx, :, 1].unsqueeze(0)
         relx_b, rely_b = _world_to_ego_xy_torch(dx, dy, yaw_by_agent[agent_idx].unsqueeze(0))
         distances_sq = dx.square() + dy.square()
+        distances_sq = torch.where(
+            self._agent_done_mask,
+            torch.full_like(distances_sq, float("inf")),
+            distances_sq,
+        )
         distances_sq[agent_idx] = float("inf")
         agent_tie_break = (
             torch.arange(self._num_agents, dtype=torch.float32, device=self.device).unsqueeze(1) * 1.0e-4
@@ -1213,7 +1392,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             rel_yaw = _wrap_pi_torch(yaw_by_agent[neighbor_idx, env_ids] - yaw_by_agent[agent_idx, env_ids])
             obs[:, slot, 4] = rel_yaw / yaw_scale
             obs[:, slot, 5] = speed_by_agent[neighbor_idx, env_ids] / speed_scale
-            if feat_dim >= 7 and pairwise_ttc_s is not None:
+            write_idx = 6
+            if bool(self.cfg.obs_neighbor_include_ttc):
                 ttc = pairwise_ttc_s[agent_idx, env_ids, neighbor_idx]
                 ttc_n = torch.ones_like(ttc)
                 finite_mask = torch.isfinite(ttc)
@@ -1222,7 +1402,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     torch.clamp(ttc, min=0.0, max=ttc_max_s) / ttc_max_s,
                     ttc_n,
                 )
-                obs[:, slot, 6] = ttc_n
+                obs[:, slot, write_idx] = ttc_n
+                write_idx += 1
+            if bool(self.cfg.obs_neighbor_include_index):
+                denom = float(max(1, self._num_agents - 1))
+                obs[:, slot, write_idx] = neighbor_idx.to(torch.float32) / denom
         return obs.reshape(self.num_envs, -1)
 
     def _build_reference_road_context(
@@ -1254,13 +1438,16 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if mode == "knn":
             sort_keys = torch.where(valid, dist_sq, torch.full_like(dist_sq, float("inf")))
             sorted_indices = torch.argsort(sort_keys, dim=1)[:, :k]
-        else:
+        elif mode == "road-running":
             insertion_order = (
                 torch.arange(self._lane_touch_valid.shape[1], dtype=torch.float32, device=self.device)
                 .unsqueeze(0)
                 .expand(self.num_envs, -1)
             )
             sort_keys = torch.where(valid, insertion_order, torch.full_like(insertion_order, float("inf")))
+            sorted_indices = torch.argsort(sort_keys, dim=1)[:, :k]
+        else:
+            sort_keys = torch.where(valid, dist_sq, torch.full_like(dist_sq, float("inf")))
             sorted_indices = torch.argsort(sort_keys, dim=1)[:, :k]
 
         norm = float(radius_m if radius_m > 0.0 else max(1.0e-6, self._scene_factory_bounds_size_m))
@@ -1313,6 +1500,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             rel_vel_w = other_vehicle.data.root_lin_vel_w - root_lin_vel_w
             rel_vel_b = quat_apply_inverse(root_quat_w, rel_vel_w)
             distance = torch.linalg.norm(rel_pos_b[:, :2], dim=1)
+            distance = torch.where(
+                self._agent_done_mask[other_idx],
+                torch.full_like(distance, float("inf")),
+                distance,
+            )
             update_mask = distance < nearest_distance
             nearest_distance = torch.where(update_mask, distance, nearest_distance)
             nearest_rel_pos_b = torch.where(update_mask.unsqueeze(-1), rel_pos_b, nearest_rel_pos_b)
@@ -1330,6 +1522,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         return too_low | too_far | bad_tilt
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
+        obs_start = perf_counter()
         self._update_lane_touch_mask()
         observations = {}
         observation_mode = str(self.cfg.observation_mode).strip().lower()
@@ -1407,19 +1600,42 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 obs = torch.cat(obs_parts, dim=-1)
             else:
                 raise ValueError(f"Unsupported observation mode: {self.cfg.observation_mode!r}")
+            done_mask = self._agent_done_mask[agent_idx]
+            if bool(torch.any(done_mask).item()):
+                obs = obs.clone()
+                obs[done_mask] = 0.0
             observations[agent_id] = obs
+        elapsed_ms = (perf_counter() - obs_start) * 1000.0
+        self._obs_timing_call_count += 1
+        self._obs_timing_last_ms = float(elapsed_ms)
+        if self._obs_timing_call_count == 1:
+            self._obs_timing_ema_ms = float(elapsed_ms)
+        else:
+            self._obs_timing_ema_ms = 0.9 * float(self._obs_timing_ema_ms) + 0.1 * float(elapsed_ms)
+        if bool(self.cfg.obs_timing_print_enable):
+            every_n = max(1, int(self.cfg.obs_timing_print_every_n))
+            if self._obs_timing_call_count % every_n == 0:
+                print(
+                    "[INFO][SceneFactory][ObsTiming] "
+                    f"call={self._obs_timing_call_count} mode={observation_mode} "
+                    f"last_ms={self._obs_timing_last_ms:.2f} ema_ms={self._obs_timing_ema_ms:.2f} "
+                    f"envs={self.num_envs} agents={self._num_agents}",
+                    flush=True,
+                )
         return observations
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
+        self._update_lane_touch_mask()
         rewards = {}
         pairwise_distances = self._pairwise_distances_xy()
         nearest_distances = pairwise_distances.min(dim=2).values if self._num_agents > 1 else None
-        collision_world = self._collision_world_mask()
 
         for agent_idx, agent_id in enumerate(self._agent_ids):
             goal_pos_b, goal_distance = self._compute_goal_distance(agent_idx)
             self._current_goal_distance[agent_idx] = goal_distance
 
+            active_mask = ~self._agent_done_mask[agent_idx]
+            active_float = active_mask.float()
             goal_dir_b = goal_pos_b[:, :2] / goal_distance.unsqueeze(-1).clamp_min(1.0e-6)
             progress = self._previous_goal_distance[agent_idx] - goal_distance
             heading_alignment = goal_dir_b[:, 0]
@@ -1432,13 +1648,17 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             action_magnitude = torch.sum(torch.square(self._semantic_actions[agent_idx]), dim=1)
             throttle_brake_conflict = self._semantic_actions[agent_idx, :, 0] * self._semantic_actions[agent_idx, :, 2]
             goal_shaping = 1.0 - torch.tanh(goal_distance / float(max(1.0, self.cfg.goal_radius_max_m * 0.5)))
-            goal_bonus = (
-                goal_distance <= float(self.cfg.goal_reached_threshold_m)
-            ).float() * float(self.cfg.reward_goal_bonus)
-
-            crash_mask = self._agent_crash_mask(agent_idx)
-            crash_penalty = crash_mask.float() * float(self.cfg.reward_crash_penalty)
-            collision_penalty = collision_world.float() * float(self.cfg.reward_collision_penalty)
+            goal_bonus = self._pending_goal_done_mask[agent_idx].float() * float(self.cfg.reward_goal_bonus)
+            crash_penalty = self._pending_crash_done_mask[agent_idx].float() * float(self.cfg.reward_crash_penalty)
+            collision_penalty = (
+                self._pending_collision_done_mask[agent_idx].float() * float(self.cfg.reward_collision_penalty)
+            )
+            lane_center_touch = (
+                self._lane_touch_any_type_mask(agent_idx, self.cfg.reward_lane_center_types)
+                if bool(self.cfg.reward_lane_center_enable)
+                else torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            )
+            lane_forbidden_new = self._pending_lane_forbidden_done_mask[agent_idx]
 
             if nearest_distances is not None:
                 proximity_violation = torch.relu(
@@ -1449,21 +1669,24 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             neighbor_proximity = proximity_violation * float(self.cfg.reward_scale_neighbor_proximity)
 
             reward_terms = {
-                "alive": torch.full_like(goal_distance, float(self.cfg.reward_scale_alive)),
-                "progress": progress * float(self.cfg.reward_scale_progress),
-                "goal_shaping": goal_shaping * float(self.cfg.reward_scale_goal_shaping),
-                "heading": heading_alignment * float(self.cfg.reward_scale_heading),
-                "speed_to_goal": speed_to_goal * float(self.cfg.reward_scale_speed_to_goal),
-                "lateral_velocity": lateral_velocity * float(self.cfg.reward_scale_lateral_velocity),
-                "yaw_rate": yaw_rate * float(self.cfg.reward_scale_yaw_rate),
-                "action_rate": action_rate * float(self.cfg.reward_scale_action_rate),
-                "action_magnitude": action_magnitude * float(self.cfg.reward_scale_action_magnitude),
+                "alive": torch.full_like(goal_distance, float(self.cfg.reward_scale_alive)) * active_float,
+                "progress": progress * float(self.cfg.reward_scale_progress) * active_float,
+                "goal_shaping": goal_shaping * float(self.cfg.reward_scale_goal_shaping) * active_float,
+                "heading": heading_alignment * float(self.cfg.reward_scale_heading) * active_float,
+                "speed_to_goal": speed_to_goal * float(self.cfg.reward_scale_speed_to_goal) * active_float,
+                "lateral_velocity": lateral_velocity * float(self.cfg.reward_scale_lateral_velocity) * active_float,
+                "yaw_rate": yaw_rate * float(self.cfg.reward_scale_yaw_rate) * active_float,
+                "action_rate": action_rate * float(self.cfg.reward_scale_action_rate) * active_float,
+                "action_magnitude": action_magnitude * float(self.cfg.reward_scale_action_magnitude) * active_float,
                 "throttle_brake_conflict": throttle_brake_conflict
-                * float(self.cfg.reward_scale_throttle_brake_conflict),
-                "neighbor_proximity": neighbor_proximity,
+                * float(self.cfg.reward_scale_throttle_brake_conflict)
+                * active_float,
+                "neighbor_proximity": neighbor_proximity * active_float,
                 "goal_bonus": goal_bonus,
                 "collision_penalty": collision_penalty,
                 "crash_penalty": crash_penalty,
+                "lane_center_bonus": lane_center_touch.float() * float(self.cfg.reward_lane_center_per_step) * active_float,
+                "lane_forbidden_penalty": lane_forbidden_new.float() * float(self.cfg.reward_lane_forbidden_penalty),
             }
             rewards[agent_id] = torch.sum(torch.stack(list(reward_terms.values())), dim=0)
 
@@ -1472,7 +1695,27 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
             self._previous_goal_distance[agent_idx] = goal_distance
             self._previous_raw_actions[agent_idx] = self._raw_actions[agent_idx]
+            new_done = (
+                self._pending_goal_done_mask[agent_idx]
+                | self._pending_collision_done_mask[agent_idx]
+                | self._pending_crash_done_mask[agent_idx]
+                | self._pending_lane_forbidden_done_mask[agent_idx]
+            )
+            self._terminal_goal_distance[agent_idx] = torch.where(
+                new_done,
+                goal_distance,
+                self._terminal_goal_distance[agent_idx],
+            )
+            self._agent_done_mask[agent_idx] |= new_done
+            self._goal_done_mask[agent_idx] |= self._pending_goal_done_mask[agent_idx]
+            self._collision_done_mask[agent_idx] |= self._pending_collision_done_mask[agent_idx]
+            self._crash_done_mask[agent_idx] |= self._pending_crash_done_mask[agent_idx]
+            self._lane_forbidden_done_mask[agent_idx] |= self._pending_lane_forbidden_done_mask[agent_idx]
 
+        self._pending_goal_done_mask.zero_()
+        self._pending_collision_done_mask.zero_()
+        self._pending_crash_done_mask.zero_()
+        self._pending_lane_forbidden_done_mask.zero_()
         return rewards
 
     def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -1486,21 +1729,38 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             time_outs = {agent_id: false_buf.clone() for agent_id in self._agent_ids}
             return terminated, time_outs
 
-        goal_reached = []
-        crash_masks = []
+        self._update_lane_touch_mask()
+        collision_masks = self._collision_by_agent_mask_tensor()
+        self._pending_goal_done_mask.zero_()
+        self._pending_collision_done_mask.zero_()
+        self._pending_crash_done_mask.zero_()
+        self._pending_lane_forbidden_done_mask.zero_()
+        terminated = {}
         for agent_idx in range(self._num_agents):
             _, goal_distance = self._compute_goal_distance(agent_idx)
             self._current_goal_distance[agent_idx] = goal_distance
-            goal_reached.append(goal_distance <= float(self.cfg.goal_reached_threshold_m))
-            crash_masks.append(self._agent_crash_mask(agent_idx))
+            active_mask = ~self._agent_done_mask[agent_idx]
+            goal_reached = goal_distance <= float(self.cfg.goal_reached_threshold_m)
+            crash_mask = self._agent_crash_mask(agent_idx)
+            collision_mask = collision_masks[agent_idx]
+            lane_forbidden_touch = (
+                self._lane_touch_any_type_mask(agent_idx, self.cfg.reward_lane_forbidden_types)
+                if bool(self.cfg.reward_lane_forbidden_enable)
+                else torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            )
+            self._pending_goal_done_mask[agent_idx] = active_mask & goal_reached
+            self._pending_crash_done_mask[agent_idx] = active_mask & crash_mask
+            self._pending_collision_done_mask[agent_idx] = active_mask & collision_mask
+            self._pending_lane_forbidden_done_mask[agent_idx] = active_mask & lane_forbidden_touch
+            terminated[self._agent_ids[agent_idx]] = (
+                self._agent_done_mask[agent_idx]
+                | self._pending_goal_done_mask[agent_idx]
+                | self._pending_crash_done_mask[agent_idx]
+                | self._pending_collision_done_mask[agent_idx]
+                | self._pending_lane_forbidden_done_mask[agent_idx]
+            )
 
-        all_goals_reached = torch.stack(goal_reached, dim=0).all(dim=0)
-        any_crash = torch.stack(crash_masks, dim=0).any(dim=0)
-        collision_world = self._collision_world_mask()
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        terminated_world = all_goals_reached | any_crash | collision_world
-
-        terminated = {agent_id: terminated_world.clone() for agent_id in self._agent_ids}
         time_outs = {agent_id: time_out.clone() for agent_id in self._agent_ids}
         return terminated, time_outs
 
@@ -1508,8 +1768,17 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._vehicles[0]._ALL_INDICES
 
-        collision_world = self._collision_world_mask()
         collision_force_by_agent = self._collision_force_by_agent_n_tensor()
+        self._update_lane_touch_mask()
+        lane_center_touch_by_agent = torch.stack(
+            [
+                self._lane_touch_any_type_mask(agent_idx, self.cfg.reward_lane_center_types)
+                if bool(self.cfg.reward_lane_center_enable)
+                else torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                for agent_idx in range(self._num_agents)
+            ],
+            dim=0,
+        )
 
         for agent_idx, agent_id in enumerate(self._agent_ids):
             self.extras[agent_id] = {"log": {}}
@@ -1518,14 +1787,38 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     1.0, float(self.max_episode_length_s)
                 )
                 value[agent_idx, env_ids] = 0.0
-            self.extras[agent_id]["log"]["Metrics/final_distance_to_goal"] = torch.mean(
-                self._current_goal_distance[agent_idx, env_ids]
+            final_distance = torch.where(
+                self._agent_done_mask[agent_idx, env_ids],
+                self._terminal_goal_distance[agent_idx, env_ids],
+                self._current_goal_distance[agent_idx, env_ids],
+            )
+            self.extras[agent_id]["log"]["Metrics/final_distance_to_goal"] = torch.mean(final_distance).item()
+            self.extras[agent_id]["log"]["Metrics/success_rate"] = torch.mean(
+                self._goal_done_mask[agent_idx, env_ids].float()
+            ).item()
+            self.extras[agent_id]["log"]["Metrics/all_goals_reached_rate"] = torch.mean(
+                torch.all(self._goal_done_mask[:, env_ids], dim=0).float()
+            ).item()
+            self.extras[agent_id]["log"]["Metrics/crash_rate"] = torch.mean(
+                self._crash_done_mask[agent_idx, env_ids].float()
+            ).item()
+            self.extras[agent_id]["log"]["Metrics/collision_rate"] = torch.mean(
+                self._collision_done_mask[agent_idx, env_ids].float()
             ).item()
             self.extras[agent_id]["log"]["Metrics/collision_count"] = float(
-                torch.count_nonzero(collision_world[env_ids]).item()
+                torch.count_nonzero(self._collision_done_mask[agent_idx, env_ids]).item()
             )
             self.extras[agent_id]["log"]["Metrics/max_collision_force_n"] = torch.mean(
                 collision_force_by_agent[agent_idx, env_ids]
+            ).item()
+            self.extras[agent_id]["log"]["Metrics/lane_center_touch_rate"] = torch.mean(
+                lane_center_touch_by_agent[agent_idx, env_ids].float()
+            ).item()
+            self.extras[agent_id]["log"]["Metrics/lane_forbidden_done_count"] = float(
+                torch.count_nonzero(self._lane_forbidden_done_mask[agent_idx, env_ids]).item()
+            )
+            self.extras[agent_id]["log"]["Metrics/lane_forbidden_done_rate"] = torch.mean(
+                self._lane_forbidden_done_mask[agent_idx, env_ids].float()
             ).item()
 
         for vehicle in self._vehicles:
@@ -1540,7 +1833,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         test_mode = str(self.cfg.test_mode).strip().lower()
         use_collision_test = test_mode in {"collision_test", "scene_factory_collision_test"}
         use_scene_factory_roads = bool(
-            self.cfg.use_scene_factory_roads and self._scenario_spawns is not None and not use_collision_test
+            self.cfg.use_scene_factory_roads and self._scenario_spawns_by_env is not None and not use_collision_test
         )
         if self.cfg.randomize_spawn_phase and not use_scene_factory_roads:
             phase = sample_uniform(-math.pi, math.pi, (num_resets,), self.device)
@@ -1567,6 +1860,16 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._raw_actions[agent_idx, env_ids] = 0.0
             self._semantic_actions[agent_idx, env_ids] = 0.0
             self._previous_raw_actions[agent_idx, env_ids] = 0.0
+            self._terminal_goal_distance[agent_idx, env_ids] = 0.0
+            self._agent_done_mask[agent_idx, env_ids] = False
+            self._goal_done_mask[agent_idx, env_ids] = False
+            self._collision_done_mask[agent_idx, env_ids] = False
+            self._crash_done_mask[agent_idx, env_ids] = False
+            self._lane_forbidden_done_mask[agent_idx, env_ids] = False
+            self._pending_goal_done_mask[agent_idx, env_ids] = False
+            self._pending_collision_done_mask[agent_idx, env_ids] = False
+            self._pending_crash_done_mask[agent_idx, env_ids] = False
+            self._pending_lane_forbidden_done_mask[agent_idx, env_ids] = False
             self._joint_effort_targets[agent_idx][env_ids] = 0.0
             self._external_forces[agent_idx][env_ids] = 0.0
             self._external_torques[agent_idx][env_ids] = 0.0
@@ -1589,38 +1892,47 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 ).unsqueeze(0).repeat(num_resets, 1)
                 self._goal_pos_w[agent_idx, env_ids] = env_origins + goal_local
             elif use_scene_factory_roads:
-                scenario_spawn = self._scenario_spawns[agent_idx]
                 spawn_jitter = sample_uniform(
                     -float(self.cfg.agent_spawn_jitter_m),
                     float(self.cfg.agent_spawn_jitter_m),
                     (num_resets, 2),
                     self.device,
                 )
-                root_state[:, 0] = env_origins[:, 0] + float(scenario_spawn.start_local_xyz[0]) + spawn_jitter[:, 0]
-                root_state[:, 1] = env_origins[:, 1] + float(scenario_spawn.start_local_xyz[1]) + spawn_jitter[:, 1]
+                env_id_list = env_ids.detach().cpu().tolist()
+                scenario_spawns = [self._scenario_spawns_by_env[int(env_id)][agent_idx] for env_id in env_id_list]
+                start_local_xyz = torch.tensor(
+                    [spawn.start_local_xyz for spawn in scenario_spawns],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                start_yaw = torch.tensor(
+                    [float(spawn.start_yaw_rad) for spawn in scenario_spawns],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                goal_local_xyz = torch.tensor(
+                    [spawn.goal_local_xyz for spawn in scenario_spawns],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                root_state[:, 0] = env_origins[:, 0] + start_local_xyz[:, 0] + spawn_jitter[:, 0]
+                root_state[:, 1] = env_origins[:, 1] + start_local_xyz[:, 1] + spawn_jitter[:, 1]
                 root_state[:, 2] = (
                     env_origins[:, 2]
                     + float(self.cfg.spawn_height_m)
-                    + float(scenario_spawn.start_local_xyz[2])
+                    + start_local_xyz[:, 2]
                 )
-                yaw = torch.full(
-                    (num_resets,),
-                    float(scenario_spawn.start_yaw_rad),
-                    device=self.device,
-                ) + sample_uniform(
+                yaw = start_yaw + sample_uniform(
                     -float(self.cfg.spawn_yaw_noise_rad),
                     float(self.cfg.spawn_yaw_noise_rad),
                     (num_resets,),
                     self.device,
                 )
-                goal_local = torch.tensor(
-                    [
-                        float(scenario_spawn.goal_local_xyz[0]),
-                        float(scenario_spawn.goal_local_xyz[1]),
-                        max(float(self.cfg.goal_height_m), float(scenario_spawn.goal_local_xyz[2])),
-                    ],
-                    device=self.device,
-                ).unsqueeze(0).repeat(num_resets, 1)
+                goal_local = goal_local_xyz.clone()
+                goal_local[:, 2] = torch.maximum(
+                    goal_local[:, 2],
+                    torch.full((num_resets,), float(self.cfg.goal_height_m), dtype=torch.float32, device=self.device),
+                )
                 self._goal_pos_w[agent_idx, env_ids] = env_origins + goal_local
             else:
                 formation_angle = phase + (2.0 * math.pi * agent_idx / max(1, self._num_agents))

@@ -42,6 +42,18 @@ def _cfg_value(cfg: dict[str, Any], section: str, key: str, default: Any) -> Any
     return section_payload.get(key, default)
 
 
+def _cfg_int_tuple(cfg: dict[str, Any], section: str, key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    value = _cfg_value(cfg, section, key, default)
+    if value is None:
+        return tuple(int(item) for item in default)
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",") if token.strip()]
+        return tuple(int(token) for token in tokens) if tokens else tuple(int(item) for item in default)
+    if isinstance(value, (list, tuple)):
+        return tuple(int(item) for item in value)
+    return (int(value),)
+
+
 pre_parser = argparse.ArgumentParser(add_help=False)
 pre_parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
 pre_args, _ = pre_parser.parse_known_args()
@@ -92,7 +104,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--obs_road_points_mode",
-    choices=("knn", "road_running"),
+    choices=("knn", "road_running", "road-running"),
     default=str(_cfg_value(file_cfg, "observation", "road_points_mode", "knn")),
 )
 parser.add_argument(
@@ -116,9 +128,44 @@ parser.add_argument(
     default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_ttc", True)),
 )
 parser.add_argument(
+    "--obs_neighbor_include_index",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_index", True)),
+)
+parser.add_argument(
     "--obs_neighbor_ttc_max_s",
     type=float,
     default=float(_cfg_value(file_cfg, "observation", "neighbor_ttc_max_s", 10.0)),
+)
+parser.add_argument(
+    "--obs_timing_print_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "timing_print_enable", False)),
+)
+parser.add_argument(
+    "--obs_timing_print_every_n",
+    type=int,
+    default=int(_cfg_value(file_cfg, "observation", "timing_print_every_n", 32)),
+)
+parser.add_argument(
+    "--reward_lane_center_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "reward", "lane_center_enable", True)),
+)
+parser.add_argument(
+    "--reward_lane_center_per_step",
+    type=float,
+    default=float(_cfg_value(file_cfg, "reward", "lane_center_per_step", 0.05)),
+)
+parser.add_argument(
+    "--reward_lane_forbidden_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "reward", "lane_forbidden_enable", True)),
+)
+parser.add_argument(
+    "--reward_lane_forbidden_penalty",
+    type=float,
+    default=float(_cfg_value(file_cfg, "reward", "lane_forbidden_penalty", -30.0)),
 )
 parser.add_argument(
     "--tunable_config_json",
@@ -150,6 +197,18 @@ parser.add_argument(
     type=int,
     default=int(_cfg_value(file_cfg, "scene_factory", "world_index", 0)),
     help="Which resolved SceneFactory world to use as the cloned source world.",
+)
+parser.add_argument(
+    "--scene_factory_world_selection_mode",
+    choices=("fixed", "random_envs", "random-envs"),
+    default=str(_cfg_value(file_cfg, "scene_factory", "world_selection_mode", "fixed")),
+    help="How SceneFactory worlds are assigned across vectorized environments.",
+)
+parser.add_argument(
+    "--scene_factory_random_world_seed",
+    type=int,
+    default=int(_cfg_value(file_cfg, "scene_factory", "random_world_seed", 42)),
+    help="Seed used when SceneFactory world_selection_mode=random_envs.",
 )
 parser.add_argument(
     "--test_mode",
@@ -191,6 +250,12 @@ parser.add_argument(
     type=float,
     default=float(_cfg_value(file_cfg, "env", "agent_neighbor_obs_scale_m", 12.0)),
     help="Normalization scale for nearest-neighbor observation features.",
+)
+parser.add_argument(
+    "--agent_collision_warmup_steps",
+    type=int,
+    default=int(_cfg_value(file_cfg, "env", "agent_collision_warmup_steps", 24)),
+    help="Ignore inter-vehicle collision detection for this many environment steps after reset.",
 )
 parser.add_argument(
     "--replicate_physics",
@@ -424,6 +489,8 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.use_scene_factory_roads = bool(args_cli.use_scene_factory_roads)
     cfg.scene_factory_config_path = str(Path(args_cli.scene_factory_config).expanduser().resolve())
     cfg.scene_factory_world_index = int(args_cli.scene_factory_world_index)
+    cfg.scene_factory_world_selection_mode = str(args_cli.scene_factory_world_selection_mode)
+    cfg.scene_factory_random_world_seed = int(args_cli.scene_factory_random_world_seed)
     if bool(cfg.use_scene_factory_roads):
         road_cfg = dict(_load_yaml_config(cfg.scene_factory_config_path).get("road", {}) or {})
         if str(road_cfg.get("render_mode", "point_instancer")).strip().lower() == "point_instancer":
@@ -439,6 +506,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.goal_radius_max_m = float(args_cli.goal_radius_max_m)
     cfg.max_distance_from_origin_m = float(args_cli.max_distance_from_origin_m)
     cfg.agent_neighbor_obs_scale_m = float(args_cli.agent_neighbor_obs_scale_m)
+    cfg.agent_collision_warmup_steps = int(args_cli.agent_collision_warmup_steps)
     cfg.observation_mode = str(args_cli.observation_mode)
     cfg.obs_weather_context_enable = bool(args_cli.obs_weather_context_enable)
     cfg.obs_road_points_enable = bool(args_cli.obs_road_points_enable)
@@ -450,7 +518,16 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.obs_neighbor_enable = bool(args_cli.obs_neighbor_enable)
     cfg.obs_neighbor_k = int(args_cli.obs_neighbor_k)
     cfg.obs_neighbor_include_ttc = bool(args_cli.obs_neighbor_include_ttc)
+    cfg.obs_neighbor_include_index = bool(args_cli.obs_neighbor_include_index)
     cfg.obs_neighbor_ttc_max_s = float(args_cli.obs_neighbor_ttc_max_s)
+    cfg.obs_timing_print_enable = bool(args_cli.obs_timing_print_enable)
+    cfg.obs_timing_print_every_n = int(args_cli.obs_timing_print_every_n)
+    cfg.reward_lane_center_enable = bool(args_cli.reward_lane_center_enable)
+    cfg.reward_lane_center_types = _cfg_int_tuple(file_cfg, "reward", "lane_center_types", (1, 2))
+    cfg.reward_lane_center_per_step = float(args_cli.reward_lane_center_per_step)
+    cfg.reward_lane_forbidden_enable = bool(args_cli.reward_lane_forbidden_enable)
+    cfg.reward_lane_forbidden_types = _cfg_int_tuple(file_cfg, "reward", "lane_forbidden_types", (15, 16))
+    cfg.reward_lane_forbidden_penalty = float(args_cli.reward_lane_forbidden_penalty)
     cfg.test_mode = str(args_cli.test_mode).strip().lower()
     cfg.collision_test_post_collision_steps = int(_cfg_value(file_cfg, "test", "post_collision_steps", 120))
     cfg.collision_test_post_collision_throttle = float(
@@ -586,12 +663,15 @@ def _build_resolved_config(
             "goal_radius_max_m": float(env_cfg.goal_radius_max_m),
             "max_distance_from_origin_m": float(env_cfg.max_distance_from_origin_m),
             "agent_neighbor_obs_scale_m": float(env_cfg.agent_neighbor_obs_scale_m),
+            "agent_collision_warmup_steps": int(env_cfg.agent_collision_warmup_steps),
             "replicate_physics": bool(env_cfg.scene.replicate_physics),
             "clone_in_fabric": bool(env_cfg.scene.clone_in_fabric),
         },
         "scene_factory": {
             "config_path": str(env_cfg.scene_factory_config_path),
             "world_index": int(env_cfg.scene_factory_world_index),
+            "world_selection_mode": str(env_cfg.scene_factory_world_selection_mode),
+            "random_world_seed": int(env_cfg.scene_factory_random_world_seed),
         },
         "observation": {
             "weather_context_enable": bool(env_cfg.obs_weather_context_enable),
@@ -604,7 +684,18 @@ def _build_resolved_config(
             "neighbor_enable": bool(env_cfg.obs_neighbor_enable),
             "neighbor_k": int(env_cfg.obs_neighbor_k),
             "neighbor_include_ttc": bool(env_cfg.obs_neighbor_include_ttc),
+            "neighbor_include_index": bool(env_cfg.obs_neighbor_include_index),
             "neighbor_ttc_max_s": float(env_cfg.obs_neighbor_ttc_max_s),
+            "timing_print_enable": bool(env_cfg.obs_timing_print_enable),
+            "timing_print_every_n": int(env_cfg.obs_timing_print_every_n),
+        },
+        "reward": {
+            "lane_center_enable": bool(env_cfg.reward_lane_center_enable),
+            "lane_center_types": [int(v) for v in env_cfg.reward_lane_center_types],
+            "lane_center_per_step": float(env_cfg.reward_lane_center_per_step),
+            "lane_forbidden_enable": bool(env_cfg.reward_lane_forbidden_enable),
+            "lane_forbidden_types": [int(v) for v in env_cfg.reward_lane_forbidden_types],
+            "lane_forbidden_penalty": float(env_cfg.reward_lane_forbidden_penalty),
         },
         "test": {
             "mode": str(env_cfg.test_mode),
@@ -679,6 +770,8 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "use_scene_factory_roads": env_cfg.use_scene_factory_roads,
             "scene_factory_config_path": env_cfg.scene_factory_config_path,
             "scene_factory_world_index": env_cfg.scene_factory_world_index,
+            "scene_factory_world_selection_mode": env_cfg.scene_factory_world_selection_mode,
+            "scene_factory_random_world_seed": env_cfg.scene_factory_random_world_seed,
             "test_mode": env_cfg.test_mode,
             "collision_test_post_collision_steps": env_cfg.collision_test_post_collision_steps,
             "collision_test_post_collision_throttle": env_cfg.collision_test_post_collision_throttle,
@@ -699,6 +792,7 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "replicate_physics": env_cfg.scene.replicate_physics,
             "clone_in_fabric": env_cfg.scene.clone_in_fabric,
             "agent_collision_force_threshold_n": env_cfg.agent_collision_force_threshold_n,
+            "agent_collision_warmup_steps": env_cfg.agent_collision_warmup_steps,
             "episode_length_s": env_cfg.episode_length_s,
             "goal_radius_min_m": env_cfg.goal_radius_min_m,
             "goal_radius_max_m": env_cfg.goal_radius_max_m,
@@ -715,7 +809,16 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "obs_neighbor_enable": env_cfg.obs_neighbor_enable,
             "obs_neighbor_k": env_cfg.obs_neighbor_k,
             "obs_neighbor_include_ttc": env_cfg.obs_neighbor_include_ttc,
+            "obs_neighbor_include_index": env_cfg.obs_neighbor_include_index,
             "obs_neighbor_ttc_max_s": env_cfg.obs_neighbor_ttc_max_s,
+            "obs_timing_print_enable": env_cfg.obs_timing_print_enable,
+            "obs_timing_print_every_n": env_cfg.obs_timing_print_every_n,
+            "reward_lane_center_enable": env_cfg.reward_lane_center_enable,
+            "reward_lane_center_types": list(env_cfg.reward_lane_center_types),
+            "reward_lane_center_per_step": env_cfg.reward_lane_center_per_step,
+            "reward_lane_forbidden_enable": env_cfg.reward_lane_forbidden_enable,
+            "reward_lane_forbidden_types": list(env_cfg.reward_lane_forbidden_types),
+            "reward_lane_forbidden_penalty": env_cfg.reward_lane_forbidden_penalty,
         },
         "runner_cfg": runner_cfg.to_dict(),
         "video_cfg": {
@@ -772,6 +875,42 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
 
     env_cls = type(env)
 
+    def _aggregate_marl_episode_log(self, extras: dict) -> dict:
+        if not isinstance(extras, dict):
+            return extras
+        if "log" in extras or "episode" in extras:
+            return extras
+
+        aggregated_values: dict[str, list[torch.Tensor]] = {}
+        for agent_id in getattr(self.env, "possible_agents", []):
+            agent_extra = extras.get(agent_id)
+            if not isinstance(agent_extra, dict):
+                continue
+            agent_log = agent_extra.get("log") or agent_extra.get("episode")
+            if not isinstance(agent_log, dict):
+                continue
+            for key, value in agent_log.items():
+                if isinstance(value, torch.Tensor):
+                    tensor_value = value.detach().to(self.env.device, dtype=torch.float32).reshape(-1)
+                else:
+                    try:
+                        tensor_value = torch.tensor([float(value)], device=self.env.device, dtype=torch.float32)
+                    except (TypeError, ValueError):
+                        continue
+                aggregated_values.setdefault(key, []).append(tensor_value)
+
+        if not aggregated_values:
+            return extras
+
+        aggregated_log = {
+            key: torch.mean(torch.cat(values, dim=0))
+            for key, values in aggregated_values.items()
+            if values
+        }
+        merged_extras = dict(extras)
+        merged_extras["log"] = aggregated_log
+        return merged_extras
+
     def _get_observations(self):
         if getattr(self, "_state_as_observation", False):
             return {"policy": self.env.state()}
@@ -783,10 +922,49 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
             )
         }
 
+    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
+        obs, extras = self.env.reset(seed, options)
+        if getattr(self, "_state_as_observation", False):
+            obs = {"policy": self.env.state()}
+        else:
+            obs = {
+                "policy": torch.cat(
+                    [obs[agent].reshape(self.num_envs, -1) for agent in self.env.possible_agents],
+                    dim=-1,
+                )
+            }
+        return obs, _aggregate_marl_episode_log(self, extras)
+
+    def step(self, action: torch.Tensor):
+        index = 0
+        _actions = {}
+        for agent in self.env.possible_agents:
+            delta = gym.spaces.flatdim(self.env.action_spaces[agent])
+            _actions[agent] = action[:, index : index + delta]
+            index += delta
+
+        obs, rewards, terminated, time_outs, extras = self.env.step(_actions)
+        if getattr(self, "_state_as_observation", False):
+            obs = {"policy": self.env.state()}
+        else:
+            obs = {
+                "policy": torch.cat(
+                    [obs[agent].reshape(self.num_envs, -1) for agent in self.env.possible_agents],
+                    dim=-1,
+                )
+            }
+
+        rewards = sum(rewards.values())
+        terminated = math.prod(terminated.values()).to(dtype=torch.bool)
+        time_outs = math.prod(time_outs.values()).to(dtype=torch.bool)
+        return obs, rewards, terminated, time_outs, _aggregate_marl_episode_log(self, extras)
+
     def __getattr__(self, key: str):
         return getattr(self.env, key)
 
     env._get_observations = types.MethodType(_get_observations, env)
+    env.reset = types.MethodType(reset, env)
+    env.step = types.MethodType(step, env)
     env_cls.__getattr__ = __getattr__
     env_cls.episode_length_buf = property(
         lambda self: self.env.episode_length_buf,
@@ -1210,7 +1388,7 @@ def main():
     env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
 
     runner = OnPolicyRunner(env, runner_cfg.to_dict(), log_dir=str(run_dir), device=str(runner_cfg.device))
-    runner.add_git_repo_to_log(__file__)
+    runner.git_status_repos = [__file__]
     try:
         runner.learn(num_learning_iterations=int(runner_cfg.max_iterations), init_at_random_ep_len=True)
     finally:
