@@ -11,12 +11,12 @@ world:
   base_z_m: 0.0
   bounds_size_m: 200.0
   origin_mode: "center"
-  # Match the older Chocolate/GPUDrive crop behavior by default.
   origin_center_mode: "mean"
 
 road:
-  # Use PointInstancer for fast lane rendering.
-  render_mode: "point_instancer"
+  # Use explicit prims for video/debug runs. This is slower than PointInstancer
+  # but avoids the live GPU/Fabric rendering corruption we still see in headless capture.
+  render_mode: "explicit_prims"
   jump_break_m: 3.0
   seg_width: 0.10
   seg_height: 0.01

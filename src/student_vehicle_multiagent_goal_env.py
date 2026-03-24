@@ -14,11 +14,16 @@ from src.student_vehicle_goal_env import (
     DEFAULT_STUDENT_VEHICLE_USD,
     _default_tunable_config_json,
     _dry_ground_material_cfg,
+    _hide_ground_visuals,
     _spawn_ground,
     _source_env_vehicle_root_path,
     build_student_vehicle_articulation_cfg,
 )
-from src.scene_factory_multiworld_scene import extract_vehicle_spawns_from_json, _build_roads_only, _load_yaml
+from src.scene_factory_multiworld_scene import (
+    _build_single_world_roads_only,
+    _load_yaml,
+    extract_vehicle_spawns_from_json,
+)
 from src.student_vehicle_sysid import (
     StudentTunableConfig,
     _apply_runtime_student_dynamics,
@@ -34,6 +39,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg
 from isaaclab.markers import CUBOID_MARKER_CFG, VisualizationMarkers
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors.camera import Camera, CameraCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, sample_uniform, subtract_frame_transforms
@@ -65,23 +71,6 @@ def configure_multi_agent_spaces(cfg: "StudentVehicleMultiAgentGoalEnvCfg", num_
     return cfg
 
 
-def _scene_bbox_extent_xy(scene_json_path: str | Path) -> tuple[float, float]:
-    import json
-
-    with Path(scene_json_path).expanduser().resolve().open("r", encoding="utf-8") as handle:
-        scene_cfg = json.load(handle)
-    points: list[tuple[float, float]] = []
-    for polyline in ((scene_cfg.get("road") or {}).get("polylines") or []):
-        for point in (polyline.get("xyz") or []):
-            if len(point) >= 2:
-                points.append((float(point[0]), float(point[1])))
-    if not points:
-        return (0.0, 0.0)
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    return (float(max(xs) - min(xs)), float(max(ys) - min(ys)))
-
-
 def resolve_scene_factory_world_and_spawns(cfg: "StudentVehicleMultiAgentGoalEnvCfg"):
     scene_factory_cfg = _load_yaml(cfg.scene_factory_config_path)
     world_specs = prepare_stage_world_specs(scene_factory_cfg)
@@ -91,66 +80,39 @@ def resolve_scene_factory_world_and_spawns(cfg: "StudentVehicleMultiAgentGoalEnv
     vehicles_cfg = dict(scene_factory_cfg.get("vehicles", {}) or {})
     bounds_size_m = float((scene_factory_cfg.get("world", {}) or {}).get("bounds_size_m", 200.0))
     origin_mode = str((scene_factory_cfg.get("world", {}) or {}).get("origin_mode", "center"))
+    origin_center_mode = str((scene_factory_cfg.get("world", {}) or {}).get("origin_center_mode", "mean"))
     requested_agents = max(int(cfg.num_agents_per_env), 1)
 
-    def _extract(spec):
-        spawns = extract_vehicle_spawns_from_json(
-            spec.scene_json_path,
-            bounds_size_m=bounds_size_m,
-            origin_mode=origin_mode,
-            max_controllable=requested_agents,
-            require_goal_in_bounds=bool(vehicles_cfg.get("require_goal_in_bounds", True)),
-            skip_if_start_in_goal=bool(vehicles_cfg.get("skip_if_start_in_goal", True)),
-            goal_radius_m=float(vehicles_cfg.get("goal_radius_m", cfg.goal_reached_threshold_m)),
-            start_goal_thresh_m=vehicles_cfg.get("start_goal_thresh_m"),
-        )
-        width_m, height_m = _scene_bbox_extent_xy(spec.scene_json_path)
-        overflow_m = max(0.0, width_m - bounds_size_m) + max(0.0, height_m - bounds_size_m)
-        return list(spawns), width_m, height_m, overflow_m
-
     requested_world_index = int(cfg.scene_factory_world_index)
-    if requested_world_index >= 0:
-        world_spec = world_specs[requested_world_index % len(world_specs)]
-        spawns, width_m, height_m, overflow_m = _extract(world_spec)
-        print(
-            "[INFO] SceneFactory world selection: "
-            f"world_index={world_spec.world_index} scene={world_spec.scene_json_name} "
-            f"bbox={width_m:.1f}x{height_m:.1f}m overflow={overflow_m:.1f}m spawns={len(spawns)}"
-        )
-        return world_spec, spawns
-
-    best_spec = None
-    best_spawns = None
-    best_key = None
-    best_dims = None
-    for world_spec in world_specs:
-        spawns, width_m, height_m, overflow_m = _extract(world_spec)
-        enough_agents = len(spawns) >= requested_agents
-        key = (
-            0 if enough_agents else 1,
-            overflow_m,
-            -min(len(spawns), requested_agents),
-            width_m * height_m,
-            world_spec.world_index,
-        )
-        if best_key is None or key < best_key:
-            best_key = key
-            best_spec = world_spec
-            best_spawns = spawns
-            best_dims = (width_m, height_m, overflow_m)
-
-    assert best_spec is not None and best_spawns is not None and best_dims is not None
-    print(
-        "[INFO] Auto-selected SceneFactory world: "
-        f"world_index={best_spec.world_index} scene={best_spec.scene_json_name} "
-        f"bbox={best_dims[0]:.1f}x{best_dims[1]:.1f}m overflow={best_dims[2]:.1f}m spawns={len(best_spawns)}"
+    world_spec = world_specs[requested_world_index % len(world_specs)]
+    spawns = extract_vehicle_spawns_from_json(
+        world_spec.scene_json_path,
+        bounds_size_m=bounds_size_m,
+        origin_mode=origin_mode,
+        origin_center_mode=origin_center_mode,
+        max_controllable=requested_agents,
+        require_goal_in_bounds=bool(vehicles_cfg.get("require_goal_in_bounds", True)),
+        skip_if_start_in_goal=bool(vehicles_cfg.get("skip_if_start_in_goal", True)),
+        goal_radius_m=float(vehicles_cfg.get("goal_radius_m", cfg.goal_reached_threshold_m)),
+        start_goal_thresh_m=vehicles_cfg.get("start_goal_thresh_m"),
     )
-    return best_spec, best_spawns
+    print(
+        "[INFO] SceneFactory world selection: "
+        f"world_index={world_spec.world_index} scene={world_spec.scene_json_name} spawns={len(spawns)} "
+        f"crop={bounds_size_m:.1f}x{bounds_size_m:.1f}m origin_mode={origin_mode} center_mode={origin_center_mode}"
+    )
+    return world_spec, list(spawns)
 
 
 def resolve_scene_factory_spawn_subset(cfg: "StudentVehicleMultiAgentGoalEnvCfg") -> list:
     _, spawns = resolve_scene_factory_world_and_spawns(cfg)
     return spawns
+
+
+def _scene_factory_road_render_mode(cfg: "StudentVehicleMultiAgentGoalEnvCfg") -> str:
+    scene_factory_cfg = _load_yaml(cfg.scene_factory_config_path)
+    road_cfg = dict(scene_factory_cfg.get("road", {}) or {})
+    return str(road_cfg.get("render_mode", "point_instancer")).strip().lower()
 
 
 @configclass
@@ -233,11 +195,22 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     reward_collision_penalty: float = -15.0
     reward_crash_penalty: float = -10.0
 
+    capture_camera_enabled: bool = False
+    capture_camera_width: int = 1280
+    capture_camera_height: int = 720
+    capture_camera_focal_length: float = 24.0
+    capture_camera_horizontal_aperture: float = 20.955
+    capture_camera_padding_scale: float = 1.35
+    capture_camera_height_scale: float = 1.6
+    capture_camera_view_mode: str = "whole_grid"
+    capture_camera_env_index: int = 0
+
 
 class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
     cfg: StudentVehicleMultiAgentGoalEnvCfg
 
     def __init__(self, cfg: StudentVehicleMultiAgentGoalEnvCfg, render_mode: str | None = None, **kwargs):
+        self._capture_camera: Camera | None = None
         self._scenario_spawns: list | None = None
         self._scene_factory_scene_json_path: str | None = None
         if bool(cfg.use_scene_factory_roads):
@@ -264,6 +237,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         )
         self._agent_ids = list(cfg.possible_agents)
         super().__init__(cfg, render_mode, **kwargs)
+        self._configure_capture_camera_pose()
 
         self._num_agents = len(self._agent_ids)
         self._vehicles = [self.scene.articulations[agent_id] for agent_id in self._agent_ids]
@@ -382,9 +356,6 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         import omni.usd
 
         stage = omni.usd.get_context().get_stage()
-        if self.cfg.use_scene_factory_roads:
-            self._setup_scene_factory_source_world(stage)
-
         spawned_vehicles: dict[str, Articulation] = {}
         for agent_idx, agent_id in enumerate(self._agent_ids):
             prim_path = f"/World/envs/env_.*/Vehicle_{agent_idx}"
@@ -402,8 +373,13 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             )
 
         _spawn_ground("/World/ground", _dry_ground_material_cfg(self._tunable_config), mode=self.cfg.ground_mode)
+        if self.cfg.use_scene_factory_roads and str(self.cfg.ground_mode).strip().lower() == "plane":
+            _hide_ground_visuals("/World/ground")
 
         self.scene.clone_environments(copy_from_source=False)
+        if self.cfg.use_scene_factory_roads:
+            print("[INFO] Building SceneFactory roads independently inside each env after cloning.")
+            self._build_scene_factory_worlds(stage)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=["/World/ground"])
         for agent_id, vehicle in spawned_vehicles.items():
@@ -412,22 +388,120 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2500.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+        self._spawn_capture_camera()
 
-    def _setup_scene_factory_source_world(self, stage) -> None:
+    def _spawn_capture_camera(self) -> None:
+        if not bool(self.cfg.capture_camera_enabled):
+            self._capture_camera = None
+            return
+
+        camera_cfg = CameraCfg(
+            prim_path="/World/SceneFactoryCaptureCamera",
+            update_period=0.0,
+            height=int(self.cfg.capture_camera_height),
+            width=int(self.cfg.capture_camera_width),
+            data_types=["rgb"],
+            colorize_instance_id_segmentation=False,
+            colorize_instance_segmentation=False,
+            colorize_semantic_segmentation=False,
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=float(self.cfg.capture_camera_focal_length),
+                focus_distance=400.0,
+                horizontal_aperture=float(self.cfg.capture_camera_horizontal_aperture),
+                clipping_range=(0.1, 1.0e6),
+            ),
+        )
+        self._capture_camera = Camera(camera_cfg)
+
+    def _configure_capture_camera_pose(self) -> None:
+        if self._capture_camera is None:
+            return
+
+        env_origins = self.scene.env_origins.detach()
+        view_mode = str(self.cfg.capture_camera_view_mode).strip().lower()
+        if view_mode == "single_env":
+            env_index = int(np.clip(int(self.cfg.capture_camera_env_index), 0, max(self.num_envs - 1, 0)))
+            scene_center = env_origins[env_index]
+            xy_extent = 0.0
+            coverage_radius = float(self.cfg.max_distance_from_origin_m) * float(self.cfg.capture_camera_padding_scale)
+        else:
+            scene_center = env_origins.mean(dim=0)
+            if self.num_envs > 1:
+                xy_extent = torch.linalg.norm(env_origins[:, :2] - scene_center[:2], dim=1).max().item()
+            else:
+                xy_extent = 0.0
+            coverage_radius = (
+                float(xy_extent)
+                + float(self.cfg.max_distance_from_origin_m)
+                + float(self.cfg.scene.env_spacing) * 0.25
+            ) * float(self.cfg.capture_camera_padding_scale)
+        capture_height = max(
+            40.0,
+            float(self.cfg.capture_camera_height_scale) * float(max(25.0, coverage_radius)),
+        )
+        eye = torch.tensor(
+            [[float(scene_center[0]), float(scene_center[1]), capture_height]],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        target = torch.tensor(
+            [[float(scene_center[0]), float(scene_center[1]), 0.0]],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._capture_camera.set_world_poses_from_view(eyes=eye, targets=target)
+
+    def capture_fixed_camera_frame(self) -> np.ndarray | None:
+        if self._capture_camera is None:
+            return None
+        self._capture_camera.update(self.step_dt)
+        rgb = self._capture_camera.data.output.get("rgb")
+        if rgb is None or rgb.numel() == 0:
+            return None
+        return rgb[0].detach().cpu().numpy().copy()
+
+    def _build_scene_factory_world(self, stage, *, world_root: str) -> None:
         scene_factory_cfg = _load_yaml(self.cfg.scene_factory_config_path)
         if not self._scene_factory_scene_json_path:
             world_spec, _ = resolve_scene_factory_world_and_spawns(self.cfg)
             self._scene_factory_scene_json_path = str(Path(world_spec.scene_json_path).expanduser().resolve())
-
-        build_cfg = dict(scene_factory_cfg)
-        build_cfg["world"] = dict(scene_factory_cfg.get("world", {}) or {})
-        build_cfg["world"]["root_container"] = "/World/envs/env_0/SceneFactoryWorlds"
-        build_cfg["world"]["world_count"] = 1
-        build_cfg["world"]["grid_cols"] = 1
-        build_cfg["world"]["padding_m"] = 0.0
-        _build_roads_only(stage=stage, cfg=build_cfg, json_paths=[self._scene_factory_scene_json_path])
         if self._scenario_spawns is None:
             self._scenario_spawns = resolve_scene_factory_spawn_subset(self.cfg)[: int(self.cfg.num_agents_per_env)]
+        build_cfg = dict(scene_factory_cfg)
+        build_cfg["world"] = dict(scene_factory_cfg.get("world", {}) or {})
+        _build_single_world_roads_only(
+            stage=stage,
+            cfg=build_cfg,
+            json_path=self._scene_factory_scene_json_path,
+            world_root=world_root,
+        )
+        self._build_scene_factory_visual_floor(stage, world_root=world_root)
+
+    def _build_scene_factory_worlds(self, stage) -> None:
+        for env_index in range(int(self.cfg.scene.num_envs)):
+            world_root = f"/World/envs/env_{env_index}/SceneFactoryWorlds/world_000"
+            self._build_scene_factory_world(stage, world_root=world_root)
+
+    def _build_scene_factory_visual_floor(self, stage, *, world_root: str) -> None:
+        from pxr import Gf, UsdGeom
+
+        scene_factory_cfg = _load_yaml(self.cfg.scene_factory_config_path)
+        world_cfg = dict(scene_factory_cfg.get("world", {}) or {})
+        bounds_size_m = float(world_cfg.get("bounds_size_m", 200.0))
+        # Keep a thin visual-only floor slightly above the hidden physics plane so it reliably
+        # wins the render without intersecting the road bars.
+        floor_thickness_m = 0.01
+        floor_color = Gf.Vec3f(0.18, 0.18, 0.20)
+        floor_path = f"{world_root}/VisualFloor"
+        cube = UsdGeom.Cube.Define(stage, floor_path)
+        cube.GetSizeAttr().Set(1.0)
+        api = UsdGeom.XformCommonAPI(cube)
+        api.SetTranslate(Gf.Vec3d(0.0, 0.0, 0.0))
+        api.SetScale(Gf.Vec3f(bounds_size_m, bounds_size_m, floor_thickness_m))
+        try:
+            UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([floor_color])
+        except Exception:
+            pass
 
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]):
         for agent_idx, agent_id in enumerate(self._agent_ids):
@@ -894,3 +968,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def tunable_config_dict(self) -> dict:
         return asdict(self._tunable_config)
+
+    def close(self):
+        if self._capture_camera is not None:
+            del self._capture_camera
+            self._capture_camera = None
+        super().close()

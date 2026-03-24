@@ -136,25 +136,33 @@ def _spawn_ground(
 ):
     mode = str(mode).strip().lower()
     if mode == "plane":
-        import omni.usd
-        from omni.physx.scripts import physicsUtils
-        from pxr import Gf
-
-        stage = omni.usd.get_context().get_stage()
-        physicsUtils.add_ground_plane(
-            stage=stage,
-            planePath=prim_path,
-            axis="Z",
-            size=500.0,
-            position=Gf.Vec3f(0.0, 0.0, 0.0),
-            color=Gf.Vec3f(0.24, 0.24, 0.24),
+        ground_cfg = sim_utils.GroundPlaneCfg(
+            color=(0.02, 0.02, 0.02),
+            size=(500.0, 500.0),
+            physics_material=physics_material,
         )
-        physics_material.func(f"{prim_path}/physicsMaterial", physics_material)
-        sim_utils.bind_physics_material(f"{prim_path}/CollisionPlane", f"{prim_path}/physicsMaterial")
+        ground_cfg.func(prim_path, ground_cfg)
         return
     if mode != "cuboid":
         raise ValueError(f"Unsupported ground mode: {mode!r}")
     _spawn_local_ground_plane(prim_path, physics_material)
+
+
+def _hide_ground_visuals(prim_path: str) -> None:
+    import omni.usd
+    from pxr import Usd, UsdGeom
+
+    stage = omni.usd.get_context().get_stage()
+    root = stage.GetPrimAtPath(str(prim_path))
+    if not root.IsValid():
+        return
+    for prim in Usd.PrimRange(root):
+        try:
+            imageable = UsdGeom.Imageable(prim)
+            if imageable:
+                imageable.MakeInvisible()
+        except Exception:
+            continue
 
 
 @configclass

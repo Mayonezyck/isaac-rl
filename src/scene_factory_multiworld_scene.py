@@ -12,6 +12,7 @@ import numpy as np
 import yaml
 
 from src.isaaclab_bootstrap import ensure_isaaclab_source_paths
+from src.trfc.lane_center_sampler import compute_scene_center_from_road
 
 ensure_isaaclab_source_paths()
 
@@ -97,7 +98,11 @@ def _coerce_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
-def _compute_scene_center_from_cfg(scene_cfg: Mapping[str, Any]) -> np.ndarray:
+def _compute_scene_center_from_cfg(scene_cfg: Mapping[str, Any], *, center_mode: str = "mean") -> np.ndarray:
+    center_mode = str(center_mode).strip().lower()
+    if center_mode != "bbox":
+        return compute_scene_center_from_road(dict(scene_cfg))
+
     road = scene_cfg.get("road", {}) or {}
     polylines = road.get("polylines", []) or []
     all_points: list[np.ndarray] = []
@@ -114,9 +119,11 @@ def _compute_scene_center_from_cfg(scene_cfg: Mapping[str, Any]) -> np.ndarray:
     if not all_points:
         return np.zeros((3,), dtype=np.float32)
     points = np.concatenate(all_points, axis=0)
-    mins = points.min(axis=0)
-    maxs = points.max(axis=0)
-    return 0.5 * (mins + maxs)
+    if center_mode == "bbox":
+        mins = points.min(axis=0)
+        maxs = points.max(axis=0)
+        return 0.5 * (mins + maxs)
+    return compute_scene_center_from_road(dict(scene_cfg))
 
 
 def _in_bounds_xy(x: float, y: float, bounds_size_m: float) -> bool:
@@ -137,6 +144,7 @@ def extract_vehicle_spawns_from_scene_cfg(
     *,
     bounds_size_m: float,
     origin_mode: str,
+    origin_center_mode: str,
     max_controllable: int,
     require_goal_in_bounds: bool,
     skip_if_start_in_goal: bool,
@@ -144,7 +152,9 @@ def extract_vehicle_spawns_from_scene_cfg(
     start_goal_thresh_m: float | None,
 ) -> list[ScenarioVehicleSpawn]:
     scene_center = (
-        _compute_scene_center_from_cfg(scene_cfg) if str(origin_mode).strip().lower() == "center" else np.zeros((3,), dtype=np.float32)
+        _compute_scene_center_from_cfg(scene_cfg, center_mode=origin_center_mode)
+        if str(origin_mode).strip().lower() == "center"
+        else np.zeros((3,), dtype=np.float32)
     )
     agents = (scene_cfg.get("agents", {}) or {}).get("items", []) or []
     spawns: list[ScenarioVehicleSpawn] = []
@@ -199,6 +209,7 @@ def extract_vehicle_spawns_from_json(
     *,
     bounds_size_m: float,
     origin_mode: str,
+    origin_center_mode: str,
     max_controllable: int,
     require_goal_in_bounds: bool,
     skip_if_start_in_goal: bool,
@@ -209,6 +220,7 @@ def extract_vehicle_spawns_from_json(
         _load_scene_cfg(json_path),
         bounds_size_m=bounds_size_m,
         origin_mode=origin_mode,
+        origin_center_mode=origin_center_mode,
         max_controllable=max_controllable,
         require_goal_in_bounds=require_goal_in_bounds,
         skip_if_start_in_goal=skip_if_start_in_goal,
@@ -276,6 +288,7 @@ def _build_roads_only(
         root_container=str(world_cfg.get("root_container", "/World/SceneFactoryWorlds")),
         layout=layout,
         origin_mode=str(world_cfg.get("origin_mode", "center")),
+        origin_center_mode=str(world_cfg.get("origin_center_mode", "mean")),
     )
     constructor.clear_all()
     constructor.build(
@@ -299,12 +312,64 @@ def _build_roads_only(
         trigger_match_segment=bool(road_cfg.get("trigger_match_segment", True)),
         trigger_script_enable=bool(road_cfg.get("trigger_script_enable", True)),
         allowed_road_types=road_cfg.get("allowed_types"),
+        road_render_mode=str(road_cfg.get("render_mode", "point_instancer")),
         spawn_z_m=1.0,
         goal_radius_m=3.0,
         parked_if_start_in_goal=False,
         skip_if_start_in_goal=True,
     )
     return constructor
+
+
+def _build_single_world_roads_only(
+    *,
+    stage: Any,
+    cfg: Mapping[str, Any],
+    json_path: str | Path,
+    world_root: str,
+) -> None:
+    from src.chocolate_waymo_builder import LocalBounds, WaymoJsonMiniWorldBuilder
+
+    world_cfg = dict(cfg.get("world", {}) or {})
+    road_cfg = dict(cfg.get("road", {}) or {})
+
+    stage.RemovePrim(str(world_root))
+    builder = WaymoJsonMiniWorldBuilder(
+        stage=stage,
+        world_root=str(world_root),
+        bounds=LocalBounds(
+            width_m=float(world_cfg.get("bounds_size_m", world_cfg.get("world_size_m", [200.0, 200.0])[0])),
+            length_m=float(world_cfg.get("bounds_size_m", world_cfg.get("world_size_m", [200.0, 200.0])[1])),
+            origin_xy=(0.0, 0.0),
+        ),
+        origin_mode=str(world_cfg.get("origin_mode", "center")),
+        origin_center_mode=str(world_cfg.get("origin_center_mode", "mean")),
+    )
+    builder.build_from_json(
+        str(Path(json_path).expanduser().resolve()),
+        max_agents=0,
+        polyline_reduction_area=float(road_cfg.get("polyline_reduction_area", 0.0)),
+        min_points_for_reduction=int(road_cfg.get("min_points_for_reduction", 10)),
+        jump_break_m=float(road_cfg.get("jump_break_m", 3.0)),
+        seg_width=float(road_cfg.get("seg_width", 0.10)),
+        seg_height=float(road_cfg.get("seg_height", 0.10)),
+        z_lift=float(road_cfg.get("z_lift", 0.02)),
+        flatten_road_z=bool(road_cfg.get("flatten_road_z", road_cfg.get("flatten_road", True))),
+        road_z_m=float(road_cfg.get("road_z_m", 0.0)),
+        enable_segment_collision=bool(road_cfg.get("enable_segment_collision", False)),
+        trigger_enable=bool(road_cfg.get("trigger_enable", False)),
+        trigger_height_m=float(road_cfg.get("trigger_height_m", 1.0)),
+        trigger_width_scale=float(road_cfg.get("trigger_width_scale", 1.0)),
+        trigger_offset_z_m=float(road_cfg.get("trigger_offset_z_m", 0.5)),
+        trigger_match_segment=bool(road_cfg.get("trigger_match_segment", True)),
+        trigger_script_enable=bool(road_cfg.get("trigger_script_enable", True)),
+        allowed_road_types=road_cfg.get("allowed_types"),
+        road_render_mode=str(road_cfg.get("render_mode", "point_instancer")),
+        spawn_z_m=1.0,
+        goal_radius_m=3.0,
+        parked_if_start_in_goal=False,
+        skip_if_start_in_goal=True,
+    )
 
 
 def _apply_view(stage: Any, cfg: Mapping[str, Any], sim: Any) -> None:
@@ -339,6 +404,7 @@ def _spawn_controllable_vehicles(
     root_container = str(world_cfg.get("root_container", "/World/SceneFactoryWorlds"))
     bounds_size_m = float(world_cfg.get("bounds_size_m", 200.0))
     origin_mode = str(world_cfg.get("origin_mode", "center"))
+    origin_center_mode = str(world_cfg.get("origin_center_mode", "mean"))
 
     student_usd_path = str(
         Path(vehicles_cfg.get("student_usd", DEFAULT_STUDENT_VEHICLE_USD)).expanduser().resolve()
@@ -373,6 +439,7 @@ def _spawn_controllable_vehicles(
             world_spec.scene_json_path,
             bounds_size_m=bounds_size_m,
             origin_mode=origin_mode,
+            origin_center_mode=origin_center_mode,
             max_controllable=max_controllable,
             require_goal_in_bounds=require_goal_in_bounds,
             skip_if_start_in_goal=skip_if_start_in_goal,

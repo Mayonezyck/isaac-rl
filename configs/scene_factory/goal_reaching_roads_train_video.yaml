@@ -1,17 +1,17 @@
-# SceneFactory road-goal-reaching training preset.
+# SceneFactory road-goal-reaching training preset with headless video recording.
 # Usage:
 #   CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 conda run -n isaac-pytorch python -u \
 #     -m src.train_student_vehicle_goal_multiagent_rsl_rl \
-#     --config configs/scene_factory/goal_reaching_roads_train.yaml \
+#     --config configs/scene_factory/goal_reaching_roads_train_video.yaml \
 #     --headless
 #
 # Purpose:
 # - train on SceneFactory road geometry instead of an empty plane
 # - keep the policy observation minimal: only goal-reaching terms
-# - use scenario-derived start/goal pairs from the selected SceneFactory world
+# - record periodic headless videos from a fixed scene camera while training
 
 env:
-  num_envs: 16
+  num_envs: 8
   num_agents_per_env: 2
   observation_mode: "goal_reaching"
   env_spacing: 240.0
@@ -27,12 +27,10 @@ env:
   max_distance_from_origin_m: 100.0
   agent_neighbor_obs_scale_m: 100.0
   replicate_physics: true
-  clone_in_fabric: "auto"
+  clone_in_fabric: "false"
 
 scene_factory:
   config_path: "configs/scene_factory/multiworld_scene.yaml"
-  # Select the source scene explicitly. SceneFactory center-crops the configured world_size
-  # around the scene center and does not reject a scene just because it is larger.
   world_index: 0
 
 assets:
@@ -43,7 +41,7 @@ runner:
   log_dir: "logs/rsl_rl"
   seed: 42
   experiment_name: "scene_factory_goal_reaching_roads"
-  run_name: "train"
+  run_name: "train_video"
   max_iterations: 300
   num_steps_per_env: 32
   save_interval: 25
@@ -54,6 +52,27 @@ runner:
   clip_param: 0.2
   desired_kl: 0.01
 
+video:
+  enabled: true
+  # Record one clip every N environment steps.
+  interval: 2500
+  # Length in environment steps for each captured clip.
+  length: 300
+  # File prefix inside the run's videos/train directory.
+  name_prefix: "train"
+  # Fixed sensor camera output resolution.
+  width: 1280
+  height: 720
+  # Output video fps.
+  fps: 20
+  # Match the older chocolate capture style more closely: record one environment's
+  # SceneFactory world instead of the entire parallel-env grid.
+  view_mode: "single_env"
+  env_index: 0
+
 app:
   device: "cuda:0"
   rl_device: "cuda:0"
+
+sim:
+  use_fabric: true

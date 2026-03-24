@@ -140,6 +140,12 @@ parser.add_argument(
     default=str(_cfg_value(file_cfg, "app", "rl_device", "")),
     help="Device for the PPO runner. Empty defaults to sim device.",
 )
+parser.add_argument(
+    "--use_fabric",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "sim", "use_fabric", True)),
+    help="Enable Isaac Lab Fabric. Disable this for SceneFactory road stage-dump/debug runs to isolate PointInstancer issues.",
+)
 parser.add_argument("--num_steps_per_env", type=int, default=int(_cfg_value(file_cfg, "runner", "num_steps_per_env", 32)), help="Rollout steps per env for each PPO update.")
 parser.add_argument("--save_interval", type=int, default=int(_cfg_value(file_cfg, "runner", "save_interval", 10)), help="Checkpoint save interval in iterations.")
 parser.add_argument("--learning_rate", type=float, default=float(_cfg_value(file_cfg, "runner", "learning_rate", 3.0e-4)), help="PPO learning rate.")
@@ -150,15 +156,112 @@ parser.add_argument("--clip_param", type=float, default=float(_cfg_value(file_cf
 parser.add_argument("--desired_kl", type=float, default=float(_cfg_value(file_cfg, "runner", "desired_kl", 0.01)), help="Target KL for adaptive LR schedule.")
 parser.add_argument("--experiment_name", type=str, default=str(_cfg_value(file_cfg, "runner", "experiment_name", "student_vehicle_goal_multiagent")), help="Experiment name.")
 parser.add_argument("--run_name", type=str, default=str(_cfg_value(file_cfg, "runner", "run_name", "smoke")), help="Optional run-name suffix.")
+parser.add_argument(
+    "--video",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "video", "enabled", False)),
+    help="Record rollout videos during training using a fixed camera sensor.",
+)
+parser.add_argument(
+    "--video_interval",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "interval", 2500)),
+    help="Global environment-step interval between recorded training videos.",
+)
+parser.add_argument(
+    "--video_length",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "length", 300)),
+    help="Number of environment steps captured in each training video.",
+)
+parser.add_argument(
+    "--video_name_prefix",
+    type=str,
+    default=str(_cfg_value(file_cfg, "video", "name_prefix", "train")),
+    help="Filename prefix for recorded training videos.",
+)
+parser.add_argument(
+    "--video_width",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "width", 1280)),
+    help="Width in pixels for the fixed training capture camera.",
+)
+parser.add_argument(
+    "--video_height",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "height", 720)),
+    help="Height in pixels for the fixed training capture camera.",
+)
+parser.add_argument(
+    "--video_fps",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "fps", 20)),
+    help="Output fps for saved training clips.",
+)
+parser.add_argument(
+    "--video_view_mode",
+    choices=("whole_grid", "single_env"),
+    default=str(_cfg_value(file_cfg, "video", "view_mode", "whole_grid")),
+    help="Capture either the whole training grid or a single environment.",
+)
+parser.add_argument(
+    "--video_env_index",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "env_index", 0)),
+    help="Environment index to focus when video_view_mode=single_env.",
+)
+parser.add_argument(
+    "--save_stage_usd",
+    type=str,
+    default=str(_cfg_value(file_cfg, "debug", "save_stage_usd", "")),
+    help="Optional path to export the initialized training stage before learning starts.",
+)
+parser.add_argument(
+    "--exit_after_stage_save",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "debug", "exit_after_stage_save", False)),
+    help="Exit immediately after saving the initialized stage debug dump.",
+)
 AppLauncher.add_app_launcher_args(parser)
-parser.set_defaults(device=_cfg_value(file_cfg, "app", "device", None))
+parser.set_defaults(
+    device=_cfg_value(file_cfg, "app", "device", None),
+    enable_cameras=bool(_cfg_value(file_cfg, "video", "enabled", False)),
+)
 args_cli = parser.parse_args()
+
+
+def _configure_headless_camera_environment(args: argparse.Namespace) -> None:
+    """Force a true offscreen path for headless camera/video runs.
+
+    On workstation setups with an active X display, Isaac Sim can still attempt a
+    GLX-backed initialization even when `--headless` is set. That breaks video
+    capture with errors such as `GLXBadFBConfig`. For headless runs that need
+    cameras, scrub GUI display variables before AppLauncher starts the app.
+    """
+
+    needs_offscreen_cameras = bool(getattr(args, "headless", False)) and bool(
+        getattr(args, "video", False) or getattr(args, "enable_cameras", False)
+    )
+    if not needs_offscreen_cameras:
+        return
+
+    if os.environ.get("DISPLAY"):
+        print(
+            f"[INFO][SceneFactory]: Unsetting DISPLAY={os.environ['DISPLAY']} for headless camera/video rendering."
+        )
+        os.environ.pop("DISPLAY", None)
+    os.environ.setdefault("HEADLESS", "1")
+    os.environ.setdefault("ENABLE_CAMERAS", "1")
+
+
+_configure_headless_camera_environment(args_cli)
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 
 import torch
+import gymnasium as gym
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
@@ -200,15 +303,23 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
         cfg.sim.device = str(args_cli.device)
     else:
         cfg.sim.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    cfg.sim.use_fabric = bool(args_cli.use_fabric)
     use_gpu_device = not str(cfg.sim.device).lower().startswith("cpu")
+    requires_camera_rendering = bool(args_cli.video) or bool(getattr(args_cli, "enable_cameras", False))
     if args_cli.clone_in_fabric == "auto":
         cfg.scene.clone_in_fabric = (
-            bool(getattr(args_cli, "headless", False)) and cfg.scene.replicate_physics and use_gpu_device
+            bool(getattr(args_cli, "headless", False))
+            and cfg.scene.replicate_physics
+            and use_gpu_device
+            and not requires_camera_rendering
         )
     else:
         cfg.scene.clone_in_fabric = (
             args_cli.clone_in_fabric == "true" and cfg.scene.replicate_physics and use_gpu_device
         )
+    if cfg.scene.clone_in_fabric and requires_camera_rendering:
+        print("[INFO][SceneFactory]: Disabling Fabric cloning for camera/video capture runs.")
+        cfg.scene.clone_in_fabric = False
     grid_extent = max(1.0, math.ceil(math.sqrt(max(1, cfg.scene.num_envs))) * float(cfg.scene.env_spacing))
     world_extent = max(
         float(args_cli.max_distance_from_origin_m),
@@ -223,6 +334,13 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.use_scene_factory_roads = bool(args_cli.use_scene_factory_roads)
     cfg.scene_factory_config_path = str(Path(args_cli.scene_factory_config).expanduser().resolve())
     cfg.scene_factory_world_index = int(args_cli.scene_factory_world_index)
+    if bool(cfg.use_scene_factory_roads):
+        road_cfg = dict(_load_yaml_config(cfg.scene_factory_config_path).get("road", {}) or {})
+        if str(road_cfg.get("render_mode", "point_instancer")).strip().lower() == "point_instancer":
+            print(
+                "[INFO][SceneFactory]: road_render_mode=point_instancer "
+                f"use_fabric={cfg.sim.use_fabric} clone_in_fabric={cfg.scene.clone_in_fabric}"
+            )
     cfg.start_radius_m = float(args_cli.start_radius_m)
     cfg.agent_spawn_circle_radius_m = float(args_cli.agent_spawn_circle_radius_m)
     cfg.agent_spawn_jitter_m = float(args_cli.agent_spawn_jitter_m)
@@ -232,6 +350,11 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.max_distance_from_origin_m = float(args_cli.max_distance_from_origin_m)
     cfg.agent_neighbor_obs_scale_m = float(args_cli.agent_neighbor_obs_scale_m)
     cfg.observation_mode = str(args_cli.observation_mode)
+    cfg.capture_camera_enabled = bool(args_cli.video)
+    cfg.capture_camera_width = int(args_cli.video_width)
+    cfg.capture_camera_height = int(args_cli.video_height)
+    cfg.capture_camera_view_mode = str(args_cli.video_view_mode)
+    cfg.capture_camera_env_index = int(args_cli.video_env_index)
     cfg.student_usd_path = str(Path(args_cli.student_usd or DEFAULT_STUDENT_VEHICLE_USD).expanduser().resolve())
     if str(args_cli.tunable_config_json):
         cfg.tunable_config_json = str(Path(args_cli.tunable_config_json).expanduser().resolve())
@@ -332,10 +455,22 @@ def _build_resolved_config(
             "clip_param": float(runner_cfg.algorithm.clip_param),
             "desired_kl": float(runner_cfg.algorithm.desired_kl),
         },
+        "video": {
+            "enabled": bool(args_cli.video),
+            "interval": int(args_cli.video_interval),
+            "length": int(args_cli.video_length),
+            "name_prefix": str(args_cli.video_name_prefix),
+            "width": int(args_cli.video_width),
+            "height": int(args_cli.video_height),
+            "fps": int(args_cli.video_fps),
+            "view_mode": str(args_cli.video_view_mode),
+            "env_index": int(args_cli.video_env_index),
+        },
         "app": {
             "device": str(env_cfg.sim.device),
             "rl_device": str(runner_cfg.device),
             "headless": bool(getattr(args_cli, "headless", False)),
+            "enable_cameras": bool(getattr(args_cli, "enable_cameras", False)),
         },
     }
 
@@ -371,11 +506,43 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "observation_mode": env_cfg.observation_mode,
         },
         "runner_cfg": runner_cfg.to_dict(),
+        "video_cfg": {
+            "enabled": bool(args_cli.video),
+            "interval": int(args_cli.video_interval),
+            "length": int(args_cli.video_length),
+            "name_prefix": str(args_cli.video_name_prefix),
+            "width": int(args_cli.video_width),
+            "height": int(args_cli.video_height),
+            "fps": int(args_cli.video_fps),
+            "view_mode": str(args_cli.video_view_mode),
+            "env_index": int(args_cli.video_env_index),
+        },
     }
     (run_dir / "params" / "run.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     dump_yaml(str(run_dir / "params" / "env.yaml"), env_cfg)
     dump_yaml(str(run_dir / "params" / "agent.yaml"), runner_cfg)
     dump_yaml(str(run_dir / "params" / "resolved_config.yaml"), resolved_cfg)
+
+
+def _maybe_save_stage_usd(save_stage_usd: str) -> None:
+    if not str(save_stage_usd).strip():
+        return
+    import omni.usd
+
+    save_path = Path(save_stage_usd).expanduser().resolve()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    usd_context = omni.usd.get_context()
+    stage = usd_context.get_stage()
+    if stage is None:
+        raise RuntimeError("Unable to access current USD stage for stage export.")
+    print(f"[INFO][SceneFactory] Exporting initialized training stage to {save_path} ...", flush=True)
+    start_time = time.time()
+    stage.Export(str(save_path))
+    print(
+        f"[INFO][SceneFactory] Saved initialized training stage to {save_path} "
+        f"in {time.time() - start_time:.2f}s",
+        flush=True,
+    )
 
 
 def _patch_single_agent_marl_observation_bridge(env) -> None:
@@ -412,6 +579,80 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
     )
 
 
+class SensorVideoRecorderWrapper(gym.Wrapper):
+    """Record periodic training clips from a fixed Isaac Lab camera sensor."""
+
+    def __init__(self, env, capture_env: StudentVehicleMultiAgentGoalEnv, run_dir: Path):
+        super().__init__(env)
+        self._capture_env = capture_env
+        self._video_dir = run_dir / "videos" / "train"
+        self._video_dir.mkdir(parents=True, exist_ok=True)
+        self._interval = max(1, int(args_cli.video_interval))
+        self._length = max(1, int(args_cli.video_length))
+        self._fps = max(1, int(args_cli.video_fps))
+        self._name_prefix = str(args_cli.video_name_prefix)
+        self._global_step = 0
+        self._clip_index = 0
+        self._recording = False
+        self._frames: list = []
+
+    def _start_clip(self) -> None:
+        if self._recording:
+            return
+        self._recording = True
+        self._frames = []
+
+    def _capture_frame(self) -> None:
+        if not self._recording:
+            return
+        frame = self._capture_env.capture_fixed_camera_frame()
+        if frame is not None:
+            self._frames.append(frame)
+        if len(self._frames) >= self._length:
+            self._finish_clip()
+
+    def _finish_clip(self) -> None:
+        if not self._recording:
+            return
+        self._recording = False
+        if len(self._frames) == 0:
+            self._frames = []
+            return
+        import imageio.v2 as imageio
+
+        output_path = self._video_dir / f"{self._name_prefix}_{self._clip_index:04d}.mp4"
+        with imageio.get_writer(str(output_path), fps=self._fps) as writer:
+            for frame in self._frames:
+                writer.append_data(frame)
+        self._clip_index += 1
+        self._frames = []
+
+    def reset(self, **kwargs):
+        output = self.env.reset(**kwargs)
+        if self._global_step % self._interval == 0:
+            self._start_clip()
+        self._capture_frame()
+        return output
+
+    def step(self, action):
+        output = self.env.step(action)
+        self._global_step += 1
+        if (not self._recording) and self._global_step % self._interval == 0:
+            self._start_clip()
+        self._capture_frame()
+        return output
+
+    def close(self):
+        self._finish_clip()
+        return super().close()
+
+
+def _maybe_wrap_video(env, capture_env: StudentVehicleMultiAgentGoalEnv, run_dir: Path):
+    if not bool(args_cli.video):
+        return env
+    return SensorVideoRecorderWrapper(env, capture_env=capture_env, run_dir=run_dir)
+
+
 def main():
     env_cfg = _build_env_cfg()
     runner_cfg = _build_runner_cfg(env_cfg.sim.device)
@@ -420,13 +661,20 @@ def main():
     print(f"[INFO] Logging RSL-RL run in: {run_dir}")
 
     start_time = time.time()
-    env = StudentVehicleMultiAgentGoalEnv(env_cfg, render_mode=None)
+    base_env = StudentVehicleMultiAgentGoalEnv(env_cfg, render_mode=None)
+    env = base_env
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
         _patch_single_agent_marl_observation_bridge(env)
+    env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
     env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
 
     _write_run_metadata(run_dir, env_cfg, runner_cfg)
+    _maybe_save_stage_usd(args_cli.save_stage_usd)
+    if bool(args_cli.exit_after_stage_save):
+        env.close()
+        print("[INFO][SceneFactory] Exiting after stage save as requested.")
+        return
 
     runner = OnPolicyRunner(env, runner_cfg.to_dict(), log_dir=str(run_dir), device=str(runner_cfg.device))
     runner.add_git_repo_to_log(__file__)

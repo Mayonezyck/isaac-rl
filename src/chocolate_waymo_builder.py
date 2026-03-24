@@ -12,6 +12,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
 
 import omni.usd
 import omni.kit.app
+from src.trfc.lane_center_sampler import compute_scene_center_from_road
 
 # ---- PhysX vehicle wizard imports ----
 #
@@ -90,7 +91,7 @@ def _safe_float(x, default=None) -> Optional[float]:
         return default
 
 def _quath_from_yaw_z(yaw_rad: float) -> Gf.Quath:
-    """Half-precision quat rotation about +Z."""
+    """Half-precision quaternion rotation about +Z for USD PointInstancer orientations."""
     half = 0.5 * float(yaw_rad)
     w = float(np.cos(half))
     z = float(np.sin(half))
@@ -340,11 +341,13 @@ class WaymoJsonMiniWorldBuilder:
         world_root: str = "/World/MiniWorlds/world_000",
         bounds: Optional[LocalBounds] = None,
         origin_mode: str = "center",  # "center" or "zero"
+        origin_center_mode: str = "mean",  # "mean" or "bbox"
     ):
         self.stage = stage or omni.usd.get_context().get_stage()
         self.world_root = world_root
         self.bounds = bounds or LocalBounds()
         self.origin_mode = origin_mode
+        self.origin_center_mode = str(origin_center_mode).strip().lower()
 
         self._scene_center = np.zeros((3,), dtype=np.float32)
 
@@ -372,6 +375,8 @@ class WaymoJsonMiniWorldBuilder:
 
     # -------- origin shift --------
     def _compute_scene_center_from_road(self, polylines: List[Dict[str, Any]]) -> np.ndarray:
+        if self.origin_center_mode != "bbox":
+            return compute_scene_center_from_road({"road": {"polylines": polylines}})
         all_pts = []
         for pl in polylines:
             xyz = pl.get("xyz", None)
@@ -421,6 +426,7 @@ class WaymoJsonMiniWorldBuilder:
         trigger_match_segment: bool = True,
         trigger_script_enable: bool = True,
         allowed_road_types: Optional[Sequence[int]] = None,
+        road_render_mode: str = "point_instancer",
     ) -> None:
         road = (cfg.get("road", {}) or {})
         polylines = road.get("polylines", []) or []
@@ -428,6 +434,9 @@ class WaymoJsonMiniWorldBuilder:
         road_dirs_all: List[Gf.Vec3f] = []
         road_types_all: List[int] = []
         allowed_types = None if allowed_road_types is None else {int(x) for x in allowed_road_types}
+        render_mode = str(road_render_mode).strip().lower()
+        if render_mode not in {"point_instancer", "explicit_prims"}:
+            raise ValueError(f"Unsupported road_render_mode: {road_render_mode!r}")
 
         # compute scene center (for origin_mode="center")
         if self.origin_mode == "center":
@@ -463,10 +472,12 @@ class WaymoJsonMiniWorldBuilder:
 
             by_type.setdefault(t, []).append(pts_local)
 
-        # build one PointInstancer per type
+        # Build one road group per type. Point instancers are compact but have been unstable under
+        # fabric/visibility updates for these road lines, so explicit prims are supported as a
+        # clean fallback for SceneFactory.
         for t, polys in sorted(by_type.items(), key=lambda kv: kv[0]):
             type_root = f"{self.road_root}/Type_{t:02d}"
-            instancer_path = f"{type_root}/Segments"
+            segments_root = f"{type_root}/Segments"
 
             UsdGeom.Xform.Define(self.stage, type_root)
 
@@ -476,6 +487,7 @@ class WaymoJsonMiniWorldBuilder:
             proto_indices_py = []
             trigger_positions_py = []
             trigger_scales_py = []
+            segment_yaws_py = []
 
             seg_count = 0
             for poly in polys:
@@ -512,6 +524,7 @@ class WaymoJsonMiniWorldBuilder:
                     seg_orients_py.append(q)
                     seg_scales_py.append(scale)
                     proto_indices_py.append(0)
+                    segment_yaws_py.append(float(yaw))
                     road_points_all.append(mid)
                     road_dirs_all.append(
                         Gf.Vec3f(float(dx / length), float(dy / length), 0.0)
@@ -535,69 +548,147 @@ class WaymoJsonMiniWorldBuilder:
             if seg_count == 0:
                 continue
 
-            instancer = UsdGeom.PointInstancer.Define(self.stage, instancer_path)
-            proto_path = f"{instancer_path}/CubeProto"
-            cube = UsdGeom.Cube.Define(self.stage, proto_path)
-            cube.GetSizeAttr().Set(1.0)
-            # Make road type visually distinct in a lit scene:
             rgb = _road_type_color_srgb(int(t))
             mat_path = f"{type_root}/Materials/RoadType_{int(t):02d}"
             mat = _get_or_create_preview_material(self.stage, mat_path, rgb_srgb=rgb, emissive_strength=0.15)
-            _bind_material(cube.GetPrim(), mat)
-            
-            # (Optional) also set displayColor as a fallback for weird material settings
-            try:
-                UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([Gf.Vec3f(*rgb)])
-            except Exception:
-                pass
-
-            if enable_segment_collision:
-                UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
-                try:
-                    UsdPhysics.CollisionAPI(cube.GetPrim()).CreateCollisionEnabledAttr(True)
-                except Exception:
-                    pass
-            cube.GetPrim().SetCustomDataByKey("road_type", int(t))
-
-            instancer.CreatePrototypesRel().SetTargets([cube.GetPath()])
-            instancer.GetPositionsAttr().Set(Vt.Vec3fArray(seg_positions_py))
-            instancer.GetOrientationsAttr().Set(Vt.QuathArray(seg_orients_py))
-            instancer.GetScalesAttr().Set(Vt.Vec3fArray(seg_scales_py))
-            instancer.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
-            instancer.GetPrim().SetCustomDataByKey("road_type", int(t))
-
-            if trigger_enable and trigger_positions_py:
-                trigger_path = f"{type_root}/Triggers"
-                trig_inst = UsdGeom.PointInstancer.Define(self.stage, trigger_path)
-                trig_proto_path = f"{trigger_path}/CubeProto"
-                trig_cube = UsdGeom.Cube.Define(self.stage, trig_proto_path)
-                trig_cube.GetSizeAttr().Set(1.0)
-
-                UsdGeom.Imageable(trig_cube.GetPrim()).MakeInvisible()
-                UsdPhysics.CollisionAPI.Apply(trig_cube.GetPrim())
-                if PhysxSchema is not None:
+            if render_mode == "explicit_prims":
+                UsdGeom.Xform.Define(self.stage, segments_root)
+                for seg_index, (mid, scale, yaw_rad) in enumerate(zip(seg_positions_py, seg_scales_py, segment_yaws_py)):
+                    seg_path = f"{segments_root}/Seg_{seg_index:05d}"
+                    cube = UsdGeom.Cube.Define(self.stage, seg_path)
+                    cube.GetSizeAttr().Set(1.0)
+                    seg_api = UsdGeom.XformCommonAPI(cube)
+                    seg_api.SetTranslate(Gf.Vec3d(float(mid[0]), float(mid[1]), float(mid[2])))
+                    seg_api.SetRotate(
+                        Gf.Vec3f(0.0, 0.0, math.degrees(float(yaw_rad))),
+                        UsdGeom.XformCommonAPI.RotationOrderXYZ,
+                    )
+                    seg_api.SetScale(Gf.Vec3f(float(scale[0]), float(scale[1]), float(scale[2])))
+                    _bind_material(cube.GetPrim(), mat)
                     try:
-                        PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                        UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([Gf.Vec3f(*rgb)])
                     except Exception:
                         pass
-                    if trigger_script_enable:
+                    if enable_segment_collision:
+                        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
                         try:
-                            trigger_script = Path(__file__).resolve().parent / "trigger_road_contact.py"
-                            trig_api = PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
-                            trig_api.CreateEnterScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
-                            trig_api.CreateOnEnterScriptAttr().Set(str(trigger_script))
-                            trig_api.CreateLeaveScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
-                            trig_api.CreateOnLeaveScriptAttr().Set(str(trigger_script))
+                            UsdPhysics.CollisionAPI(cube.GetPrim()).CreateCollisionEnabledAttr(True)
                         except Exception:
                             pass
+                    cube.GetPrim().SetCustomDataByKey("road_type", int(t))
 
-                trig_cube.GetPrim().SetCustomDataByKey("road_type", int(t))
-                trig_inst.CreatePrototypesRel().SetTargets([trig_cube.GetPath()])
-                trig_inst.GetPositionsAttr().Set(Vt.Vec3fArray(trigger_positions_py))
-                trig_inst.GetOrientationsAttr().Set(Vt.QuathArray(seg_orients_py))
-                trig_inst.GetScalesAttr().Set(Vt.Vec3fArray(trigger_scales_py))
-                trig_inst.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
-                trig_inst.GetPrim().SetCustomDataByKey("road_type", int(t))
+                if trigger_enable and trigger_positions_py:
+                    trigger_path = f"{type_root}/Triggers"
+                    UsdGeom.Xform.Define(self.stage, trigger_path)
+                    for seg_index, (mid, scale, yaw_rad) in enumerate(
+                        zip(trigger_positions_py, trigger_scales_py, segment_yaws_py)
+                    ):
+                        trig_path = f"{trigger_path}/Trig_{seg_index:05d}"
+                        trig_cube = UsdGeom.Cube.Define(self.stage, trig_path)
+                        trig_cube.GetSizeAttr().Set(1.0)
+                        trig_api = UsdGeom.XformCommonAPI(trig_cube)
+                        trig_api.SetTranslate(Gf.Vec3d(float(mid[0]), float(mid[1]), float(mid[2])))
+                        trig_api.SetRotate(
+                            Gf.Vec3f(0.0, 0.0, math.degrees(float(yaw_rad))),
+                            UsdGeom.XformCommonAPI.RotationOrderXYZ,
+                        )
+                        trig_api.SetScale(Gf.Vec3f(float(scale[0]), float(scale[1]), float(scale[2])))
+                        UsdGeom.Imageable(trig_cube.GetPrim()).MakeInvisible()
+                        UsdPhysics.CollisionAPI.Apply(trig_cube.GetPrim())
+                        if PhysxSchema is not None:
+                            try:
+                                PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                            except Exception:
+                                pass
+                            if trigger_script_enable:
+                                try:
+                                    trigger_script = Path(__file__).resolve().parent / "trigger_road_contact.py"
+                                    trig_api_schema = PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                                    trig_api_schema.CreateEnterScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                                    trig_api_schema.CreateOnEnterScriptAttr().Set(str(trigger_script))
+                                    trig_api_schema.CreateLeaveScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                                    trig_api_schema.CreateOnLeaveScriptAttr().Set(str(trigger_script))
+                                except Exception:
+                                    pass
+                        trig_cube.GetPrim().SetCustomDataByKey("road_type", int(t))
+            else:
+                # Match the older stable chocolate authoring path and Isaac Lab's own
+                # marker initialization pattern more closely:
+                # 1. define the instancer
+                # 2. define a prototype under it
+                # 3. seed one dummy instance so Fabric initializes the prototype table
+                # 4. overwrite with the final arrays
+                instancer = UsdGeom.PointInstancer.Define(self.stage, segments_root)
+                proto_path = f"{segments_root}/CubeProto"
+                cube = UsdGeom.Cube.Define(self.stage, proto_path)
+                cube.GetSizeAttr().Set(1.0)
+                # For cloned envs, keep the prototype rendering path as simple as possible:
+                # use displayColor on the prototype and avoid relying on a material binding relationship.
+                try:
+                    UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([Gf.Vec3f(*rgb)])
+                except Exception:
+                    pass
+
+                if enable_segment_collision:
+                    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+                    try:
+                        UsdPhysics.CollisionAPI(cube.GetPrim()).CreateCollisionEnabledAttr(True)
+                    except Exception:
+                        pass
+                cube.GetPrim().SetCustomDataByKey("road_type", int(t))
+
+                instancer.CreatePrototypesRel().SetTargets([cube.GetPath()])
+                instancer.GetProtoIndicesAttr().Set(Vt.IntArray([0]))
+                instancer.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.0)]))
+                instancer.GetOrientationsAttr().Set(
+                    Vt.QuathArray([Gf.Quath(Gf.Half(1.0), Gf.Half(0.0), Gf.Half(0.0), Gf.Half(0.0))])
+                )
+                instancer.GetScalesAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0)]))
+
+                instancer.GetPositionsAttr().Set(Vt.Vec3fArray(seg_positions_py))
+                instancer.GetOrientationsAttr().Set(Vt.QuathArray(seg_orients_py))
+                instancer.GetScalesAttr().Set(Vt.Vec3fArray(seg_scales_py))
+                instancer.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
+                instancer.GetPrim().SetCustomDataByKey("road_type", int(t))
+
+                if trigger_enable and trigger_positions_py:
+                    trigger_path = f"{type_root}/Triggers"
+                    trig_inst = UsdGeom.PointInstancer.Define(self.stage, trigger_path)
+                    trig_proto_path = f"{trigger_path}/CubeProto"
+                    trig_cube = UsdGeom.Cube.Define(self.stage, trig_proto_path)
+                    trig_cube.GetSizeAttr().Set(1.0)
+
+                    UsdGeom.Imageable(trig_cube.GetPrim()).MakeInvisible()
+                    UsdPhysics.CollisionAPI.Apply(trig_cube.GetPrim())
+                    if PhysxSchema is not None:
+                        try:
+                            PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                        except Exception:
+                            pass
+                        if trigger_script_enable:
+                            try:
+                                trigger_script = Path(__file__).resolve().parent / "trigger_road_contact.py"
+                                trig_api = PhysxSchema.PhysxTriggerAPI.Apply(trig_cube.GetPrim())
+                                trig_api.CreateEnterScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                                trig_api.CreateOnEnterScriptAttr().Set(str(trigger_script))
+                                trig_api.CreateLeaveScriptTypeAttr().Set(PhysxSchema.Tokens.scriptFile)
+                                trig_api.CreateOnLeaveScriptAttr().Set(str(trigger_script))
+                            except Exception:
+                                pass
+
+                    trig_cube.GetPrim().SetCustomDataByKey("road_type", int(t))
+                    trig_inst.CreatePrototypesRel().SetTargets([trig_cube.GetPath()])
+                    trig_inst.GetProtoIndicesAttr().Set(Vt.IntArray([0]))
+                    trig_inst.GetPositionsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.0)]))
+                    trig_inst.GetOrientationsAttr().Set(
+                        Vt.QuathArray([Gf.Quath(Gf.Half(1.0), Gf.Half(0.0), Gf.Half(0.0), Gf.Half(0.0))])
+                    )
+                    trig_inst.GetScalesAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0)]))
+                    trig_inst.GetPositionsAttr().Set(Vt.Vec3fArray(trigger_positions_py))
+                    trig_inst.GetOrientationsAttr().Set(Vt.QuathArray(seg_orients_py))
+                    trig_inst.GetScalesAttr().Set(Vt.Vec3fArray(trigger_scales_py))
+                    trig_inst.GetProtoIndicesAttr().Set(Vt.IntArray(proto_indices_py))
+                    trig_inst.GetPrim().SetCustomDataByKey("road_type", int(t))
 
         if road_points_all:
             root_prim = self.stage.GetPrimAtPath(self.world_root)
@@ -1281,6 +1372,7 @@ class WaymoJsonMiniWorldBuilder:
         trigger_match_segment: bool = True,
         trigger_script_enable: bool = True,
         allowed_road_types: Optional[Sequence[int]] = None,
+        road_render_mode: str = "point_instancer",
 
         # agent params:
         spawn_z_m: float = 1.0,
@@ -1337,6 +1429,7 @@ class WaymoJsonMiniWorldBuilder:
             trigger_match_segment=trigger_match_segment,
             trigger_script_enable=trigger_script_enable,
             allowed_road_types=allowed_road_types,
+            road_render_mode=road_render_mode,
         )
         self.build_agents_with_goals(
             cfg,
@@ -1391,11 +1484,13 @@ class ChocolateBarConstructor:
         root_container: str = "/World/MiniWorlds",
         layout: GridLayout = GridLayout(),
         origin_mode: str = "center",
+        origin_center_mode: str = "mean",
     ):
         self.stage = stage or omni.usd.get_context().get_stage()
         self.root_container = root_container
         self.layout = layout
         self.origin_mode = origin_mode
+        self.origin_center_mode = str(origin_center_mode).strip().lower()
 
         UsdGeom.Xform.Define(self.stage, self.root_container)
 
@@ -1594,6 +1689,7 @@ class ChocolateBarConstructor:
         vehicle_trigger_size_m: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         vehicle_trigger_script_enable: bool = True,
         allowed_road_types: Optional[Sequence[int]] = None,
+        road_render_mode: str = "point_instancer",
     ) -> None:
         json_list = [str(Path(p).expanduser().resolve()) for p in json_paths]
         if len(json_list) == 0:
@@ -1618,6 +1714,7 @@ class ChocolateBarConstructor:
                 world_root=root,
                 bounds=bounds,
                 origin_mode=self.origin_mode,
+                origin_center_mode=self.origin_center_mode,
             )
 
             json_path = json_list[i % len(json_list)]
@@ -1642,6 +1739,7 @@ class ChocolateBarConstructor:
                 trigger_match_segment=trigger_match_segment,
                 trigger_script_enable=trigger_script_enable,
                 allowed_road_types=allowed_road_types,
+                road_render_mode=road_render_mode,
 
                 # agents
                 spawn_z_m=spawn_z_m,
