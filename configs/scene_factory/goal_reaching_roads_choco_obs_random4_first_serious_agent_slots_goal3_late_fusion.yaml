@@ -1,18 +1,7 @@
-# First serious SceneFactory road-goal-reaching training preset.
+# First serious SceneFactory road-goal-reaching preset with late-fusion policy.
 #
-# This is intentionally on the stable explicit-road path:
-# - 4 parallel unique SceneFactory worlds
-# - 4 vehicles per world
-# - full choco_reference observation stack
-# - lane-discipline reward enabled
-# - no video
-# - no observation timing spam
-#
-# Usage:
-#   CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 conda run -n isaac-pytorch python -u \
-#     -m src.train_student_vehicle_goal_multiagent_rsl_rl \
-#     --config configs/scene_factory/goal_reaching_roads_choco_obs_random4_first_serious.yaml \
-#     --headless
+# This keeps the current SceneFactory training setup, but swaps the flat MLP
+# actor-critic for the old choco-style late-fusion architecture first.
 
 env:
   num_envs: 4
@@ -28,6 +17,7 @@ env:
   episode_length_s: 40.0
   goal_radius_min_m: 5.0
   goal_radius_max_m: 30.0
+  goal_reached_threshold_m: 3.0
   max_distance_from_origin_m: 100.0
   agent_neighbor_obs_scale_m: 100.0
   agent_collision_warmup_steps: 24
@@ -63,6 +53,19 @@ reward:
   lane_forbidden_enable: true
   lane_forbidden_types: [15, 16]
   lane_forbidden_penalty: -30.0
+  goal_bonus: 100.0
+
+policy:
+  type: "late_fusion"
+  ego_layers: [64, 64]
+  road_layers: [96, 96]
+  vehicle_layers: [96, 96]
+  shared_layers: [128, 64]
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  activation: "relu"
+  dropout: 0.0
+  pool: "max"
 
 assets:
   student_usd: "artifacts/student_vehicle_assets/vehicle_only_smoke/student_fwd_vehicle.usd"
@@ -72,7 +75,8 @@ runner:
   log_dir: "logs/rsl_rl"
   seed: 42
   experiment_name: "scene_factory_goal_reaching_roads"
-  run_name: "random4_first_serious"
+  run_name: "random4_first_serious_agent_slots_goal3_late_fusion"
+  shared_policy_mode: "agent_slots"
   max_iterations: 40000
   num_steps_per_env: 32
   save_interval: 25

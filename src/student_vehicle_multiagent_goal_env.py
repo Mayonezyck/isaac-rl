@@ -595,6 +595,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
         self._num_agents = len(self._agent_ids)
         self._vehicles = [self.scene.articulations[agent_id] for agent_id in self._agent_ids]
+        self._steps_since_reset_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         self._raw_actions = torch.zeros(self._num_agents, self.num_envs, 3, device=self.device)
         self._semantic_actions = torch.zeros_like(self._raw_actions)
@@ -1227,7 +1228,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         forces = torch.stack(agent_forces, dim=0)
         warmup_steps = max(0, int(self.cfg.agent_collision_warmup_steps))
         if warmup_steps > 0:
-            warmup_mask = self.episode_length_buf < warmup_steps
+            warmup_mask = self._steps_since_reset_buf < warmup_steps
             if bool(torch.any(warmup_mask).item()):
                 forces[:, warmup_mask] = 0.0
         return forces
@@ -1729,6 +1730,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             time_outs = {agent_id: false_buf.clone() for agent_id in self._agent_ids}
             return terminated, time_outs
 
+        self._steps_since_reset_buf += 1
         self._update_lane_touch_mask()
         collision_masks = self._collision_by_agent_mask_tensor()
         self._pending_goal_done_mask.zero_()
@@ -1821,12 +1823,55 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 self._lane_forbidden_done_mask[agent_idx, env_ids].float()
             ).item()
 
+        if self._agent_ids:
+            world_spawned_count = torch.full(
+                (len(env_ids),),
+                float(self._num_agents),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            world_success_mask = self._goal_done_mask[:, env_ids]
+            world_collision_mask = self._collision_done_mask[:, env_ids] & (~world_success_mask)
+            world_lane_forbidden_mask = (
+                self._lane_forbidden_done_mask[:, env_ids] & (~world_success_mask) & (~world_collision_mask)
+            )
+            world_crash_mask = (
+                self._crash_done_mask[:, env_ids]
+                & (~world_success_mask)
+                & (~world_collision_mask)
+                & (~world_lane_forbidden_mask)
+            )
+            world_success_count = world_success_mask.sum(dim=0).to(dtype=torch.float32)
+            world_collision_count = world_collision_mask.sum(dim=0).to(dtype=torch.float32)
+            world_lane_forbidden_count = world_lane_forbidden_mask.sum(dim=0).to(dtype=torch.float32)
+            world_crash_count = world_crash_mask.sum(dim=0).to(dtype=torch.float32)
+            world_active_not_done_count = (
+                world_spawned_count
+                - world_success_count
+                - world_collision_count
+                - world_lane_forbidden_count
+                - world_crash_count
+            ).clamp_min(0.0)
+            spawned_denom = torch.clamp(world_spawned_count, min=1.0)
+            world_log = self.extras[self._agent_ids[0]]["log"]
+            world_log["WorldEpisode/spawned_count"] = world_spawned_count
+            world_log["WorldEpisode/success_count"] = world_success_count
+            world_log["WorldEpisode/collision_count"] = world_collision_count
+            world_log["WorldEpisode/lane_forbidden_count"] = world_lane_forbidden_count
+            world_log["WorldEpisode/crash_count"] = world_crash_count
+            world_log["WorldEpisode/active_not_done_count"] = world_active_not_done_count
+            world_log["WorldEpisode/success_rate"] = world_success_count / spawned_denom
+            world_log["WorldEpisode/collision_rate"] = world_collision_count / spawned_denom
+            world_log["WorldEpisode/lane_forbidden_rate"] = world_lane_forbidden_count / spawned_denom
+            world_log["WorldEpisode/crash_rate"] = world_crash_count / spawned_denom
+
         for vehicle in self._vehicles:
             vehicle.reset(env_ids)
         super()._reset_idx(env_ids)
 
         if len(env_ids) == self.num_envs:
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+        self._steps_since_reset_buf[env_ids] = 0
 
         num_resets = len(env_ids)
         env_origins = self.scene.env_origins[env_ids]

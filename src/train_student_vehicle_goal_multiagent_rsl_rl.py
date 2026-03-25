@@ -168,6 +168,11 @@ parser.add_argument(
     default=float(_cfg_value(file_cfg, "reward", "lane_forbidden_penalty", -30.0)),
 )
 parser.add_argument(
+    "--reward_goal_bonus",
+    type=float,
+    default=float(_cfg_value(file_cfg, "reward", "goal_bonus", 20.0)),
+)
+parser.add_argument(
     "--tunable_config_json",
     type=str,
     default=str(_cfg_value(file_cfg, "assets", "tunable_config_json", "")),
@@ -240,6 +245,12 @@ parser.add_argument("--episode_length_s", type=float, default=float(_cfg_value(f
 parser.add_argument("--goal_radius_min_m", type=float, default=float(_cfg_value(file_cfg, "env", "goal_radius_min_m", 5.0)), help="Minimum goal radius from env origin.")
 parser.add_argument("--goal_radius_max_m", type=float, default=float(_cfg_value(file_cfg, "env", "goal_radius_max_m", 8.0)), help="Maximum goal radius from env origin.")
 parser.add_argument(
+    "--goal_reached_threshold_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "env", "goal_reached_threshold_m", 0.85)),
+    help="Distance threshold for goal completion.",
+)
+parser.add_argument(
     "--max_distance_from_origin_m",
     type=float,
     default=float(_cfg_value(file_cfg, "env", "max_distance_from_origin_m", 14.0)),
@@ -295,6 +306,16 @@ parser.add_argument("--clip_param", type=float, default=float(_cfg_value(file_cf
 parser.add_argument("--desired_kl", type=float, default=float(_cfg_value(file_cfg, "runner", "desired_kl", 0.01)), help="Target KL for adaptive LR schedule.")
 parser.add_argument("--experiment_name", type=str, default=str(_cfg_value(file_cfg, "runner", "experiment_name", "student_vehicle_goal_multiagent")), help="Experiment name.")
 parser.add_argument("--run_name", type=str, default=str(_cfg_value(file_cfg, "runner", "run_name", "smoke")), help="Optional run-name suffix.")
+parser.add_argument(
+    "--shared_policy_mode",
+    choices=("agent_slots", "joint_world"),
+    default=str(_cfg_value(file_cfg, "runner", "shared_policy_mode", "agent_slots")),
+    help=(
+        "How to flatten the multi-agent env for PPO. "
+        "'agent_slots' exposes one shared-policy slot per vehicle. "
+        "'joint_world' keeps the older concatenated multi-agent world policy."
+    ),
+)
 parser.add_argument(
     "--video",
     action=argparse.BooleanOptionalAction,
@@ -417,7 +438,9 @@ _configure_runtime_warning_filter()
 
 import torch
 import gymnasium as gym
+from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner
+from tensordict import TensorDict
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.io import dump_yaml
@@ -428,18 +451,28 @@ from isaaclab_rl.rsl_rl import (
     RslRlVecEnvWrapper,
 )
 
+from rsl_rl.runners import on_policy_runner as rsl_on_policy_runner_module
+
+from src.scene_factory_late_fusion_actor_critic import SceneFactoryLateFusionActorCritic
 from src.student_vehicle_goal_env import DEFAULT_STUDENT_VEHICLE_USD
 from src.student_vehicle_multiagent_goal_env import (
     StudentVehicleMultiAgentGoalEnv,
     StudentVehicleMultiAgentGoalEnvCfg,
+    _reference_road_point_feat_dim,
+    _reference_vehicle_feat_dim,
     configure_multi_agent_spaces,
 )
+from src.trfc import weather_context_dim
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+def _register_scene_factory_custom_policy_classes() -> None:
+    rsl_on_policy_runner_module.SceneFactoryLateFusionActorCritic = SceneFactoryLateFusionActorCritic
 
 
 def _resolve_seed(seed: int) -> int:
@@ -504,6 +537,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.episode_length_s = float(args_cli.episode_length_s)
     cfg.goal_radius_min_m = float(args_cli.goal_radius_min_m)
     cfg.goal_radius_max_m = float(args_cli.goal_radius_max_m)
+    cfg.goal_reached_threshold_m = float(args_cli.goal_reached_threshold_m)
     cfg.max_distance_from_origin_m = float(args_cli.max_distance_from_origin_m)
     cfg.agent_neighbor_obs_scale_m = float(args_cli.agent_neighbor_obs_scale_m)
     cfg.agent_collision_warmup_steps = int(args_cli.agent_collision_warmup_steps)
@@ -528,6 +562,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.reward_lane_forbidden_enable = bool(args_cli.reward_lane_forbidden_enable)
     cfg.reward_lane_forbidden_types = _cfg_int_tuple(file_cfg, "reward", "lane_forbidden_types", (15, 16))
     cfg.reward_lane_forbidden_penalty = float(args_cli.reward_lane_forbidden_penalty)
+    cfg.reward_goal_bonus = float(args_cli.reward_goal_bonus)
     cfg.test_mode = str(args_cli.test_mode).strip().lower()
     cfg.collision_test_post_collision_steps = int(_cfg_value(file_cfg, "test", "post_collision_steps", 120))
     cfg.collision_test_post_collision_throttle = float(
@@ -598,6 +633,8 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
 
 def _build_runner_cfg(sim_device: str) -> RslRlOnPolicyRunnerCfg:
     rl_device = str(args_cli.rl_device or sim_device)
+    policy_type = str(_cfg_value(file_cfg, "policy", "type", "mlp")).strip().lower().replace("-", "_")
+    policy_class_name = "SceneFactoryLateFusionActorCritic" if policy_type == "late_fusion" else "ActorCritic"
     return RslRlOnPolicyRunnerCfg(
         seed=int(_resolve_seed(args_cli.seed)),
         device=rl_device,
@@ -610,6 +647,7 @@ def _build_runner_cfg(sim_device: str) -> RslRlOnPolicyRunnerCfg:
         clip_actions=1.0,
         logger="tensorboard",
         policy=RslRlPpoActorCriticCfg(
+            class_name=policy_class_name,
             init_noise_std=1.0,
             actor_obs_normalization=True,
             critic_obs_normalization=True,
@@ -634,6 +672,36 @@ def _build_runner_cfg(sim_device: str) -> RslRlOnPolicyRunnerCfg:
     )
 
 
+def _build_late_fusion_policy_kwargs(env_cfg: StudentVehicleMultiAgentGoalEnvCfg) -> dict[str, Any]:
+    ego_dim = 7 + (int(weather_context_dim()) if bool(env_cfg.obs_weather_context_enable) else 0)
+    road_point_dim = (
+        int(_reference_road_point_feat_dim(env_cfg.obs_road_points_include_dirs)) if bool(env_cfg.obs_road_points_enable) else 0
+    )
+    road_point_k = int(env_cfg.obs_road_points_k) if bool(env_cfg.obs_road_points_enable) else 0
+    vehicle_dim = (
+        int(_reference_vehicle_feat_dim(env_cfg.obs_neighbor_include_ttc, env_cfg.obs_neighbor_include_index))
+        if bool(env_cfg.obs_neighbor_enable)
+        else 0
+    )
+    vehicle_k = int(env_cfg.obs_neighbor_k) if bool(env_cfg.obs_neighbor_enable) else 0
+    return {
+        "ego_dim": int(_cfg_value(file_cfg, "policy", "ego_dim", ego_dim)),
+        "road_point_dim": int(_cfg_value(file_cfg, "policy", "road_point_dim", road_point_dim)),
+        "road_point_k": int(_cfg_value(file_cfg, "policy", "road_point_k", road_point_k)),
+        "vehicle_dim": int(_cfg_value(file_cfg, "policy", "vehicle_dim", vehicle_dim)),
+        "vehicle_k": int(_cfg_value(file_cfg, "policy", "vehicle_k", vehicle_k)),
+        "ego_layers": list(_cfg_value(file_cfg, "policy", "ego_layers", [64, 64])),
+        "road_layers": list(_cfg_value(file_cfg, "policy", "road_layers", [96, 96])),
+        "vehicle_layers": list(_cfg_value(file_cfg, "policy", "vehicle_layers", [96, 96])),
+        "shared_layers": list(_cfg_value(file_cfg, "policy", "shared_layers", [128, 64])),
+        "last_layer_dim_pi": int(_cfg_value(file_cfg, "policy", "last_layer_dim_pi", 64)),
+        "last_layer_dim_vf": int(_cfg_value(file_cfg, "policy", "last_layer_dim_vf", 64)),
+        "activation": str(_cfg_value(file_cfg, "policy", "activation", "relu")),
+        "dropout": float(_cfg_value(file_cfg, "policy", "dropout", 0.0)),
+        "pool": str(_cfg_value(file_cfg, "policy", "pool", "max")),
+    }
+
+
 def _make_run_dir(log_root: Path, runner_cfg: RslRlOnPolicyRunnerCfg) -> Path:
     run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if runner_cfg.run_name:
@@ -646,6 +714,13 @@ def _make_run_dir(log_root: Path, runner_cfg: RslRlOnPolicyRunnerCfg) -> Path:
 def _build_resolved_config(
     env_cfg: StudentVehicleMultiAgentGoalEnvCfg, runner_cfg: RslRlOnPolicyRunnerCfg
 ) -> dict[str, Any]:
+    policy_type = str(_cfg_value(file_cfg, "policy", "type", "mlp")).strip().lower().replace("-", "_")
+    policy_cfg: dict[str, Any] = {
+        "type": policy_type,
+        "class_name": str(runner_cfg.policy.class_name),
+    }
+    if policy_type == "late_fusion":
+        policy_cfg.update(_build_late_fusion_policy_kwargs(env_cfg))
     return {
         "env": {
             "num_envs": int(env_cfg.scene.num_envs),
@@ -661,6 +736,7 @@ def _build_resolved_config(
             "episode_length_s": float(env_cfg.episode_length_s),
             "goal_radius_min_m": float(env_cfg.goal_radius_min_m),
             "goal_radius_max_m": float(env_cfg.goal_radius_max_m),
+            "goal_reached_threshold_m": float(env_cfg.goal_reached_threshold_m),
             "max_distance_from_origin_m": float(env_cfg.max_distance_from_origin_m),
             "agent_neighbor_obs_scale_m": float(env_cfg.agent_neighbor_obs_scale_m),
             "agent_collision_warmup_steps": int(env_cfg.agent_collision_warmup_steps),
@@ -696,7 +772,9 @@ def _build_resolved_config(
             "lane_forbidden_enable": bool(env_cfg.reward_lane_forbidden_enable),
             "lane_forbidden_types": [int(v) for v in env_cfg.reward_lane_forbidden_types],
             "lane_forbidden_penalty": float(env_cfg.reward_lane_forbidden_penalty),
+            "goal_bonus": float(env_cfg.reward_goal_bonus),
         },
+        "policy": policy_cfg,
         "test": {
             "mode": str(env_cfg.test_mode),
             "collision_force_threshold_n": float(env_cfg.agent_collision_force_threshold_n),
@@ -722,6 +800,7 @@ def _build_resolved_config(
             "seed": int(env_cfg.seed),
             "experiment_name": str(runner_cfg.experiment_name),
             "run_name": str(runner_cfg.run_name),
+            "shared_policy_mode": str(args_cli.shared_policy_mode),
             "max_iterations": int(runner_cfg.max_iterations),
             "num_steps_per_env": int(runner_cfg.num_steps_per_env),
             "save_interval": int(runner_cfg.save_interval),
@@ -756,6 +835,13 @@ def _build_resolved_config(
 def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvCfg, runner_cfg: RslRlOnPolicyRunnerCfg):
     (run_dir / "params").mkdir(parents=True, exist_ok=True)
     resolved_cfg = _build_resolved_config(env_cfg, runner_cfg)
+    policy_type = str(_cfg_value(file_cfg, "policy", "type", "mlp")).strip().lower().replace("-", "_")
+    policy_payload: dict[str, Any] = {
+        "type": policy_type,
+        "class_name": str(runner_cfg.policy.class_name),
+    }
+    if policy_type == "late_fusion":
+        policy_payload.update(_build_late_fusion_policy_kwargs(env_cfg))
     payload = {
         "config_path": str(Path(args_cli.config).expanduser().resolve()),
         "command": sys.orig_argv,
@@ -796,6 +882,7 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "episode_length_s": env_cfg.episode_length_s,
             "goal_radius_min_m": env_cfg.goal_radius_min_m,
             "goal_radius_max_m": env_cfg.goal_radius_max_m,
+            "goal_reached_threshold_m": env_cfg.goal_reached_threshold_m,
             "max_distance_from_origin_m": env_cfg.max_distance_from_origin_m,
             "agent_neighbor_obs_scale_m": env_cfg.agent_neighbor_obs_scale_m,
             "observation_mode": env_cfg.observation_mode,
@@ -819,8 +906,13 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "reward_lane_forbidden_enable": env_cfg.reward_lane_forbidden_enable,
             "reward_lane_forbidden_types": list(env_cfg.reward_lane_forbidden_types),
             "reward_lane_forbidden_penalty": env_cfg.reward_lane_forbidden_penalty,
+            "reward_goal_bonus": env_cfg.reward_goal_bonus,
         },
-        "runner_cfg": runner_cfg.to_dict(),
+        "runner_cfg": {
+            **runner_cfg.to_dict(),
+            "shared_policy_mode": str(args_cli.shared_policy_mode),
+        },
+        "policy_cfg": policy_payload,
         "video_cfg": {
             "enabled": bool(args_cli.video),
             "interval": int(args_cli.video_interval),
@@ -863,6 +955,48 @@ def _maybe_save_stage_usd(save_stage_usd: str) -> None:
     )
 
 
+def _aggregate_agent_log_dict(
+    extras: dict,
+    *,
+    agent_ids: list[str],
+    device: torch.device | str,
+) -> dict:
+    if not isinstance(extras, dict):
+        return extras
+    if "log" in extras or "episode" in extras:
+        return extras
+
+    aggregated_values: dict[str, list[torch.Tensor]] = {}
+    for agent_id in agent_ids:
+        agent_extra = extras.get(agent_id)
+        if not isinstance(agent_extra, dict):
+            continue
+        agent_log = agent_extra.get("log") or agent_extra.get("episode")
+        if not isinstance(agent_log, dict):
+            continue
+        for key, value in agent_log.items():
+            if isinstance(value, torch.Tensor):
+                tensor_value = value.detach().to(device=device, dtype=torch.float32).reshape(-1)
+            else:
+                try:
+                    tensor_value = torch.tensor([float(value)], device=device, dtype=torch.float32)
+                except (TypeError, ValueError):
+                    continue
+            aggregated_values.setdefault(key, []).append(tensor_value)
+
+    if not aggregated_values:
+        return extras
+
+    aggregated_log = {
+        key: torch.mean(torch.cat(values, dim=0))
+        for key, values in aggregated_values.items()
+        if values
+    }
+    merged_extras = dict(extras)
+    merged_extras["log"] = aggregated_log
+    return merged_extras
+
+
 def _patch_single_agent_marl_observation_bridge(env) -> None:
     """Patch Isaac Lab's MARL->single-agent adapter with _get_observations for RSL-RL.
 
@@ -874,42 +1008,6 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
         return
 
     env_cls = type(env)
-
-    def _aggregate_marl_episode_log(self, extras: dict) -> dict:
-        if not isinstance(extras, dict):
-            return extras
-        if "log" in extras or "episode" in extras:
-            return extras
-
-        aggregated_values: dict[str, list[torch.Tensor]] = {}
-        for agent_id in getattr(self.env, "possible_agents", []):
-            agent_extra = extras.get(agent_id)
-            if not isinstance(agent_extra, dict):
-                continue
-            agent_log = agent_extra.get("log") or agent_extra.get("episode")
-            if not isinstance(agent_log, dict):
-                continue
-            for key, value in agent_log.items():
-                if isinstance(value, torch.Tensor):
-                    tensor_value = value.detach().to(self.env.device, dtype=torch.float32).reshape(-1)
-                else:
-                    try:
-                        tensor_value = torch.tensor([float(value)], device=self.env.device, dtype=torch.float32)
-                    except (TypeError, ValueError):
-                        continue
-                aggregated_values.setdefault(key, []).append(tensor_value)
-
-        if not aggregated_values:
-            return extras
-
-        aggregated_log = {
-            key: torch.mean(torch.cat(values, dim=0))
-            for key, values in aggregated_values.items()
-            if values
-        }
-        merged_extras = dict(extras)
-        merged_extras["log"] = aggregated_log
-        return merged_extras
 
     def _get_observations(self):
         if getattr(self, "_state_as_observation", False):
@@ -933,7 +1031,11 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
                     dim=-1,
                 )
             }
-        return obs, _aggregate_marl_episode_log(self, extras)
+        return obs, _aggregate_agent_log_dict(
+            extras,
+            agent_ids=list(getattr(self.env, "possible_agents", [])),
+            device=self.env.device,
+        )
 
     def step(self, action: torch.Tensor):
         index = 0
@@ -957,7 +1059,11 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
         rewards = sum(rewards.values())
         terminated = math.prod(terminated.values()).to(dtype=torch.bool)
         time_outs = math.prod(time_outs.values()).to(dtype=torch.bool)
-        return obs, rewards, terminated, time_outs, _aggregate_marl_episode_log(self, extras)
+        return obs, rewards, terminated, time_outs, _aggregate_agent_log_dict(
+            extras,
+            agent_ids=list(getattr(self.env, "possible_agents", [])),
+            device=self.env.device,
+        )
 
     def __getattr__(self, key: str):
         return getattr(self.env, key)
@@ -970,6 +1076,155 @@ def _patch_single_agent_marl_observation_bridge(env) -> None:
         lambda self: self.env.episode_length_buf,
         lambda self, value: setattr(self.env, "episode_length_buf", value),
     )
+
+
+class AgentSlotSharedPolicyVecEnv(VecEnv):
+    """Expose one PPO slot per agent while keeping the underlying world env shared.
+
+    This mirrors the old gpudrive_choco shared-policy setup more closely than the
+    joint-world concatenation bridge. Each slot corresponds to a fixed (world, agent)
+    pair, while the underlying Isaac Lab env still performs resets at the world level.
+    """
+
+    def __init__(self, env: StudentVehicleMultiAgentGoalEnv, clip_actions: float | None = None):
+        self.env = env
+        self.clip_actions = clip_actions
+        self.cfg = env.cfg
+        self.device = env.device
+        self.num_worlds = int(env.num_envs)
+        self.agent_ids = list(env.possible_agents)
+        self.num_agents_per_world = len(self.agent_ids)
+        self.num_envs = self.num_worlds * self.num_agents_per_world
+        self.max_episode_length = env.max_episode_length
+        self.num_actions = gym.spaces.flatdim(env.action_spaces[self.agent_ids[0]])
+        self._slot_world_indices = torch.arange(self.num_worlds, device=self.device).repeat_interleave(
+            self.num_agents_per_world
+        )
+        self._slot_episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._slot_dead_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.single_action_space = gym.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(self.num_actions,),
+            dtype=float,
+        )
+        self.action_space = gym.vector.utils.batch_space(self.single_action_space, self.num_envs)
+        self.single_observation_space = None
+        self.observation_space = None
+        obs_dict, _ = self.env.reset()
+        flat_obs = self._flatten_obs_dict(obs_dict)
+        obs_dim = int(flat_obs.shape[-1])
+        self.single_observation_space = gym.spaces.Box(
+            low=-float("inf"),
+            high=float("inf"),
+            shape=(obs_dim,),
+            dtype=float,
+        )
+        self.observation_space = gym.vector.utils.batch_space(self.single_observation_space, self.num_envs)
+        self._slot_dead_mask = self._flatten_agent_done_mask()
+        print(
+            "[INFO][SceneFactory] Using per-agent shared-policy wrapper: "
+            f"worlds={self.num_worlds} agents_per_world={self.num_agents_per_world} slots={self.num_envs}",
+            flush=True,
+        )
+
+    @property
+    def unwrapped(self) -> StudentVehicleMultiAgentGoalEnv:
+        return self.env
+
+    @property
+    def render_mode(self) -> str | None:
+        return getattr(self.env, "render_mode", None)
+
+    @property
+    def episode_length_buf(self) -> torch.Tensor:
+        return self.env.episode_length_buf.repeat_interleave(self.num_agents_per_world)
+
+    @episode_length_buf.setter
+    def episode_length_buf(self, value: torch.Tensor):
+        world_lengths = value.view(self.num_worlds, self.num_agents_per_world)[:, 0]
+        self.env.episode_length_buf = world_lengths.to(
+            device=self.env.episode_length_buf.device,
+            dtype=self.env.episode_length_buf.dtype,
+        )
+
+    def seed(self, seed: int = -1) -> int:
+        return self.env.seed(seed)
+
+    def _flatten_obs_dict(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        stacked = torch.stack([obs_dict[agent_id].reshape(self.num_worlds, -1) for agent_id in self.agent_ids], dim=1)
+        return stacked.reshape(self.num_envs, -1)
+
+    def _flatten_reward_or_done_dict(self, payload: dict[str, torch.Tensor]) -> torch.Tensor:
+        stacked = torch.stack([payload[agent_id].reshape(self.num_worlds) for agent_id in self.agent_ids], dim=1)
+        return stacked.reshape(self.num_envs)
+
+    def _flatten_agent_done_mask(self) -> torch.Tensor:
+        return self.env._agent_done_mask.transpose(0, 1).reshape(self.num_envs)
+
+    def _reshape_actions(self, actions: torch.Tensor) -> dict[str, torch.Tensor]:
+        action_view = actions.view(self.num_worlds, self.num_agents_per_world, -1)
+        return {
+            agent_id: action_view[:, agent_idx, :]
+            for agent_idx, agent_id in enumerate(self.agent_ids)
+        }
+
+    def reset(self) -> tuple[TensorDict, dict]:
+        obs_dict, extras = self.env.reset()
+        self._slot_dead_mask.zero_()
+        self._slot_episode_length_buf.zero_()
+        flat_obs = self._flatten_obs_dict(obs_dict)
+        return TensorDict({"policy": flat_obs}, batch_size=[self.num_envs]), _aggregate_agent_log_dict(
+            extras,
+            agent_ids=self.agent_ids,
+            device=self.device,
+        )
+
+    def get_observations(self) -> TensorDict:
+        obs_dict = self.env._get_observations()
+        return TensorDict({"policy": self._flatten_obs_dict(obs_dict)}, batch_size=[self.num_envs])
+
+    def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        if self.clip_actions is not None:
+            actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
+
+        prev_dead_mask = self._flatten_agent_done_mask()
+        prev_world_episode_length = self.env.episode_length_buf.clone()
+
+        obs_dict, reward_dict, terminated_dict, truncated_dict, extras = self.env.step(self._reshape_actions(actions))
+
+        flat_obs = self._flatten_obs_dict(obs_dict)
+        flat_rewards = self._flatten_reward_or_done_dict(reward_dict)
+        flat_terminated = self._flatten_reward_or_done_dict(terminated_dict).to(dtype=torch.bool)
+        flat_truncated = self._flatten_reward_or_done_dict(truncated_dict).to(dtype=torch.bool)
+
+        world_reset_mask = self.env.episode_length_buf < (prev_world_episode_length + 1)
+        flat_world_reset_mask = world_reset_mask.repeat_interleave(self.num_agents_per_world)
+        newly_done = (flat_terminated | flat_truncated) & (~prev_dead_mask)
+        dones = newly_done | flat_world_reset_mask
+
+        flat_rewards = torch.where(prev_dead_mask, torch.zeros_like(flat_rewards), flat_rewards)
+        self._slot_episode_length_buf += 1
+        self._slot_episode_length_buf[dones] = 0
+        self._slot_dead_mask = self._flatten_agent_done_mask()
+
+        merged_extras = _aggregate_agent_log_dict(
+            extras,
+            agent_ids=self.agent_ids,
+            device=self.device,
+        )
+        if not bool(getattr(self.env.cfg, "is_finite_horizon", True)):
+            merged_extras["time_outs"] = flat_truncated
+
+        return (
+            TensorDict({"policy": flat_obs}, batch_size=[self.num_envs]),
+            flat_rewards,
+            dones.to(dtype=torch.long),
+            merged_extras,
+        )
+
+    def close(self):
+        return self.env.close()
 
 
 class SensorVideoRecorderWrapper(gym.Wrapper):
@@ -1380,14 +1635,29 @@ def main():
             print(f"[INFO] Random steer test finished in {time.time() - start_time:.2f}s")
         return
 
-    env = base_env
-    if isinstance(env.unwrapped, DirectMARLEnv):
-        env = multi_agent_to_single_agent(env)
-        _patch_single_agent_marl_observation_bridge(env)
+    if str(args_cli.shared_policy_mode).strip().lower() == "agent_slots":
+        env = AgentSlotSharedPolicyVecEnv(base_env, clip_actions=runner_cfg.clip_actions)
+    else:
+        env = base_env
+        if isinstance(env.unwrapped, DirectMARLEnv):
+            env = multi_agent_to_single_agent(env)
+            _patch_single_agent_marl_observation_bridge(env)
+        env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
     env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
-    env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
 
-    runner = OnPolicyRunner(env, runner_cfg.to_dict(), log_dir=str(run_dir), device=str(runner_cfg.device))
+    train_cfg = runner_cfg.to_dict()
+    policy_type = str(_cfg_value(file_cfg, "policy", "type", "mlp")).strip().lower().replace("-", "_")
+    if policy_type == "late_fusion":
+        _register_scene_factory_custom_policy_classes()
+        train_cfg["policy"]["class_name"] = "SceneFactoryLateFusionActorCritic"
+        train_cfg["policy"].update(_build_late_fusion_policy_kwargs(env_cfg))
+        print(
+            "[INFO][SceneFactory] Using late-fusion actor-critic policy "
+            f"with road_k={train_cfg['policy']['road_point_k']} vehicle_k={train_cfg['policy']['vehicle_k']}.",
+            flush=True,
+        )
+
+    runner = OnPolicyRunner(env, train_cfg, log_dir=str(run_dir), device=str(runner_cfg.device))
     runner.git_status_repos = [__file__]
     try:
         runner.learn(num_learning_iterations=int(runner_cfg.max_iterations), init_at_random_ep_len=True)
