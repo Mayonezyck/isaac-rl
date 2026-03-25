@@ -48,7 +48,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, sample_uniform, subtract_frame_transforms
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, sample_uniform, subtract_frame_transforms
 
 
 OBSERVATION_MODE_DIMS = {
@@ -253,6 +253,14 @@ def _world_to_ego_xy_torch(dx: torch.Tensor, dy: torch.Tensor, yaw: torch.Tensor
     return x_ego, y_ego
 
 
+def _ego_to_world_xy_torch(x_ego: torch.Tensor, y_ego: torch.Tensor, yaw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    cy = torch.cos(yaw)
+    sy = torch.sin(yaw)
+    dx = cy * x_ego - sy * y_ego
+    dy = sy * x_ego + cy * y_ego
+    return dx, dy
+
+
 def multi_agent_obs_dim(observation_mode: str, cfg: "StudentVehicleMultiAgentGoalEnvCfg" | None = None) -> int:
     mode = str(observation_mode).strip().lower()
     if mode == "choco_reference":
@@ -371,17 +379,22 @@ def resolve_scene_factory_env_assignments(cfg: "StudentVehicleMultiAgentGoalEnvC
         per_env_spawns.append(list(spawns))
 
     if min_available < requested_agents:
+        availability = ", ".join(
+            f"env_{env_idx}:{spec.scene_json_name}={len(spawns)}"
+            for env_idx, (spec, spawns) in enumerate(zip(per_env_specs, per_env_spawns))
+        )
         print(
-            "[WARN] SceneFactory selected worlds provide fewer controllable spawns than requested: "
-            f"requested={requested_agents}, available_min={min_available}. Training with {min_available} agents."
+            "[INFO] SceneFactory selected worlds provide fewer controllable spawns than requested for some envs: "
+            f"requested={requested_agents}, available=[{availability}]. "
+            "Missing agent slots will stay inactive for those envs."
         )
 
-    num_agents = min(requested_agents, min_available)
-    trimmed_spawns = [spawns[:num_agents] for spawns in per_env_spawns]
+    num_agents = requested_agents
+    trimmed_spawns = [list(spawns[:num_agents]) for spawns in per_env_spawns]
     scenes = ", ".join(f"env_{env_idx}:{spec.scene_json_name}" for env_idx, spec in enumerate(per_env_specs))
     print(
         "[INFO] SceneFactory env assignments: "
-        f"selection_mode={selection_mode} num_envs={num_envs} agents={num_agents} scenes=[{scenes}]"
+        f"selection_mode={selection_mode} num_envs={num_envs} agents_requested={num_agents} scenes=[{scenes}]"
     )
     return per_env_specs, trimmed_spawns
 
@@ -441,6 +454,7 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     scene_factory_world_index: int = 0
     scene_factory_world_selection_mode: str = "fixed"
     scene_factory_random_world_seed: int = 42
+    reset_mode: str = "isaac_reset"
     start_radius_m: float = 0.5
     agent_spawn_circle_radius_m: float = 3.5
     agent_spawn_jitter_m: float = 0.12
@@ -468,20 +482,49 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     reward_lane_forbidden_enable: bool = True
     reward_lane_forbidden_types: tuple[int, ...] = (15, 16)
     reward_lane_forbidden_penalty: float = -30.0
+    reward_mode: str = "scene_factory_default"
+    reward_choco_offroad_penalty: float = -0.5
+    reward_choco_idle_penalty_enable: bool = True
+    reward_choco_idle_penalty_per_step: float = 0.03
+    reward_choco_idle_speed_threshold_mps: float = 0.5
+    reward_choco_geom_lane_enable: bool = True
+    reward_choco_geom_lane_per_step: float = 0.12
+    reward_choco_geom_lane_tolerance_m: float = 1.75
+    reward_choco_geom_lane_heading_weight: float = 0.8
+    reward_choco_geom_lane_min_alignment: float = 0.35
+    reward_choco_geom_offroad_enable: bool = True
+    reward_choco_geom_offroad_lateral_threshold_m: float = 3.25
+    reward_choco_geom_offroad_distance_threshold_m: float = 6.0
+    reward_choco_geom_lane_types: tuple[int, ...] = (1, 2)
+    reward_choco_geom_road_edge_types: tuple[int, ...] = (15, 16)
+    reward_choco_ttc_penalty_enable: bool = True
+    reward_choco_ttc_penalty_alpha: float = 0.15
+    reward_choco_ttc_penalty_max: float = 0.50
+    reward_choco_ttc_penalty_min_ttc: float = 0.5
+    reward_choco_road_edge_ttc_penalty_enable: bool = True
+    reward_choco_road_edge_ttc_penalty_alpha: float = 0.10
+    reward_choco_road_edge_ttc_penalty_max: float = 0.60
+    reward_choco_road_edge_ttc_penalty_min_ttc: float = 0.5
+    reward_choco_road_edge_ttc_hard_min_ttc: float = 0.5
+    reward_choco_road_edge_ttc_radius_m: float = 40.0
     obs_weather_context_enable: bool = True
     obs_road_points_enable: bool = True
-    obs_road_points_k: int = 64
+    obs_road_points_k: int = 200
     obs_road_points_radius_m: float = 35.0
-    obs_road_points_type_norm: float = 1.0
-    obs_road_points_mode: str = "knn"
-    obs_road_points_include_dirs: bool = True
+    obs_road_points_type_norm: float = 20.0
+    obs_road_points_mode: str = "road-running"
+    obs_road_points_include_dirs: bool = False
     obs_neighbor_enable: bool = True
-    obs_neighbor_k: int = 8
-    obs_neighbor_include_ttc: bool = True
-    obs_neighbor_include_index: bool = True
+    obs_neighbor_k: int = 63
+    obs_neighbor_include_ttc: bool = False
+    obs_neighbor_include_index: bool = False
     obs_neighbor_ttc_max_s: float = 10.0
     obs_timing_print_enable: bool = False
     obs_timing_print_every_n: int = 32
+    step_timing_log_enable: bool = False
+    step_timing_print_enable: bool = False
+    step_timing_print_every_n: int = 128
+    step_timing_cuda_sync_enable: bool = False
 
     test_mode: str = "none"
     collision_test_half_distance_m: float = 12.0
@@ -538,6 +581,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._capture_camera: Camera | None = None
         self._scenario_spawns: list | None = None
         self._scenario_spawns_by_env: list[list] | None = None
+        self._scene_factory_spawn_start_local = None
+        self._scene_factory_spawn_start_yaw = None
+        self._scene_factory_spawn_goal_local = None
+        self._scene_factory_spawn_valid = None
         self._scene_factory_scene_json_path: str | None = None
         self._scene_factory_scene_json_paths_by_env: list[str] | None = None
         self._scene_factory_specs_by_env: list | None = None
@@ -547,23 +594,99 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._obs_timing_call_count = 0
         self._obs_timing_last_ms = 0.0
         self._obs_timing_ema_ms = 0.0
+        self._step_timing_call_count = 0
+        self._step_timing_last_ms: dict[str, float] = {
+            "pre_physics_ms": 0.0,
+            "apply_action_ms": 0.0,
+            "apply_action_math_ms": 0.0,
+            "apply_action_target_submit_ms": 0.0,
+            "apply_action_wrench_submit_ms": 0.0,
+            "physics_write_ms": 0.0,
+            "physics_sim_ms": 0.0,
+            "physics_update_ms": 0.0,
+            "obs_ms": 0.0,
+            "obs_lane_ms": 0.0,
+            "obs_shared_ms": 0.0,
+            "obs_shared_stack_ms": 0.0,
+            "obs_shared_yaw_speed_ms": 0.0,
+            "obs_shared_ttc_ms": 0.0,
+            "obs_goal_ms": 0.0,
+            "obs_road_ms": 0.0,
+            "obs_neighbor_ms": 0.0,
+            "obs_finalize_ms": 0.0,
+            "reward_ms": 0.0,
+            "reward_lane_ms": 0.0,
+            "reward_shared_ms": 0.0,
+            "reward_goal_ms": 0.0,
+            "reward_geom_ms": 0.0,
+            "reward_ttc_ms": 0.0,
+            "reward_road_edge_ttc_ms": 0.0,
+            "reward_finalize_ms": 0.0,
+            "done_ms": 0.0,
+            "done_lane_ms": 0.0,
+            "done_collision_ms": 0.0,
+            "done_state_ms": 0.0,
+            "done_finalize_ms": 0.0,
+            "reset_ms": 0.0,
+            "reset_metrics_prep_ms": 0.0,
+            "reset_log_ms": 0.0,
+            "reset_backend_ms": 0.0,
+            "reset_spawn_prep_ms": 0.0,
+            "reset_state_clear_ms": 0.0,
+            "reset_pose_build_ms": 0.0,
+            "reset_pose_park_ms": 0.0,
+            "reset_pose_spawn_ms": 0.0,
+            "reset_pose_finalize_ms": 0.0,
+            "reset_pose_quat_ms": 0.0,
+            "reset_pose_goal_ms": 0.0,
+            "reset_pose_inactive_ms": 0.0,
+            "reset_pose_joint_defaults_ms": 0.0,
+            "reset_write_ms": 0.0,
+            "step_total_ms": 0.0,
+            "step_bookkeeping_ms": 0.0,
+            "step_event_ms": 0.0,
+            "step_obs_noise_ms": 0.0,
+            "step_other_ms": 0.0,
+        }
+        self._step_timing_ema_ms: dict[str, float] = dict(self._step_timing_last_ms)
+        self._teleport_only_reset_initialized = False
+        self._teleport_only_reset_announced = False
+        self._lane_touch_mask_cache_valid = False
         self._collision_sensor_names_by_agent: list[list[str]] = []
+        self._collision_sensors_by_agent: list[list[ContactSensor]] = []
+        self._collision_force_cache_valid = False
+        self._collision_force_cache = torch.zeros((0, 0), dtype=torch.float32)
         self._lane_touch_points_xy_m = torch.zeros((0, 0, 2), dtype=torch.float32)
         self._lane_touch_dirs_xy = torch.zeros((0, 0, 2), dtype=torch.float32)
         self._lane_touch_half_lengths_m = torch.zeros((0, 0), dtype=torch.float32)
         self._lane_touch_half_widths_m = torch.zeros((0, 0), dtype=torch.float32)
         self._lane_touch_types = torch.zeros((0, 0), dtype=torch.long)
         self._lane_touch_valid = torch.zeros((0, 0), dtype=torch.bool)
+        self._lane_touch_type_one_hot = torch.zeros((0, 0, 1), dtype=torch.bool)
         self._lane_touch_type_dim = 1
         self._lane_touch_circle_centers_b = torch.zeros((3, 3), dtype=torch.float32)
+        self._lane_touch_circle_centers_xy_b = torch.zeros((3, 2), dtype=torch.float32)
         self._lane_touch_circle_radius_m = 1.0
         self._lane_touch_mask = torch.zeros((0, 0, 1), dtype=torch.bool)
         if bool(cfg.use_scene_factory_roads) and str(cfg.test_mode).strip().lower() != "collision_test":
             resolved_specs, resolved_spawns_by_env = resolve_scene_factory_env_assignments(cfg)
             cfg.scene_factory_world_index = int(resolved_specs[0].world_index)
-            cfg.num_agents_per_env = min(int(cfg.num_agents_per_env), len(resolved_spawns_by_env[0]))
             self._scene_factory_specs_by_env = list(resolved_specs)
-            self._scenario_spawns_by_env = [list(spawns[: int(cfg.num_agents_per_env)]) for spawns in resolved_spawns_by_env]
+            self._scenario_spawns_by_env = [list(spawns) for spawns in resolved_spawns_by_env]
+            num_envs_cfg = max(1, int(cfg.scene.num_envs))
+            num_agents_cfg = max(1, int(cfg.num_agents_per_env))
+            spawn_start_local_np = np.zeros((num_envs_cfg, num_agents_cfg, 3), dtype=np.float32)
+            spawn_start_yaw_np = np.zeros((num_envs_cfg, num_agents_cfg), dtype=np.float32)
+            spawn_goal_local_np = np.zeros((num_envs_cfg, num_agents_cfg, 3), dtype=np.float32)
+            spawn_valid_np = np.zeros((num_envs_cfg, num_agents_cfg), dtype=np.bool_)
+            for env_idx, spawns in enumerate(self._scenario_spawns_by_env[:num_envs_cfg]):
+                active_agents = min(num_agents_cfg, len(spawns))
+                for agent_idx in range(active_agents):
+                    spawn = spawns[agent_idx]
+                    spawn_start_local_np[env_idx, agent_idx] = np.asarray(spawn.start_local_xyz, dtype=np.float32)
+                    spawn_start_yaw_np[env_idx, agent_idx] = float(spawn.start_yaw_rad)
+                    spawn_goal_local_np[env_idx, agent_idx] = np.asarray(spawn.goal_local_xyz, dtype=np.float32)
+                    spawn_valid_np[env_idx, agent_idx] = True
             self._scenario_spawns = list(self._scenario_spawns_by_env[0])
             self._scene_factory_scene_json_paths_by_env = [
                 str(Path(spec.scene_json_path).expanduser().resolve()) for spec in resolved_specs
@@ -573,6 +696,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 [_scene_factory_weather_context_from_spec(cfg, spec) for spec in resolved_specs],
                 axis=0,
             ).astype(np.float32)
+            self._scene_factory_spawn_start_local = spawn_start_local_np
+            self._scene_factory_spawn_start_yaw = spawn_start_yaw_np
+            self._scene_factory_spawn_goal_local = spawn_goal_local_np
+            self._scene_factory_spawn_valid = spawn_valid_np
         configure_multi_agent_spaces(cfg, cfg.num_agents_per_env)
         self._tunable_config = normalize_tunable_config(
             load_tunable_config(cfg.tunable_config_json) if str(cfg.tunable_config_json) else StudentTunableConfig()
@@ -582,16 +709,32 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._vehicle_width_m = float(vehicle_width_m)
         circle_centers_b, circle_radius_m = _build_vehicle_lane_touch_circle_proxy(cfg.student_usd_path)
         self._lane_touch_circle_centers_b = circle_centers_b
+        self._lane_touch_circle_centers_xy_b = circle_centers_b[:, :2].contiguous()
         self._lane_touch_circle_radius_m = float(circle_radius_m)
         self._agent_ids = list(cfg.possible_agents)
         self._collision_sensor_names_by_agent = [[] for _ in self._agent_ids]
+        self._collision_sensors_by_agent = [[] for _ in self._agent_ids]
         super().__init__(cfg, render_mode, **kwargs)
         self._configure_capture_camera_pose()
         self._lane_touch_circle_centers_b = self._lane_touch_circle_centers_b.to(self.device)
+        self._lane_touch_circle_centers_xy_b = self._lane_touch_circle_centers_xy_b.to(self.device)
         weather_context = torch.as_tensor(self._weather_context_np, dtype=torch.float32, device=self.device)
         if weather_context.ndim == 1:
             weather_context = weather_context.unsqueeze(0).repeat(self.num_envs, 1)
         self._weather_context = weather_context
+        if self._scene_factory_spawn_start_local is not None:
+            self._scene_factory_spawn_start_local = torch.as_tensor(
+                self._scene_factory_spawn_start_local, dtype=torch.float32, device=self.device
+            )
+            self._scene_factory_spawn_start_yaw = torch.as_tensor(
+                self._scene_factory_spawn_start_yaw, dtype=torch.float32, device=self.device
+            )
+            self._scene_factory_spawn_goal_local = torch.as_tensor(
+                self._scene_factory_spawn_goal_local, dtype=torch.float32, device=self.device
+            )
+            self._scene_factory_spawn_valid = torch.as_tensor(
+                self._scene_factory_spawn_valid, dtype=torch.bool, device=self.device
+            )
 
         self._num_agents = len(self._agent_ids)
         self._vehicles = [self.scene.articulations[agent_id] for agent_id in self._agent_ids]
@@ -604,6 +747,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._previous_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
         self._current_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
         self._terminal_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
+        self._spawned_agent_mask = torch.ones(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._agent_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._goal_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._collision_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
@@ -617,6 +761,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._pending_lane_forbidden_done_mask = torch.zeros(
             self._num_agents, self.num_envs, dtype=torch.bool, device=self.device
         )
+        if self._scene_factory_spawn_valid is not None:
+            self._spawned_agent_mask = self._scene_factory_spawn_valid.transpose(0, 1).clone()
 
         self._steer_joint_ids: list[list[int]] = []
         self._drive_joint_ids: list[list[int]] = []
@@ -629,6 +775,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._external_forces: list[torch.Tensor] = []
         self._external_torques: list[torch.Tensor] = []
         self._brake_sign_memory: list[torch.Tensor] = []
+        self._default_root_pose: list[torch.Tensor] = []
+        self._default_joint_pos: list[torch.Tensor] = []
+        self._default_joint_vel: list[torch.Tensor] = []
 
         for vehicle in self._vehicles:
             steer_joint_ids, _ = vehicle.find_joints(
@@ -667,6 +816,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._external_forces.append(torch.zeros(self.num_envs, len(base_body_id), 3, device=self.device))
             self._external_torques.append(torch.zeros(self.num_envs, len(base_body_id), 3, device=self.device))
             self._brake_sign_memory.append(torch.ones(self.num_envs, len(brake_joint_ids), device=self.device))
+            self._default_root_pose.append(vehicle.data.default_root_state[:, :7].clone())
+            self._default_joint_pos.append(vehicle.data.default_joint_pos.clone())
+            self._default_joint_vel.append(vehicle.data.default_joint_vel.clone())
 
             vehicle.write_joint_viscous_friction_coefficient_to_sim(
                 joint_viscous_friction_coeff=torch.full(
@@ -693,6 +845,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 joint_ids=suspension_joint_ids,
             )
 
+        self._steer_joint_ids_tensor = torch.tensor(self._steer_joint_ids, dtype=torch.long, device=self.device)
+        self._drive_joint_ids_tensor = torch.tensor(self._drive_joint_ids, dtype=torch.long, device=self.device)
+        self._brake_joint_ids_tensor = torch.tensor(self._brake_joint_ids, dtype=torch.long, device=self.device)
+
         self._steer_limit = float(self._tunable_config.steering_limit_rad)
         self._dry_longitudinal_scale = float(self._tunable_config.surface_longitudinal_scale.get("dry_asphalt", 1.0))
         self._dry_lateral_scale = float(self._tunable_config.surface_lateral_scale.get("dry_asphalt", 1.0))
@@ -714,6 +870,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             "crash_penalty",
             "lane_center_bonus",
             "lane_forbidden_penalty",
+            "offroad_penalty",
+            "idle_penalty",
+            "ttc_penalty",
+            "road_edge_ttc_penalty",
+            "geom_lane_reward",
         )
         self._episode_sums = {
             key: torch.zeros(self._num_agents, self.num_envs, dtype=torch.float32, device=self.device)
@@ -789,8 +950,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     debug_vis=False,
                     filter_prim_paths_expr=filter_paths,
                 )
-                self.scene.sensors[sensor_name] = ContactSensor(sensor_cfg)
+                contact_sensor = ContactSensor(sensor_cfg)
+                self.scene.sensors[sensor_name] = contact_sensor
                 self._collision_sensor_names_by_agent[agent_idx].append(sensor_name)
+                self._collision_sensors_by_agent[agent_idx].append(contact_sensor)
 
     def _spawn_capture_camera(self) -> None:
         if not bool(self.cfg.capture_camera_enabled):
@@ -914,6 +1077,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._lane_touch_half_widths_m = torch.zeros((self.num_envs, 0), dtype=torch.float32, device=self.device)
             self._lane_touch_types = torch.zeros((self.num_envs, 0), dtype=torch.long, device=self.device)
             self._lane_touch_valid = torch.zeros((self.num_envs, 0), dtype=torch.bool, device=self.device)
+            self._lane_touch_type_one_hot = torch.zeros((self.num_envs, 0, 1), dtype=torch.bool, device=self.device)
             self._lane_touch_type_dim = 1
             self._lane_touch_mask = torch.zeros((agent_count, self.num_envs, 1), dtype=torch.bool, device=self.device)
             return
@@ -975,6 +1139,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 types_by_env[env_index], dtype=torch.long, device=self.device
             )
             self._lane_touch_valid[env_index, env_slice] = True
+        self._lane_touch_type_one_hot = torch.nn.functional.one_hot(
+            self._lane_touch_types.clamp(min=0),
+            num_classes=int(self._lane_touch_type_dim),
+        ).to(dtype=torch.bool)
+        self._lane_touch_type_one_hot &= self._lane_touch_valid.unsqueeze(-1)
         self._lane_touch_mask = torch.zeros(
             (agent_count, self.num_envs, int(self._lane_touch_type_dim)),
             dtype=torch.bool,
@@ -982,6 +1151,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         )
 
     def _update_lane_touch_mask(self) -> None:
+        if bool(self._lane_touch_mask_cache_valid):
+            return
         if (
             not bool(self.cfg.lane_touch_enabled)
             or not bool(self.cfg.use_scene_factory_roads)
@@ -989,6 +1160,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             or self._lane_touch_valid.shape[1] == 0
         ):
             self._lane_touch_mask.zero_()
+            self._lane_touch_mask_cache_valid = True
             return
 
         env_origins_xy = self.scene.env_origins[:, :2]
@@ -998,32 +1170,39 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         half_widths = self._lane_touch_half_widths_m
         valid = self._lane_touch_valid
         circle_radius = float(self._lane_touch_circle_radius_m) + float(self.cfg.lane_touch_margin_m)
-        circle_centers_b = self._lane_touch_circle_centers_b
+        root_pos_w = torch.stack([vehicle.data.root_pos_w for vehicle in self._vehicles], dim=0)
+        root_quat_w = torch.stack([vehicle.data.root_quat_w for vehicle in self._vehicles], dim=0)
+        root_pos_xy = root_pos_w[..., :2] - env_origins_xy.unsqueeze(0)
+        yaw_by_agent = self._compute_yaw_by_agent(root_quat_w)
+        cos_yaw = torch.cos(yaw_by_agent).unsqueeze(-1)
+        sin_yaw = torch.sin(yaw_by_agent).unsqueeze(-1)
+        local_x = self._lane_touch_circle_centers_xy_b[:, 0].view(1, 1, -1)
+        local_y = self._lane_touch_circle_centers_xy_b[:, 1].view(1, 1, -1)
+        rotated_x = cos_yaw * local_x - sin_yaw * local_y
+        rotated_y = sin_yaw * local_x + cos_yaw * local_y
+        circle_centers_w = torch.stack(
+            (
+                root_pos_xy[..., 0].unsqueeze(-1) + rotated_x,
+                root_pos_xy[..., 1].unsqueeze(-1) + rotated_y,
+            ),
+            dim=-1,
+        )
 
         self._lane_touch_mask.zero_()
-        for agent_idx, vehicle in enumerate(self._vehicles):
-            root_pos_xy = vehicle.data.root_pos_w[:, :2] - env_origins_xy
-            circle_centers_w = root_pos_xy.unsqueeze(1) + quat_apply(
-                vehicle.data.root_quat_w.unsqueeze(1).expand(-1, circle_centers_b.shape[0], -1),
-                circle_centers_b.unsqueeze(0).expand(self.num_envs, -1, -1),
-            )[:, :, :2]
-            delta = circle_centers_w.unsqueeze(2) - self._lane_touch_points_xy_m.unsqueeze(1)
-            along = torch.sum(delta * dirs_xy.unsqueeze(1), dim=-1).abs() - half_lengths.unsqueeze(1)
-            perp = torch.sum(delta * perp_xy.unsqueeze(1), dim=-1).abs() - half_widths.unsqueeze(1)
-            outside_dx = torch.clamp(along, min=0.0)
-            outside_dy = torch.clamp(perp, min=0.0)
-            distance_sq = outside_dx.square() + outside_dy.square()
-            touch = (
-                valid.unsqueeze(1)
-                & (distance_sq <= (circle_radius * circle_radius))
+        delta = circle_centers_w.unsqueeze(3) - self._lane_touch_points_xy_m.unsqueeze(0).unsqueeze(2)
+        along = torch.sum(delta * dirs_xy.unsqueeze(0).unsqueeze(2), dim=-1).abs() - half_lengths.unsqueeze(0).unsqueeze(2)
+        perp = torch.sum(delta * perp_xy.unsqueeze(0).unsqueeze(2), dim=-1).abs() - half_widths.unsqueeze(0).unsqueeze(2)
+        outside_dx = torch.clamp(along, min=0.0)
+        outside_dy = torch.clamp(perp, min=0.0)
+        distance_sq = outside_dx.square() + outside_dy.square()
+        touch = valid.unsqueeze(0).unsqueeze(2) & (distance_sq <= (circle_radius * circle_radius))
+        self._lane_touch_mask.copy_(
+            torch.any(
+                touch.unsqueeze(-1) & self._lane_touch_type_one_hot.unsqueeze(0).unsqueeze(2),
+                dim=(2, 3),
             )
-            for road_type in range(int(self._lane_touch_type_dim)):
-                type_mask = valid & (self._lane_touch_types == int(road_type))
-                if not bool(torch.any(type_mask).item()):
-                    continue
-                self._lane_touch_mask[agent_idx, :, road_type] = torch.any(
-                    touch & type_mask.unsqueeze(1), dim=(1, 2)
-                )
+        )
+        self._lane_touch_mask_cache_valid = True
 
     def lane_touch_type_mask_by_agent(self) -> dict[str, torch.Tensor]:
         return {agent_id: self._lane_touch_mask[idx].clone() for idx, agent_id in enumerate(self._agent_ids)}
@@ -1053,13 +1232,61 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         return torch.any(self._lane_touch_mask[agent_idx, :, valid_types], dim=1)
 
     def _done_vehicle_root_pose(self, agent_idx: int, env_ids: torch.Tensor) -> torch.Tensor:
-        vehicle = self._vehicles[agent_idx]
-        root_pose = vehicle.data.default_root_state[env_ids, :7].clone()
+        root_pose = self._default_root_pose[agent_idx][env_ids].clone()
         env_origins = self.scene.env_origins[env_ids]
         root_pose[:, 0] = env_origins[:, 0] + 1000.0 + 40.0 * float(agent_idx)
         root_pose[:, 1] = env_origins[:, 1] + 1000.0 + 25.0 * float(agent_idx)
         root_pose[:, 2] = env_origins[:, 2] + 10.0
         return root_pose
+
+    def _park_done_vehicle(self, agent_idx: int, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        vehicle = self._vehicles[agent_idx]
+        parked_root_pose = self._done_vehicle_root_pose(agent_idx, env_ids)
+        parked_root_velocity = self._default_joint_vel[agent_idx].new_zeros((len(env_ids), 6))
+        parked_joint_pos = self._default_joint_pos[agent_idx][env_ids].clone()
+        parked_joint_vel = self._default_joint_vel[agent_idx][env_ids].clone()
+        vehicle.write_root_pose_to_sim(parked_root_pose, env_ids=env_ids)
+        vehicle.write_root_velocity_to_sim(parked_root_velocity, env_ids=env_ids)
+        vehicle.write_joint_state_to_sim(parked_joint_pos, parked_joint_vel, None, env_ids)
+
+    def _set_root_pose_quat_from_yaw(self, root_pose: torch.Tensor, yaw: torch.Tensor) -> None:
+        half_yaw = 0.5 * yaw
+        root_pose[:, 3] = torch.cos(half_yaw)
+        root_pose[:, 4] = 0.0
+        root_pose[:, 5] = 0.0
+        root_pose[:, 6] = torch.sin(half_yaw)
+
+    def _reset_mode_name(self) -> str:
+        return str(getattr(self.cfg, "reset_mode", "isaac_reset")).strip().lower().replace("-", "_")
+
+    def _should_use_teleport_only_reset(self) -> bool:
+        return self._reset_mode_name() == "teleport_only" and bool(self._teleport_only_reset_initialized)
+
+    def _timing_enabled(self) -> bool:
+        return bool(self.cfg.step_timing_log_enable) or bool(self.cfg.step_timing_print_enable)
+
+    def _sync_timing_device(self) -> None:
+        if not self._timing_enabled():
+            return
+        if not bool(getattr(self.cfg, "step_timing_cuda_sync_enable", False)):
+            return
+        if not isinstance(self.device, torch.device) or self.device.type != "cuda":
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
+
+    def _apply_lightweight_reset_state(self, env_ids: torch.Tensor) -> None:
+        if hasattr(self, "episode_length_buf") and isinstance(self.episode_length_buf, torch.Tensor):
+            self.episode_length_buf[env_ids] = 0
+        for attr_name in ("reset_buf", "reset_terminated", "reset_time_outs", "termination_manager"):
+            attr = getattr(self, attr_name, None)
+            if isinstance(attr, torch.Tensor) and attr.shape[0] == self.num_envs:
+                if attr.dtype == torch.bool:
+                    attr[env_ids] = False
+                else:
+                    attr[env_ids] = 0
 
     def _build_scene_factory_visual_floor(self, stage, *, world_root: str) -> None:
         from pxr import Gf, UsdGeom
@@ -1083,6 +1310,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             pass
 
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]):
+        timing_start = perf_counter()
         for agent_idx, agent_id in enumerate(self._agent_ids):
             self._raw_actions[agent_idx] = actions[agent_id].clone().clamp_(-1.0, 1.0)
             # Rectify throttle and brake so a zero policy output maps to a true neutral command.
@@ -1093,98 +1321,119 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._semantic_actions[agent_idx, :, 2] = torch.clamp(
                 self._raw_actions[agent_idx, :, 2], min=0.0, max=1.0
             )
-            done_mask = self._agent_done_mask[agent_idx]
-            if bool(torch.any(done_mask).item()):
-                self._raw_actions[agent_idx, done_mask] = 0.0
-                self._semantic_actions[agent_idx, done_mask, 0] = 0.0
-                self._semantic_actions[agent_idx, done_mask, 1] = 0.0
-                self._semantic_actions[agent_idx, done_mask, 2] = 0.0
+            done_mask = self._agent_done_mask[agent_idx].unsqueeze(-1)
+            self._raw_actions[agent_idx].masked_fill_(done_mask, 0.0)
+            self._semantic_actions[agent_idx].masked_fill_(done_mask, 0.0)
+        self._step_timing_last_ms["pre_physics_ms"] = (perf_counter() - timing_start) * 1000.0
 
     def _apply_action(self):
+        timing_start = perf_counter()
+        math_ms = 0.0
+        target_submit_ms = 0.0
+        wrench_submit_ms = 0.0
+        self._sync_timing_device()
+        math_start = perf_counter()
+        joint_pos_all = torch.stack([vehicle.data.joint_pos for vehicle in self._vehicles], dim=0)
+        joint_vel_all = torch.stack([vehicle.data.joint_vel for vehicle in self._vehicles], dim=0)
+        root_lin_vel_b_all = torch.stack([vehicle.data.root_lin_vel_b for vehicle in self._vehicles], dim=0)
+        root_ang_vel_b_all = torch.stack([vehicle.data.root_ang_vel_b for vehicle in self._vehicles], dim=0)
+        done_mask = self._agent_done_mask
+        done_mask_joint = done_mask.unsqueeze(-1)
+        done_mask_body = done_mask.unsqueeze(-1).unsqueeze(-1)
+
+        joint_effort_targets = torch.stack(self._joint_effort_targets, dim=0)
+        joint_effort_targets.zero_()
+
+        steer_idx = self._steer_joint_ids_tensor.unsqueeze(1).expand(-1, self.num_envs, -1)
+        drive_idx = self._drive_joint_ids_tensor.unsqueeze(1).expand(-1, self.num_envs, -1)
+        brake_idx = self._brake_joint_ids_tensor.unsqueeze(1).expand(-1, self.num_envs, -1)
+
+        steer_target = self._semantic_actions[:, :, 1:2] * self._steer_limit
+        steer_pos_error = steer_target - torch.gather(joint_pos_all, 2, steer_idx)
+        steer_vel_error = -torch.gather(joint_vel_all, 2, steer_idx)
+        steer_effort = (
+            float(self._tunable_config.steering_kp_nm_per_rad) * steer_pos_error
+            + float(self._tunable_config.steering_kd_nm_s_per_rad) * steer_vel_error
+        )
+        steer_effort.clamp_(
+            -float(self._tunable_config.steering_effort_limit_nm),
+            float(self._tunable_config.steering_effort_limit_nm),
+        )
+        joint_effort_targets.scatter_(2, steer_idx, steer_effort)
+
+        drive_effort = (
+            self._semantic_actions[:, :, 0:1]
+            * float(self._tunable_config.drive_torque_nm)
+            * float(self._dry_longitudinal_scale)
+        )
+        gathered_drive = torch.gather(joint_effort_targets, 2, drive_idx)
+        joint_effort_targets.scatter_(2, drive_idx, gathered_drive + drive_effort.expand_as(gathered_drive))
+
+        brake_joint_vel = torch.gather(joint_vel_all, 2, brake_idx)
+        brake_sign_memory = torch.stack(self._brake_sign_memory, dim=0)
+        moving_mask = torch.abs(brake_joint_vel) > 1.0e-4
+        current_sign = torch.sign(brake_joint_vel)
+        current_sign = torch.where(current_sign == 0.0, brake_sign_memory, current_sign)
+        brake_sign_memory = torch.where(moving_mask, current_sign, brake_sign_memory)
+        brake_sign = torch.where(moving_mask, current_sign, brake_sign_memory)
+
+        brake = self._semantic_actions[:, :, 2:3]
+        front_brake_effort = brake * float(self._tunable_config.brake_front_torque_nm) * float(self._dry_longitudinal_scale)
+        rear_brake_effort = brake * float(self._tunable_config.brake_rear_torque_nm) * float(self._dry_longitudinal_scale)
+        front_idx = brake_idx[:, :, 0:2]
+        rear_idx = brake_idx[:, :, 2:4]
+        front_gather = torch.gather(joint_effort_targets, 2, front_idx)
+        rear_gather = torch.gather(joint_effort_targets, 2, rear_idx)
+        joint_effort_targets.scatter_(2, front_idx, front_gather - front_brake_effort.expand_as(front_gather) * brake_sign[:, :, 0:2])
+        joint_effort_targets.scatter_(2, rear_idx, rear_gather - rear_brake_effort.expand_as(rear_gather) * brake_sign[:, :, 2:4])
+        joint_effort_targets.masked_fill_(done_mask_joint, 0.0)
+
+        external_forces = torch.stack(self._external_forces, dim=0)
+        external_torques = torch.stack(self._external_torques, dim=0)
+        external_forces.zero_()
+        external_torques.zero_()
+        if self.cfg.apply_runtime_external_wrench:
+            external_forces[:, :, 0, 1] = (
+                -float(self._tunable_config.lateral_velocity_damping_n_per_mps)
+                * float(self._dry_lateral_scale)
+                * root_lin_vel_b_all[:, :, 1]
+            )
+            external_torques[:, :, 0, 2] = (
+                -float(self._tunable_config.yaw_stability_damping_nm_per_rad_s)
+                * float(self._dry_lateral_scale)
+                * root_ang_vel_b_all[:, :, 2]
+            )
+        external_forces.masked_fill_(done_mask_body, 0.0)
+        external_torques.masked_fill_(done_mask_body, 0.0)
+        self._sync_timing_device()
+        math_ms += (perf_counter() - math_start) * 1000.0
+
         for agent_idx, vehicle in enumerate(self._vehicles):
-            joint_pos = vehicle.data.joint_pos
-            joint_vel = vehicle.data.joint_vel
-            done_env_ids = torch.nonzero(self._agent_done_mask[agent_idx], as_tuple=False).squeeze(-1)
+            self._joint_effort_targets[agent_idx].copy_(joint_effort_targets[agent_idx])
+            self._brake_sign_memory[agent_idx].copy_(brake_sign_memory[agent_idx])
+            self._external_forces[agent_idx].copy_(external_forces[agent_idx])
+            self._external_torques[agent_idx].copy_(external_torques[agent_idx])
 
-            self._joint_effort_targets[agent_idx].zero_()
-
-            steer_target = self._semantic_actions[agent_idx, :, 1:2] * self._steer_limit
-            steer_pos_error = steer_target - joint_pos[:, self._steer_joint_ids[agent_idx]]
-            steer_vel_error = -joint_vel[:, self._steer_joint_ids[agent_idx]]
-            steer_effort = (
-                float(self._tunable_config.steering_kp_nm_per_rad) * steer_pos_error
-                + float(self._tunable_config.steering_kd_nm_s_per_rad) * steer_vel_error
-            )
-            steer_effort.clamp_(
-                -float(self._tunable_config.steering_effort_limit_nm),
-                float(self._tunable_config.steering_effort_limit_nm),
-            )
-            self._joint_effort_targets[agent_idx][:, self._steer_joint_ids[agent_idx]] = steer_effort
-
-            drive_effort = (
-                self._semantic_actions[agent_idx, :, 0:1]
-                * float(self._tunable_config.drive_torque_nm)
-                * float(self._dry_longitudinal_scale)
-            )
-            self._joint_effort_targets[agent_idx][:, self._drive_joint_ids[agent_idx]] += drive_effort
-
-            brake_joint_vel = joint_vel[:, self._brake_joint_ids[agent_idx]]
-            moving_mask = torch.abs(brake_joint_vel) > 1.0e-4
-            current_sign = torch.sign(brake_joint_vel)
-            current_sign = torch.where(current_sign == 0.0, self._brake_sign_memory[agent_idx], current_sign)
-            self._brake_sign_memory[agent_idx] = torch.where(
-                moving_mask, current_sign, self._brake_sign_memory[agent_idx]
-            )
-            brake_sign = torch.where(moving_mask, current_sign, self._brake_sign_memory[agent_idx])
-
-            brake = self._semantic_actions[agent_idx, :, 2:3]
-            front_brake_effort = (
-                brake * float(self._tunable_config.brake_front_torque_nm) * float(self._dry_longitudinal_scale)
-            )
-            rear_brake_effort = (
-                brake * float(self._tunable_config.brake_rear_torque_nm) * float(self._dry_longitudinal_scale)
-            )
-            self._joint_effort_targets[agent_idx][:, self._brake_joint_ids[agent_idx][0:2]] -= (
-                front_brake_effort * brake_sign[:, 0:2]
-            )
-            self._joint_effort_targets[agent_idx][:, self._brake_joint_ids[agent_idx][2:4]] -= (
-                rear_brake_effort * brake_sign[:, 2:4]
-            )
-            if len(done_env_ids) > 0:
-                self._joint_effort_targets[agent_idx][done_env_ids] = 0.0
-
+            self._sync_timing_device()
+            target_submit_start = perf_counter()
             vehicle.set_joint_effort_target(self._joint_effort_targets[agent_idx])
+            self._sync_timing_device()
+            target_submit_ms += (perf_counter() - target_submit_start) * 1000.0
 
-            self._external_forces[agent_idx].zero_()
-            self._external_torques[agent_idx].zero_()
-            if self.cfg.apply_runtime_external_wrench:
-                self._external_forces[agent_idx][:, 0, 1] = (
-                    -float(self._tunable_config.lateral_velocity_damping_n_per_mps)
-                    * float(self._dry_lateral_scale)
-                    * vehicle.data.root_lin_vel_b[:, 1]
-                )
-                self._external_torques[agent_idx][:, 0, 2] = (
-                    -float(self._tunable_config.yaw_stability_damping_nm_per_rad_s)
-                    * float(self._dry_lateral_scale)
-                    * vehicle.data.root_ang_vel_b[:, 2]
-                )
-            if len(done_env_ids) > 0:
-                self._external_forces[agent_idx][done_env_ids] = 0.0
-                self._external_torques[agent_idx][done_env_ids] = 0.0
+            self._sync_timing_device()
+            wrench_submit_start = perf_counter()
             vehicle.permanent_wrench_composer.set_forces_and_torques(
                 forces=self._external_forces[agent_idx],
                 torques=self._external_torques[agent_idx],
                 body_ids=self._base_body_ids[agent_idx],
                 is_global=False,
             )
-            if len(done_env_ids) > 0:
-                parked_root_pose = self._done_vehicle_root_pose(agent_idx, done_env_ids)
-                parked_root_velocity = torch.zeros((len(done_env_ids), 6), dtype=torch.float32, device=self.device)
-                parked_joint_pos = vehicle.data.default_joint_pos[done_env_ids].clone()
-                parked_joint_vel = torch.zeros_like(vehicle.data.default_joint_vel[done_env_ids])
-                vehicle.write_root_pose_to_sim(parked_root_pose, env_ids=done_env_ids)
-                vehicle.write_root_velocity_to_sim(parked_root_velocity, env_ids=done_env_ids)
-                vehicle.write_joint_state_to_sim(parked_joint_pos, parked_joint_vel, None, done_env_ids)
+            self._sync_timing_device()
+            wrench_submit_ms += (perf_counter() - wrench_submit_start) * 1000.0
+            self._step_timing_last_ms["apply_action_ms"] = (perf_counter() - timing_start) * 1000.0
+        self._step_timing_last_ms["apply_action_math_ms"] += float(math_ms)
+        self._step_timing_last_ms["apply_action_target_submit_ms"] += float(target_submit_ms)
+        self._step_timing_last_ms["apply_action_wrench_submit_ms"] += float(wrench_submit_ms)
 
     def _compute_goal_position_body(self, agent_idx: int) -> torch.Tensor:
         goal_pos_b, _ = subtract_frame_transforms(
@@ -1199,6 +1448,19 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         distance = torch.linalg.norm(goal_pos_b[:, :2], dim=1)
         return goal_pos_b, distance
 
+    def _compute_goal_distance_all(self) -> tuple[torch.Tensor, torch.Tensor]:
+        root_pos_w = torch.stack([vehicle.data.root_pos_w for vehicle in self._vehicles], dim=0)
+        root_quat_w = torch.stack([vehicle.data.root_quat_w for vehicle in self._vehicles], dim=0)
+        goal_pos_w = self._goal_pos_w
+        goal_pos_b, _ = subtract_frame_transforms(
+            root_pos_w.reshape(-1, 3),
+            root_quat_w.reshape(-1, 4),
+            goal_pos_w.reshape(-1, 3),
+        )
+        goal_pos_b = goal_pos_b.reshape(self._num_agents, self.num_envs, 3)
+        goal_distance = torch.linalg.norm(goal_pos_b[..., :2], dim=-1)
+        return goal_pos_b, goal_distance
+
     def _pairwise_distances_xy(self) -> torch.Tensor:
         positions = torch.stack([vehicle.data.root_pos_w[:, :2] for vehicle in self._vehicles], dim=1)
         deltas = positions.unsqueeze(2) - positions.unsqueeze(1)
@@ -1207,30 +1469,32 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         return torch.where(eye, torch.full_like(distances, float("inf")), distances)
 
     def _collision_force_by_agent_n_tensor(self) -> torch.Tensor:
+        if self._collision_force_cache_valid and self._collision_force_cache.shape == (self._num_agents, self.num_envs):
+            return self._collision_force_cache
         if self._num_agents <= 1:
-            return torch.zeros(1, self.num_envs, dtype=torch.float32, device=self.device)
+            forces = torch.zeros(1, self.num_envs, dtype=torch.float32, device=self.device)
+            self._collision_force_cache = forces
+            self._collision_force_cache_valid = True
+            return forces
 
-        agent_forces: list[torch.Tensor] = []
-        for sensor_names in self._collision_sensor_names_by_agent:
-            sensor_forces: list[torch.Tensor] = []
-            for sensor_name in sensor_names:
-                contact_sensor = self.scene.sensors[sensor_name]
+        forces = torch.zeros((self._num_agents, self.num_envs), dtype=torch.float32, device=self.device)
+        for agent_idx, contact_sensors in enumerate(self._collision_sensors_by_agent):
+            force_mats: list[torch.Tensor] = []
+            for contact_sensor in contact_sensors:
                 force_matrix_w = contact_sensor.data.force_matrix_w
                 if force_matrix_w is not None and force_matrix_w.numel() > 0:
-                    sensor_force = torch.linalg.norm(force_matrix_w, dim=-1).amax(dim=(1, 2))
-                else:
-                    sensor_force = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-                sensor_forces.append(sensor_force)
-            if sensor_forces:
-                agent_forces.append(torch.stack(sensor_forces, dim=0).amax(dim=0))
-            else:
-                agent_forces.append(torch.zeros(self.num_envs, dtype=torch.float32, device=self.device))
-        forces = torch.stack(agent_forces, dim=0)
+                    force_mats.append(force_matrix_w)
+            if force_mats:
+                stacked_force_mats = torch.stack(force_mats, dim=0)
+                sensor_force = torch.linalg.vector_norm(stacked_force_mats, dim=-1).amax(dim=(-1, -2))
+                forces[agent_idx] = sensor_force.amax(dim=0)
         warmup_steps = max(0, int(self.cfg.agent_collision_warmup_steps))
         if warmup_steps > 0:
             warmup_mask = self._steps_since_reset_buf < warmup_steps
             if bool(torch.any(warmup_mask).item()):
                 forces[:, warmup_mask] = 0.0
+        self._collision_force_cache = forces
+        self._collision_force_cache_valid = True
         return forces
 
     def _collision_world_mask(self) -> torch.Tensor:
@@ -1250,98 +1514,102 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         return self._collision_force_by_agent_n_tensor().amax(dim=0).clone()
 
     def _compute_yaw_by_agent(self, root_quat_w: torch.Tensor) -> torch.Tensor:
-        forward_b = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
-        forward_w = quat_apply(
-            root_quat_w.reshape(-1, 4),
-            forward_b.unsqueeze(0).expand(root_quat_w.shape[0] * root_quat_w.shape[1], -1),
-        ).reshape(root_quat_w.shape[0], root_quat_w.shape[1], 3)
-        return torch.atan2(forward_w[..., 1], forward_w[..., 0])
+        qw = root_quat_w[..., 0]
+        qx = root_quat_w[..., 1]
+        qy = root_quat_w[..., 2]
+        qz = root_quat_w[..., 3]
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy.square() + qz.square())
+        return torch.atan2(siny_cosp, cosy_cosp)
+
+    def _planar_circle_centers_and_forward(
+        self,
+        root_pos_xy: torch.Tensor,
+        yaw_by_agent: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        circle_centers_xy_b = self._lane_touch_circle_centers_xy_b
+        cos_yaw = torch.cos(yaw_by_agent)
+        sin_yaw = torch.sin(yaw_by_agent)
+        circle_x = circle_centers_xy_b[:, 0].view(1, 1, -1)
+        circle_y = circle_centers_xy_b[:, 1].view(1, 1, -1)
+        rotated_x = cos_yaw.unsqueeze(-1) * circle_x - sin_yaw.unsqueeze(-1) * circle_y
+        rotated_y = sin_yaw.unsqueeze(-1) * circle_x + cos_yaw.unsqueeze(-1) * circle_y
+        centers_w = torch.stack(
+            (
+                root_pos_xy[..., 0].unsqueeze(-1) + rotated_x,
+                root_pos_xy[..., 1].unsqueeze(-1) + rotated_y,
+            ),
+            dim=-1,
+        )
+        forward_w = torch.stack((cos_yaw, sin_yaw), dim=-1)
+        return centers_w, forward_w
 
     def _compute_pairwise_vehicle_ttc_s(
         self,
         root_pos_w: torch.Tensor,
-        root_quat_w: torch.Tensor,
+        yaw_by_agent: torch.Tensor,
         root_lin_vel_w: torch.Tensor,
     ) -> torch.Tensor:
         if self._num_agents <= 1:
             return torch.full((1, self.num_envs, 1), float("inf"), device=self.device)
 
         env_origins_xy = self.scene.env_origins[:, :2]
-        circle_centers_b = self._lane_touch_circle_centers_b
         circle_radius = float(self._lane_touch_circle_radius_m)
-        num_circles = int(circle_centers_b.shape[0])
         root_pos_xy = root_pos_w[..., :2] - env_origins_xy.unsqueeze(0)
-        flat_centers_w = quat_apply(
-            root_quat_w.reshape(-1, 4).unsqueeze(1).expand(-1, num_circles, -1).reshape(-1, 4),
-            circle_centers_b.unsqueeze(0)
-            .expand(root_quat_w.shape[0] * root_quat_w.shape[1], -1, -1)
-            .reshape(-1, 3),
-        ).reshape(self._num_agents, self.num_envs, num_circles, 3)[..., :2]
-        centers_w = root_pos_xy.unsqueeze(2) + flat_centers_w
-        forward_w = quat_apply(
-            root_quat_w.reshape(-1, 4),
-            torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
-            .unsqueeze(0)
-            .expand(root_quat_w.shape[0] * root_quat_w.shape[1], -1),
-        ).reshape(self._num_agents, self.num_envs, 3)[..., :2]
-        forward_w = forward_w / torch.linalg.norm(forward_w, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        centers_w, forward_w = self._planar_circle_centers_and_forward(root_pos_xy, yaw_by_agent)
         velocities_xy = root_lin_vel_w[..., :2]
 
-        ttc = torch.full((self._num_agents, self.num_envs, self._num_agents), float("inf"), device=self.device)
         combined_radius = 2.0 * circle_radius
         combined_radius_sq = float(combined_radius * combined_radius)
+        centers_env = centers_w.permute(1, 0, 2, 3)
+        forward_env = forward_w.permute(1, 0, 2)
+        velocities_env = velocities_xy.permute(1, 0, 2)
 
-        for ego_idx in range(self._num_agents):
-            ego_centers = centers_w[ego_idx]
-            ego_forward = forward_w[ego_idx]
-            ego_vel = velocities_xy[ego_idx]
-            for other_idx in range(self._num_agents):
-                if other_idx == ego_idx:
-                    continue
-                other_centers = centers_w[other_idx]
-                other_vel = velocities_xy[other_idx]
-                rel = other_centers.unsqueeze(1) - ego_centers.unsqueeze(2)
-                rel_vel = other_vel - ego_vel
-                rx = rel[..., 0]
-                ry = rel[..., 1]
-                rvx = rel_vel[:, 0].unsqueeze(-1).unsqueeze(-1)
-                rvy = rel_vel[:, 1].unsqueeze(-1).unsqueeze(-1)
-                dist_sq = rx.square() + ry.square()
-                rel_speed_sq = rvx.square() + rvy.square()
-                rdotv = rx * rvx + ry * rvy
-                forward_dot = rx * ego_forward[:, 0].unsqueeze(-1).unsqueeze(-1) + ry * ego_forward[:, 1].unsqueeze(
-                    -1
-                ).unsqueeze(-1)
-                forward_mask = forward_dot > 0.0
-                overlap_mask = forward_mask & (dist_sq <= combined_radius_sq)
-                t_pair = torch.full_like(dist_sq, float("inf"))
-                t_pair = torch.where(overlap_mask, torch.zeros_like(t_pair), t_pair)
+        rel = centers_env[:, None, :, None, :, :] - centers_env[:, :, None, :, None, :]
+        rel_vel = velocities_env[:, None, :, :] - velocities_env[:, :, None, :]
 
-                moving_mask = forward_mask & (~overlap_mask) & (rel_speed_sq > 1.0e-6)
-                if bool(torch.any(moving_mask).item()):
-                    a = torch.where(moving_mask, rel_speed_sq, torch.ones_like(rel_speed_sq))
-                    b = torch.where(moving_mask, 2.0 * rdotv, torch.zeros_like(rdotv))
-                    c = torch.where(moving_mask, dist_sq - combined_radius_sq, torch.zeros_like(dist_sq))
-                    disc = b.square() - 4.0 * a * c
-                    valid_quad = moving_mask & (disc >= 0.0)
-                    sqrt_disc = torch.sqrt(torch.clamp(disc, min=0.0))
-                    denom = 2.0 * torch.clamp(a, min=1.0e-6)
-                    t_enter = (-b - sqrt_disc) / denom
-                    t_exit = (-b + sqrt_disc) / denom
-                    valid_enter = valid_quad & (t_exit >= 0.0)
-                    t_pair = torch.minimum(t_pair, torch.where(valid_enter, torch.clamp(t_enter, min=0.0), t_pair))
+        rx = rel[..., 0]
+        ry = rel[..., 1]
+        rvx = rel_vel[..., 0].unsqueeze(-1).unsqueeze(-1)
+        rvy = rel_vel[..., 1].unsqueeze(-1).unsqueeze(-1)
+        dist_sq = rx.square() + ry.square()
+        rel_speed_sq = rvx.square() + rvy.square()
+        rdotv = rx * rvx + ry * rvy
 
-                    unresolved = moving_mask & (~torch.isfinite(t_pair))
-                    if bool(torch.any(unresolved).item()):
-                        dist = torch.sqrt(torch.clamp(dist_sq, min=1.0e-9))
-                        closing_speed = -rdotv / torch.clamp(dist, min=1.0e-6)
-                        clearance = torch.clamp(dist - combined_radius, min=0.0)
-                        valid_fb = unresolved & (rdotv < 0.0) & (closing_speed > 1.0e-6)
-                        fallback_t = torch.where(valid_fb, clearance / torch.clamp(closing_speed, min=1.0e-6), t_pair)
-                        t_pair = torch.minimum(t_pair, fallback_t)
+        ego_forward_x = forward_env[:, :, 0].unsqueeze(2).unsqueeze(-1).unsqueeze(-1)
+        ego_forward_y = forward_env[:, :, 1].unsqueeze(2).unsqueeze(-1).unsqueeze(-1)
+        forward_dot = rx * ego_forward_x + ry * ego_forward_y
+        forward_mask = forward_dot > 0.0
 
-                ttc[ego_idx, :, other_idx] = torch.amin(t_pair, dim=(1, 2))
-        return ttc
+        pair_mask = ~torch.eye(self._num_agents, dtype=torch.bool, device=self.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        forward_mask = forward_mask & pair_mask
+        overlap_mask = forward_mask & (dist_sq <= combined_radius_sq)
+        t_pair = torch.full_like(dist_sq, float("inf"))
+        t_pair = torch.where(overlap_mask, torch.zeros_like(t_pair), t_pair)
+
+        moving_mask = forward_mask & (~overlap_mask) & (rel_speed_sq > 1.0e-6)
+        a = torch.where(moving_mask, rel_speed_sq, torch.ones_like(rel_speed_sq))
+        b = torch.where(moving_mask, 2.0 * rdotv, torch.zeros_like(rdotv))
+        c = torch.where(moving_mask, dist_sq - combined_radius_sq, torch.zeros_like(dist_sq))
+        disc = b.square() - 4.0 * a * c
+        valid_quad = moving_mask & (disc >= 0.0)
+        sqrt_disc = torch.sqrt(torch.clamp(disc, min=0.0))
+        denom = 2.0 * torch.clamp(a, min=1.0e-6)
+        t_enter = (-b - sqrt_disc) / denom
+        t_exit = (-b + sqrt_disc) / denom
+        valid_enter = valid_quad & (t_exit >= 0.0)
+        t_pair = torch.minimum(t_pair, torch.where(valid_enter, torch.clamp(t_enter, min=0.0), t_pair))
+
+        unresolved = moving_mask & (~torch.isfinite(t_pair))
+        dist = torch.sqrt(torch.clamp(dist_sq, min=1.0e-9))
+        closing_speed = -rdotv / torch.clamp(dist, min=1.0e-6)
+        clearance = torch.clamp(dist - combined_radius, min=0.0)
+        valid_fb = unresolved & (rdotv < 0.0) & (closing_speed > 1.0e-6)
+        fallback_t = torch.where(valid_fb, clearance / torch.clamp(closing_speed, min=1.0e-6), t_pair)
+        t_pair = torch.minimum(t_pair, fallback_t)
+
+        ttc_env = torch.amin(t_pair, dim=(-1, -2))
+        return ttc_env.permute(1, 0, 2)
 
     def _build_reference_neighbor_context(
         self,
@@ -1382,32 +1650,42 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         ttc_max_s = float(max(0.1, self.cfg.obs_neighbor_ttc_max_s))
         obs = torch.zeros((self.num_envs, k, feat_dim), dtype=torch.float32, device=self.device)
         available_slots = min(k, max(0, self._num_agents - 1), int(sorted_indices.shape[1]))
+        if available_slots <= 0:
+            return obs.reshape(self.num_envs, -1)
 
-        for slot in range(available_slots):
-            neighbor_idx = sorted_indices[:, slot]
-            env_ids = torch.arange(self.num_envs, device=self.device)
-            obs[:, slot, 0] = relx_b.transpose(0, 1)[env_ids, neighbor_idx] / bounds_scale
-            obs[:, slot, 1] = rely_b.transpose(0, 1)[env_ids, neighbor_idx] / bounds_scale
-            obs[:, slot, 2] = float(self._vehicle_length_m) / bounds_scale
-            obs[:, slot, 3] = float(self._vehicle_width_m) / bounds_scale
-            rel_yaw = _wrap_pi_torch(yaw_by_agent[neighbor_idx, env_ids] - yaw_by_agent[agent_idx, env_ids])
-            obs[:, slot, 4] = rel_yaw / yaw_scale
-            obs[:, slot, 5] = speed_by_agent[neighbor_idx, env_ids] / speed_scale
-            write_idx = 6
-            if bool(self.cfg.obs_neighbor_include_ttc):
-                ttc = pairwise_ttc_s[agent_idx, env_ids, neighbor_idx]
-                ttc_n = torch.ones_like(ttc)
-                finite_mask = torch.isfinite(ttc)
-                ttc_n = torch.where(
-                    finite_mask,
-                    torch.clamp(ttc, min=0.0, max=ttc_max_s) / ttc_max_s,
-                    ttc_n,
-                )
-                obs[:, slot, write_idx] = ttc_n
-                write_idx += 1
-            if bool(self.cfg.obs_neighbor_include_index):
-                denom = float(max(1, self._num_agents - 1))
-                obs[:, slot, write_idx] = neighbor_idx.to(torch.float32) / denom
+        neighbor_idx = sorted_indices[:, :available_slots]
+        relx_bt = relx_b.transpose(0, 1)
+        rely_bt = rely_b.transpose(0, 1)
+        yaw_by_env_agent = yaw_by_agent.transpose(0, 1)
+        speed_by_env_agent = speed_by_agent.transpose(0, 1)
+        obs_view = obs[:, :available_slots]
+
+        obs_view[:, :, 0] = torch.gather(relx_bt, 1, neighbor_idx) / bounds_scale
+        obs_view[:, :, 1] = torch.gather(rely_bt, 1, neighbor_idx) / bounds_scale
+        obs_view[:, :, 2] = float(self._vehicle_length_m) / bounds_scale
+        obs_view[:, :, 3] = float(self._vehicle_width_m) / bounds_scale
+
+        ego_yaw = yaw_by_agent[agent_idx].unsqueeze(1)
+        neighbor_yaw = torch.gather(yaw_by_env_agent, 1, neighbor_idx)
+        obs_view[:, :, 4] = _wrap_pi_torch(neighbor_yaw - ego_yaw) / yaw_scale
+        obs_view[:, :, 5] = torch.gather(speed_by_env_agent, 1, neighbor_idx) / speed_scale
+
+        write_idx = 6
+        if bool(self.cfg.obs_neighbor_include_ttc):
+            pairwise_ttc_env = pairwise_ttc_s[agent_idx]
+            ttc = torch.gather(pairwise_ttc_env, 1, neighbor_idx)
+            ttc_n = torch.ones_like(ttc)
+            finite_mask = torch.isfinite(ttc)
+            ttc_n = torch.where(
+                finite_mask,
+                torch.clamp(ttc, min=0.0, max=ttc_max_s) / ttc_max_s,
+                ttc_n,
+            )
+            obs_view[:, :, write_idx] = ttc_n
+            write_idx += 1
+        if bool(self.cfg.obs_neighbor_include_index):
+            denom = float(max(1, self._num_agents - 1))
+            obs_view[:, :, write_idx] = neighbor_idx.to(torch.float32) / denom
         return obs.reshape(self.num_envs, -1)
 
     def _build_reference_road_context(
@@ -1522,27 +1800,91 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         bad_tilt = vehicle.data.projected_gravity_b[:, 2] > float(self.cfg.bad_tilt_gravity_threshold)
         return too_low | too_far | bad_tilt
 
+    def _agent_crash_mask_all(self) -> torch.Tensor:
+        root_pos_w = torch.stack([vehicle.data.root_pos_w for vehicle in self._vehicles], dim=0)
+        projected_gravity_b = torch.stack([vehicle.data.projected_gravity_b for vehicle in self._vehicles], dim=0)
+        root_pos_rel = root_pos_w - self.scene.env_origins.unsqueeze(0)
+        too_low = root_pos_rel[..., 2] < float(self.cfg.fall_height_threshold_m)
+        too_far = torch.linalg.norm(root_pos_rel[..., :2], dim=-1) > float(self.cfg.max_distance_from_origin_m)
+        bad_tilt = projected_gravity_b[..., 2] > float(self.cfg.bad_tilt_gravity_threshold)
+        return too_low | too_far | bad_tilt
+
+    def _lane_touch_any_type_mask_all(self, lane_types: Sequence[int]) -> torch.Tensor:
+        if (
+            not bool(self.cfg.lane_touch_enabled)
+            or self._lane_touch_mask.numel() == 0
+            or self._lane_touch_mask.shape[-1] <= 0
+        ):
+            return torch.zeros((self._num_agents, self.num_envs), dtype=torch.bool, device=self.device)
+        valid_types = []
+        type_dim = int(self._lane_touch_type_dim)
+        for road_type in lane_types:
+            road_type_int = int(road_type)
+            if 0 <= road_type_int < type_dim:
+                valid_types.append(road_type_int)
+        if not valid_types:
+            return torch.zeros((self._num_agents, self.num_envs), dtype=torch.bool, device=self.device)
+        return torch.any(self._lane_touch_mask[:, :, valid_types], dim=2)
+
     def _get_observations(self) -> dict[str, torch.Tensor]:
+        self._sync_timing_device()
         obs_start = perf_counter()
+
+        self._sync_timing_device()
+        obs_lane_start = perf_counter()
         self._update_lane_touch_mask()
+        self._sync_timing_device()
+        obs_lane_ms = (perf_counter() - obs_lane_start) * 1000.0
+
         observations = {}
         observation_mode = str(self.cfg.observation_mode).strip().lower()
         neighbor_obs_scale = float(max(1.0e-6, self.cfg.agent_neighbor_obs_scale_m))
         goal_obs_scale = float(max(1.0e-6, self.cfg.goal_radius_max_m))
+        obs_shared_ms = 0.0
+        obs_shared_stack_ms = 0.0
+        obs_shared_yaw_speed_ms = 0.0
+        obs_shared_ttc_ms = 0.0
         if observation_mode == "choco_reference":
+            self._sync_timing_device()
+            obs_shared_start = perf_counter()
+
+            self._sync_timing_device()
+            obs_shared_stack_start = perf_counter()
             root_pos_w = torch.stack([vehicle.data.root_pos_w for vehicle in self._vehicles], dim=0)
             root_quat_w = torch.stack([vehicle.data.root_quat_w for vehicle in self._vehicles], dim=0)
             root_lin_vel_w = torch.stack([vehicle.data.root_lin_vel_w for vehicle in self._vehicles], dim=0)
+            self._sync_timing_device()
+            obs_shared_stack_ms = (perf_counter() - obs_shared_stack_start) * 1000.0
+
+            self._sync_timing_device()
+            obs_shared_yaw_speed_start = perf_counter()
             yaw_by_agent = self._compute_yaw_by_agent(root_quat_w)
             speed_by_agent = torch.linalg.norm(root_lin_vel_w[..., :2], dim=-1)
+            self._sync_timing_device()
+            obs_shared_yaw_speed_ms = (perf_counter() - obs_shared_yaw_speed_start) * 1000.0
+
+            self._sync_timing_device()
+            obs_shared_ttc_start = perf_counter()
             pairwise_ttc_s = (
-                self._compute_pairwise_vehicle_ttc_s(root_pos_w, root_quat_w, root_lin_vel_w)
+                self._compute_pairwise_vehicle_ttc_s(root_pos_w, yaw_by_agent, root_lin_vel_w)
                 if bool(self.cfg.obs_neighbor_enable and self.cfg.obs_neighbor_include_ttc)
                 else None
             )
+            self._sync_timing_device()
+            obs_shared_ttc_ms = (perf_counter() - obs_shared_ttc_start) * 1000.0
+            self._sync_timing_device()
+            obs_shared_ms = (perf_counter() - obs_shared_start) * 1000.0
+        obs_goal_ms = 0.0
+        obs_road_ms = 0.0
+        obs_neighbor_ms = 0.0
+        obs_finalize_ms = 0.0
         for agent_idx, agent_id in enumerate(self._agent_ids):
+            self._sync_timing_device()
+            obs_goal_start = perf_counter()
             goal_pos_b, goal_distance = self._compute_goal_distance(agent_idx)
             self._current_goal_distance[agent_idx] = goal_distance
+            self._sync_timing_device()
+            obs_goal_ms += (perf_counter() - obs_goal_start) * 1000.0
             if observation_mode == "goal_reaching":
                 obs = torch.cat(
                     [
@@ -1587,8 +1929,14 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 if bool(self.cfg.obs_weather_context_enable):
                     obs_parts.append(self._weather_context)
                 if bool(self.cfg.obs_road_points_enable):
+                    self._sync_timing_device()
+                    obs_road_start = perf_counter()
                     obs_parts.append(self._build_reference_road_context(agent_idx, root_pos_w, yaw_by_agent))
+                    self._sync_timing_device()
+                    obs_road_ms += (perf_counter() - obs_road_start) * 1000.0
                 if bool(self.cfg.obs_neighbor_enable):
+                    self._sync_timing_device()
+                    obs_neighbor_start = perf_counter()
                     obs_parts.append(
                         self._build_reference_neighbor_context(
                             agent_idx,
@@ -1598,14 +1946,21 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                             pairwise_ttc_s,
                         )
                     )
+                    self._sync_timing_device()
+                    obs_neighbor_ms += (perf_counter() - obs_neighbor_start) * 1000.0
                 obs = torch.cat(obs_parts, dim=-1)
             else:
                 raise ValueError(f"Unsupported observation mode: {self.cfg.observation_mode!r}")
+            self._sync_timing_device()
+            obs_finalize_start = perf_counter()
             done_mask = self._agent_done_mask[agent_idx]
             if bool(torch.any(done_mask).item()):
                 obs = obs.clone()
                 obs[done_mask] = 0.0
             observations[agent_id] = obs
+            self._sync_timing_device()
+            obs_finalize_ms += (perf_counter() - obs_finalize_start) * 1000.0
+        self._sync_timing_device()
         elapsed_ms = (perf_counter() - obs_start) * 1000.0
         self._obs_timing_call_count += 1
         self._obs_timing_last_ms = float(elapsed_ms)
@@ -1623,10 +1978,454 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     f"envs={self.num_envs} agents={self._num_agents}",
                     flush=True,
                 )
+        self._step_timing_last_ms["obs_ms"] = float(elapsed_ms)
+        self._step_timing_last_ms["obs_lane_ms"] = float(obs_lane_ms)
+        self._step_timing_last_ms["obs_shared_ms"] = float(obs_shared_ms)
+        self._step_timing_last_ms["obs_shared_stack_ms"] = float(obs_shared_stack_ms)
+        self._step_timing_last_ms["obs_shared_yaw_speed_ms"] = float(obs_shared_yaw_speed_ms)
+        self._step_timing_last_ms["obs_shared_ttc_ms"] = float(obs_shared_ttc_ms)
+        self._step_timing_last_ms["obs_goal_ms"] = float(obs_goal_ms)
+        self._step_timing_last_ms["obs_road_ms"] = float(obs_road_ms)
+        self._step_timing_last_ms["obs_neighbor_ms"] = float(obs_neighbor_ms)
+        self._step_timing_last_ms["obs_finalize_ms"] = float(obs_finalize_ms)
         return observations
 
+    def _choco_ttc_abs_penalty_from_min_ttc(self, min_ttc: torch.Tensor) -> torch.Tensor:
+        denom = torch.clamp(min_ttc, min=float(max(1.0e-3, self.cfg.reward_choco_ttc_penalty_min_ttc)))
+        penalty = float(self.cfg.reward_choco_ttc_penalty_alpha) / denom
+        penalty = torch.where(
+            min_ttc < 0.5,
+            torch.full_like(min_ttc, float(self.cfg.reward_choco_ttc_penalty_max)),
+            penalty,
+        )
+        return torch.clamp(penalty, max=float(self.cfg.reward_choco_ttc_penalty_max))
+
+    def _choco_road_edge_ttc_abs_penalty_from_min_ttc(self, min_ttc: torch.Tensor) -> torch.Tensor:
+        denom = torch.clamp(min_ttc, min=float(max(1.0e-3, self.cfg.reward_choco_road_edge_ttc_penalty_min_ttc)))
+        penalty = float(self.cfg.reward_choco_road_edge_ttc_penalty_alpha) / denom
+        penalty = torch.where(
+            min_ttc < float(self.cfg.reward_choco_road_edge_ttc_hard_min_ttc),
+            torch.full_like(min_ttc, float(self.cfg.reward_choco_road_edge_ttc_penalty_max)),
+            penalty,
+        )
+        return torch.clamp(penalty, max=float(self.cfg.reward_choco_road_edge_ttc_penalty_max))
+
+    def _compute_choco_geometric_lane_features(
+        self,
+        agent_idx: int,
+        goal_pos_b: torch.Tensor,
+        *,
+        root_pos_xy: torch.Tensor | None = None,
+        yaw: torch.Tensor | None = None,
+        lane_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        zeros = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        false_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if (
+            self._lane_touch_valid.numel() == 0
+            or self._lane_touch_valid.shape[1] == 0
+            or not bool(torch.any(self._lane_touch_valid).item())
+        ):
+            return zeros, false_mask, zeros, zeros
+
+        if lane_mask is None:
+            lane_types = torch.tensor(self.cfg.reward_choco_geom_lane_types, dtype=torch.long, device=self.device)
+            lane_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, lane_types)
+        if not bool(torch.any(lane_mask).item()):
+            return zeros, false_mask, zeros, zeros
+
+        if root_pos_xy is None:
+            vehicle = self._vehicles[agent_idx]
+            root_pos_xy = vehicle.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        if yaw is None:
+            vehicle = self._vehicles[agent_idx]
+            yaw = self._compute_yaw_by_agent(vehicle.data.root_quat_w.unsqueeze(0))[0]
+
+        deltas = self._lane_touch_points_xy_m - root_pos_xy.unsqueeze(1)
+        dist_sq = torch.sum(deltas.square(), dim=-1)
+        masked_dist_sq = torch.where(lane_mask, dist_sq, torch.full_like(dist_sq, float("inf")))
+        nearest_idx = torch.argmin(masked_dist_sq, dim=1)
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        best_dist_sq = masked_dist_sq[env_ids, nearest_idx]
+        has_lane = torch.isfinite(best_dist_sq)
+
+        nearest_point = self._lane_touch_points_xy_m[env_ids, nearest_idx]
+        tangent = self._lane_touch_dirs_xy[env_ids, nearest_idx]
+        tangent = tangent / torch.linalg.norm(tangent, dim=-1, keepdim=True).clamp_min(1.0e-6)
+
+        goal_dx_w, goal_dy_w = _ego_to_world_xy_torch(goal_pos_b[:, 0], goal_pos_b[:, 1], yaw)
+        goal_dir_w = torch.stack((goal_dx_w, goal_dy_w), dim=-1)
+        tangent = torch.where(torch.sum(goal_dir_w * tangent, dim=-1, keepdim=True) < 0.0, -tangent, tangent)
+
+        normal = torch.stack((-tangent[:, 1], tangent[:, 0]), dim=-1)
+        rel = root_pos_xy - nearest_point
+        lateral = torch.abs(torch.sum(rel * normal, dim=-1))
+        nearest_dist = torch.sqrt(torch.clamp(best_dist_sq, min=0.0))
+        tangent_yaw = torch.atan2(tangent[:, 1], tangent[:, 0])
+        align = torch.clamp(torch.cos(_wrap_pi_torch(yaw - tangent_yaw)), min=0.0)
+        tol = float(max(1.0e-6, self.cfg.reward_choco_geom_lane_tolerance_m))
+        heading_weight = float(self.cfg.reward_choco_geom_lane_heading_weight)
+        quality = torch.exp(-torch.square(lateral / tol))
+        quality = quality * ((1.0 - heading_weight) + heading_weight * align)
+        quality = torch.where(has_lane, quality, zeros)
+
+        lane_hit = has_lane & (lateral <= tol) & (align >= float(self.cfg.reward_choco_geom_lane_min_alignment))
+        offroad = has_lane & (
+            (lateral > float(self.cfg.reward_choco_geom_offroad_lateral_threshold_m))
+            | (nearest_dist > float(self.cfg.reward_choco_geom_offroad_distance_threshold_m))
+        )
+        return quality, offroad, lateral, align
+
+    def _compute_choco_geometric_lane_features_all(
+        self,
+        goal_pos_b: torch.Tensor,
+        *,
+        root_pos_xy: torch.Tensor,
+        yaw: torch.Tensor,
+        lane_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        zeros = torch.zeros((self._num_agents, self.num_envs), dtype=torch.float32, device=self.device)
+        false_mask = torch.zeros((self._num_agents, self.num_envs), dtype=torch.bool, device=self.device)
+        if (
+            self._lane_touch_valid.numel() == 0
+            or self._lane_touch_valid.shape[1] == 0
+            or not bool(torch.any(self._lane_touch_valid).item())
+        ):
+            return zeros, false_mask, zeros, zeros
+
+        if lane_mask is None:
+            lane_types = torch.tensor(self.cfg.reward_choco_geom_lane_types, dtype=torch.long, device=self.device)
+            lane_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, lane_types)
+        if not bool(torch.any(lane_mask).item()):
+            return zeros, false_mask, zeros, zeros
+
+        deltas = self._lane_touch_points_xy_m.unsqueeze(0) - root_pos_xy.unsqueeze(2)
+        dist_sq = torch.sum(deltas.square(), dim=-1)
+        masked_dist_sq = torch.where(lane_mask.unsqueeze(0), dist_sq, torch.full_like(dist_sq, float("inf")))
+        nearest_idx = torch.argmin(masked_dist_sq, dim=2)
+        gather_idx_xy = nearest_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
+        nearest_point = torch.gather(
+            self._lane_touch_points_xy_m.unsqueeze(0).expand(self._num_agents, -1, -1, -1),
+            2,
+            gather_idx_xy,
+        ).squeeze(2)
+        tangent = torch.gather(
+            self._lane_touch_dirs_xy.unsqueeze(0).expand(self._num_agents, -1, -1, -1),
+            2,
+            gather_idx_xy,
+        ).squeeze(2)
+        gather_idx_scalar = nearest_idx.unsqueeze(-1)
+        best_dist_sq = torch.gather(masked_dist_sq, 2, gather_idx_scalar).squeeze(-1)
+        has_lane = torch.isfinite(best_dist_sq)
+
+        tangent = tangent / torch.linalg.norm(tangent, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        goal_dx_w, goal_dy_w = _ego_to_world_xy_torch(goal_pos_b[..., 0], goal_pos_b[..., 1], yaw)
+        goal_dir_w = torch.stack((goal_dx_w, goal_dy_w), dim=-1)
+        tangent = torch.where(torch.sum(goal_dir_w * tangent, dim=-1, keepdim=True) < 0.0, -tangent, tangent)
+
+        normal = torch.stack((-tangent[..., 1], tangent[..., 0]), dim=-1)
+        rel = root_pos_xy - nearest_point
+        lateral = torch.abs(torch.sum(rel * normal, dim=-1))
+        nearest_dist = torch.sqrt(torch.clamp(best_dist_sq, min=0.0))
+        tangent_yaw = torch.atan2(tangent[..., 1], tangent[..., 0])
+        align = torch.clamp(torch.cos(_wrap_pi_torch(yaw - tangent_yaw)), min=0.0)
+        tol = float(max(1.0e-6, self.cfg.reward_choco_geom_lane_tolerance_m))
+        heading_weight = float(self.cfg.reward_choco_geom_lane_heading_weight)
+        quality = torch.exp(-torch.square(lateral / tol))
+        quality = quality * ((1.0 - heading_weight) + heading_weight * align)
+        quality = torch.where(has_lane, quality, zeros)
+        offroad = has_lane & (
+            (lateral > float(self.cfg.reward_choco_geom_offroad_lateral_threshold_m))
+            | (nearest_dist > float(self.cfg.reward_choco_geom_offroad_distance_threshold_m))
+        )
+        return quality, offroad, lateral, align
+
+    def _compute_choco_road_edge_ttc_penalty(
+        self,
+        agent_idx: int,
+        *,
+        root_pos_xy: torch.Tensor | None = None,
+        yaw: torch.Tensor | None = None,
+        root_lin_vel_xy: torch.Tensor | None = None,
+        edge_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        zeros = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        if not bool(self.cfg.reward_choco_road_edge_ttc_penalty_enable):
+            return zeros
+
+        if edge_mask is None:
+            edge_types = torch.tensor(self.cfg.reward_choco_geom_road_edge_types, dtype=torch.long, device=self.device)
+            edge_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, edge_types)
+        if not bool(torch.any(edge_mask).item()):
+            return zeros
+
+        radius_m = float(self.cfg.reward_choco_road_edge_ttc_radius_m)
+        if radius_m <= 0.0:
+            return zeros
+
+        if root_pos_xy is None:
+            vehicle = self._vehicles[agent_idx]
+            root_pos_xy = vehicle.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        if root_lin_vel_xy is None:
+            vehicle = self._vehicles[agent_idx]
+            root_lin_vel_xy = vehicle.data.root_lin_vel_w[:, :2]
+        if yaw is None:
+            vehicle = self._vehicles[agent_idx]
+            yaw = self._compute_yaw_by_agent(vehicle.data.root_quat_w.unsqueeze(0))[0]
+        circle_centers_w, forward = self._planar_circle_centers_and_forward(root_pos_xy.unsqueeze(0), yaw.unsqueeze(0))
+        circle_centers_w = circle_centers_w[0]
+        forward = forward[0]
+
+        rel = self._lane_touch_points_xy_m.unsqueeze(1) - circle_centers_w.unsqueeze(2)
+        dist_sq = torch.sum(rel.square(), dim=-1)
+        near_mask = edge_mask.unsqueeze(1) & (dist_sq <= float(radius_m * radius_m))
+        if not bool(torch.any(near_mask).item()):
+            return zeros
+
+        forward_dot = rel[..., 0] * forward[:, 0].unsqueeze(1).unsqueeze(1) + rel[..., 1] * forward[:, 1].unsqueeze(1).unsqueeze(1)
+        candidate_mask = near_mask & (forward_dot > 0.0)
+        dist = torch.sqrt(torch.clamp(dist_sq, min=1.0e-12))
+        clearance = torch.clamp(dist - float(self._lane_touch_circle_radius_m), min=0.0)
+        dirs = rel / torch.clamp(dist.unsqueeze(-1), min=1.0e-6)
+        closing_speed = dirs[..., 0] * root_lin_vel_xy[:, 0].unsqueeze(1).unsqueeze(1) + dirs[..., 1] * root_lin_vel_xy[:, 1].unsqueeze(1).unsqueeze(1)
+        ttc = torch.full_like(dist, float("inf"))
+        ttc = torch.where(candidate_mask & (dist <= float(self._lane_touch_circle_radius_m)), torch.zeros_like(ttc), ttc)
+        valid = candidate_mask & (closing_speed > 1.0e-6)
+        ttc = torch.where(valid, torch.minimum(ttc, clearance / torch.clamp(closing_speed, min=1.0e-6)), ttc)
+        finite_mask = torch.isfinite(ttc)
+        if not bool(torch.any(finite_mask).item()):
+            return zeros
+        flat_ttc = torch.where(finite_mask, ttc, torch.full_like(ttc, float("inf"))).reshape(self.num_envs, -1)
+        min_ttc = torch.amin(flat_ttc, dim=1)
+        valid_env = torch.isfinite(min_ttc)
+        return torch.where(valid_env, -self._choco_road_edge_ttc_abs_penalty_from_min_ttc(min_ttc), zeros)
+
+    def _compute_choco_road_edge_ttc_penalty_all(
+        self,
+        *,
+        root_pos_xy: torch.Tensor,
+        yaw: torch.Tensor,
+        root_lin_vel_xy: torch.Tensor,
+        edge_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        zeros = torch.zeros((self._num_agents, self.num_envs), dtype=torch.float32, device=self.device)
+        if not bool(self.cfg.reward_choco_road_edge_ttc_penalty_enable):
+            return zeros
+
+        if edge_mask is None:
+            edge_types = torch.tensor(self.cfg.reward_choco_geom_road_edge_types, dtype=torch.long, device=self.device)
+            edge_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, edge_types)
+        if not bool(torch.any(edge_mask).item()):
+            return zeros
+
+        radius_m = float(self.cfg.reward_choco_road_edge_ttc_radius_m)
+        if radius_m <= 0.0:
+            return zeros
+
+        circle_centers_w, forward = self._planar_circle_centers_and_forward(root_pos_xy, yaw)
+        rel = self._lane_touch_points_xy_m.unsqueeze(0).unsqueeze(2) - circle_centers_w.unsqueeze(3)
+        dist_sq = torch.sum(rel.square(), dim=-1)
+        near_mask = edge_mask.unsqueeze(0).unsqueeze(2) & (dist_sq <= float(radius_m * radius_m))
+        if not bool(torch.any(near_mask).item()):
+            return zeros
+
+        forward_dot = (
+            rel[..., 0] * forward[..., 0].unsqueeze(-1).unsqueeze(-1)
+            + rel[..., 1] * forward[..., 1].unsqueeze(-1).unsqueeze(-1)
+        )
+        candidate_mask = near_mask & (forward_dot > 0.0)
+        dist = torch.sqrt(torch.clamp(dist_sq, min=1.0e-12))
+        clearance = torch.clamp(dist - float(self._lane_touch_circle_radius_m), min=0.0)
+        dirs = rel / torch.clamp(dist.unsqueeze(-1), min=1.0e-6)
+        closing_speed = (
+            dirs[..., 0] * root_lin_vel_xy[..., 0].unsqueeze(-1).unsqueeze(-1)
+            + dirs[..., 1] * root_lin_vel_xy[..., 1].unsqueeze(-1).unsqueeze(-1)
+        )
+        ttc = torch.full_like(dist, float("inf"))
+        ttc = torch.where(candidate_mask & (dist <= float(self._lane_touch_circle_radius_m)), torch.zeros_like(ttc), ttc)
+        valid = candidate_mask & (closing_speed > 1.0e-6)
+        ttc = torch.where(valid, torch.minimum(ttc, clearance / torch.clamp(closing_speed, min=1.0e-6)), ttc)
+        finite_mask = torch.isfinite(ttc)
+        if not bool(torch.any(finite_mask).item()):
+            return zeros
+        flat_ttc = torch.where(finite_mask, ttc, torch.full_like(ttc, float("inf"))).reshape(self._num_agents, self.num_envs, -1)
+        min_ttc = torch.amin(flat_ttc, dim=-1)
+        valid_env = torch.isfinite(min_ttc)
+        penalties = -self._choco_road_edge_ttc_abs_penalty_from_min_ttc(min_ttc)
+        return torch.where(valid_env, penalties, zeros)
+
+    def _get_rewards_choco_aligned(self) -> dict[str, torch.Tensor]:
+        rewards = {}
+
+        self._sync_timing_device()
+        reward_shared_start = perf_counter()
+        env_origins_xy = self.scene.env_origins[:, :2]
+        root_pos_w = torch.stack([vehicle.data.root_pos_w for vehicle in self._vehicles], dim=0)
+        root_quat_w = torch.stack([vehicle.data.root_quat_w for vehicle in self._vehicles], dim=0)
+        root_lin_vel_w = torch.stack([vehicle.data.root_lin_vel_w for vehicle in self._vehicles], dim=0)
+        root_pos_xy = root_pos_w[..., :2] - env_origins_xy.unsqueeze(0)
+        root_lin_vel_xy = root_lin_vel_w[..., :2]
+        goal_pos_b_all, goal_distance_all = self._compute_goal_distance_all()
+        yaw_by_agent = self._compute_yaw_by_agent(root_quat_w)
+        pairwise_ttc_s = self._compute_pairwise_vehicle_ttc_s(root_pos_w, yaw_by_agent, root_lin_vel_w)
+        geom_lane_types = torch.tensor(self.cfg.reward_choco_geom_lane_types, dtype=torch.long, device=self.device)
+        geom_lane_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, geom_lane_types)
+        road_edge_types = torch.tensor(self.cfg.reward_choco_geom_road_edge_types, dtype=torch.long, device=self.device)
+        road_edge_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, road_edge_types)
+        self._sync_timing_device()
+        reward_shared_ms = (perf_counter() - reward_shared_start) * 1000.0
+
+        reward_goal_ms = 0.0
+        reward_geom_ms = 0.0
+        reward_ttc_ms = 0.0
+        reward_road_edge_ttc_ms = 0.0
+        reward_finalize_ms = 0.0
+
+        self._sync_timing_device()
+        reward_geom_start = perf_counter()
+        lane_quality_all, offroad_mask_all, _lane_error_all, _heading_alignment_all = self._compute_choco_geometric_lane_features_all(
+            goal_pos_b_all,
+            root_pos_xy=root_pos_xy,
+            yaw=yaw_by_agent,
+            lane_mask=geom_lane_mask,
+        )
+        self._sync_timing_device()
+        reward_geom_ms = (perf_counter() - reward_geom_start) * 1000.0
+
+        self._sync_timing_device()
+        reward_road_edge_ttc_start = perf_counter()
+        road_edge_ttc_penalty_all = self._compute_choco_road_edge_ttc_penalty_all(
+            root_pos_xy=root_pos_xy,
+            yaw=yaw_by_agent,
+            root_lin_vel_xy=root_lin_vel_xy,
+            edge_mask=road_edge_mask,
+        )
+        self._sync_timing_device()
+        reward_road_edge_ttc_ms = (perf_counter() - reward_road_edge_ttc_start) * 1000.0
+
+        for agent_idx, agent_id in enumerate(self._agent_ids):
+            self._sync_timing_device()
+            reward_goal_start = perf_counter()
+            goal_pos_b = goal_pos_b_all[agent_idx]
+            goal_distance = goal_distance_all[agent_idx]
+            self._current_goal_distance[agent_idx] = goal_distance
+            active_mask = ~self._agent_done_mask[agent_idx]
+            active_float = active_mask.float()
+            planar_speed = torch.linalg.norm(root_lin_vel_xy[agent_idx], dim=1)
+            self._sync_timing_device()
+            reward_goal_ms += (perf_counter() - reward_goal_start) * 1000.0
+
+            success_bonus = self._pending_goal_done_mask[agent_idx].float() * float(self.cfg.reward_goal_bonus)
+            collision_penalty = self._pending_collision_done_mask[agent_idx].float() * float(self.cfg.reward_collision_penalty)
+            crash_penalty = self._pending_crash_done_mask[agent_idx].float() * float(self.cfg.reward_crash_penalty)
+            lane_forbidden_penalty = self._pending_lane_forbidden_done_mask[agent_idx].float() * float(self.cfg.reward_lane_forbidden_penalty)
+
+            idle_penalty = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            if bool(self.cfg.reward_choco_idle_penalty_enable):
+                idle_penalty = -(
+                    active_mask & (planar_speed < float(self.cfg.reward_choco_idle_speed_threshold_mps))
+                ).float() * float(self.cfg.reward_choco_idle_penalty_per_step)
+
+            lane_quality = lane_quality_all[agent_idx]
+            offroad_mask = offroad_mask_all[agent_idx]
+            geom_lane_reward = (
+                lane_quality * float(self.cfg.reward_choco_geom_lane_per_step) * active_float
+                if bool(self.cfg.reward_choco_geom_lane_enable)
+                else torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            )
+            offroad_penalty = (
+                offroad_mask.float() * float(self.cfg.reward_choco_offroad_penalty) * active_float
+                if bool(self.cfg.reward_choco_geom_offroad_enable)
+                else torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            )
+
+            ttc_penalty = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            self._sync_timing_device()
+            reward_ttc_start = perf_counter()
+            if bool(self.cfg.reward_choco_ttc_penalty_enable) and self._num_agents > 1:
+                ego_ttc = pairwise_ttc_s[agent_idx]
+                other_active = (~self._agent_done_mask).transpose(0, 1)
+                finite_mask = torch.isfinite(ego_ttc) & other_active
+                finite_mask[:, agent_idx] = False
+                min_ttc = torch.amin(
+                    torch.where(finite_mask, ego_ttc, torch.full_like(ego_ttc, float("inf"))),
+                    dim=1,
+                )
+                valid_env = torch.isfinite(min_ttc)
+                ttc_penalty = torch.where(valid_env, -self._choco_ttc_abs_penalty_from_min_ttc(min_ttc), ttc_penalty) * active_float
+            self._sync_timing_device()
+            reward_ttc_ms += (perf_counter() - reward_ttc_start) * 1000.0
+
+            road_edge_ttc_penalty = road_edge_ttc_penalty_all[agent_idx] * active_float
+
+            self._sync_timing_device()
+            reward_finalize_start = perf_counter()
+            rewards[agent_id] = (
+                success_bonus
+                + collision_penalty
+                + crash_penalty
+                + lane_forbidden_penalty
+                + offroad_penalty
+                + idle_penalty
+                + ttc_penalty
+                + road_edge_ttc_penalty
+                + geom_lane_reward
+            )
+
+            self._episode_sums["goal_bonus"][agent_idx] += success_bonus
+            self._episode_sums["collision_penalty"][agent_idx] += collision_penalty
+            self._episode_sums["crash_penalty"][agent_idx] += crash_penalty
+            self._episode_sums["lane_forbidden_penalty"][agent_idx] += lane_forbidden_penalty
+            self._episode_sums["offroad_penalty"][agent_idx] += offroad_penalty
+            self._episode_sums["idle_penalty"][agent_idx] += idle_penalty
+            self._episode_sums["ttc_penalty"][agent_idx] += ttc_penalty
+            self._episode_sums["road_edge_ttc_penalty"][agent_idx] += road_edge_ttc_penalty
+            self._episode_sums["geom_lane_reward"][agent_idx] += geom_lane_reward
+
+            self._previous_goal_distance[agent_idx] = goal_distance
+            self._previous_raw_actions[agent_idx] = self._raw_actions[agent_idx]
+            new_done = (
+                self._pending_goal_done_mask[agent_idx]
+                | self._pending_collision_done_mask[agent_idx]
+                | self._pending_crash_done_mask[agent_idx]
+                | self._pending_lane_forbidden_done_mask[agent_idx]
+            )
+            new_done_env_ids = torch.nonzero(new_done, as_tuple=False).squeeze(-1)
+            if new_done_env_ids.numel() > 0:
+                self._park_done_vehicle(agent_idx, new_done_env_ids)
+            self._terminal_goal_distance[agent_idx] = torch.where(new_done, goal_distance, self._terminal_goal_distance[agent_idx])
+            self._agent_done_mask[agent_idx] |= new_done
+            self._goal_done_mask[agent_idx] |= self._pending_goal_done_mask[agent_idx]
+            self._collision_done_mask[agent_idx] |= self._pending_collision_done_mask[agent_idx]
+            self._crash_done_mask[agent_idx] |= self._pending_crash_done_mask[agent_idx]
+            self._lane_forbidden_done_mask[agent_idx] |= self._pending_lane_forbidden_done_mask[agent_idx]
+            self._sync_timing_device()
+            reward_finalize_ms += (perf_counter() - reward_finalize_start) * 1000.0
+
+        self._step_timing_last_ms["reward_shared_ms"] = float(reward_shared_ms)
+        self._step_timing_last_ms["reward_goal_ms"] = float(reward_goal_ms)
+        self._step_timing_last_ms["reward_geom_ms"] = float(reward_geom_ms)
+        self._step_timing_last_ms["reward_ttc_ms"] = float(reward_ttc_ms)
+        self._step_timing_last_ms["reward_road_edge_ttc_ms"] = float(reward_road_edge_ttc_ms)
+        self._step_timing_last_ms["reward_finalize_ms"] = float(reward_finalize_ms)
+        return rewards
+
     def _get_rewards(self) -> dict[str, torch.Tensor]:
+        reward_start = perf_counter()
+        self._sync_timing_device()
+        reward_lane_start = perf_counter()
         self._update_lane_touch_mask()
+        self._sync_timing_device()
+        self._step_timing_last_ms["reward_lane_ms"] = (perf_counter() - reward_lane_start) * 1000.0
+        reward_mode = str(getattr(self.cfg, "reward_mode", "scene_factory_default")).strip().lower().replace("-", "_")
+        if reward_mode == "choco_baseline":
+            rewards = self._get_rewards_choco_aligned()
+            self._pending_goal_done_mask.zero_()
+            self._pending_collision_done_mask.zero_()
+            self._pending_crash_done_mask.zero_()
+            self._pending_lane_forbidden_done_mask.zero_()
+            self._step_timing_last_ms["reward_ms"] = (perf_counter() - reward_start) * 1000.0
+            return rewards
         rewards = {}
         pairwise_distances = self._pairwise_distances_xy()
         nearest_distances = pairwise_distances.min(dim=2).values if self._num_agents > 1 else None
@@ -1702,6 +2501,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 | self._pending_crash_done_mask[agent_idx]
                 | self._pending_lane_forbidden_done_mask[agent_idx]
             )
+            new_done_env_ids = torch.nonzero(new_done, as_tuple=False).squeeze(-1)
+            if new_done_env_ids.numel() > 0:
+                self._park_done_vehicle(agent_idx, new_done_env_ids)
             self._terminal_goal_distance[agent_idx] = torch.where(
                 new_done,
                 goal_distance,
@@ -1717,9 +2519,12 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._pending_collision_done_mask.zero_()
         self._pending_crash_done_mask.zero_()
         self._pending_lane_forbidden_done_mask.zero_()
+        self._step_timing_last_ms["reward_ms"] = (perf_counter() - reward_start) * 1000.0
         return rewards
 
     def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        self._sync_timing_device()
+        done_start = perf_counter()
         if str(self.cfg.test_mode).strip().lower() in {
             "collision_test",
             "scene_factory_collision_test",
@@ -1728,28 +2533,46 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             false_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             terminated = {agent_id: false_buf.clone() for agent_id in self._agent_ids}
             time_outs = {agent_id: false_buf.clone() for agent_id in self._agent_ids}
+            self._sync_timing_device()
+            self._step_timing_last_ms["done_ms"] = (perf_counter() - done_start) * 1000.0
             return terminated, time_outs
 
         self._steps_since_reset_buf += 1
+
+        self._sync_timing_device()
+        done_lane_start = perf_counter()
         self._update_lane_touch_mask()
+        self._sync_timing_device()
+        done_lane_ms = (perf_counter() - done_lane_start) * 1000.0
+
+        self._sync_timing_device()
+        done_collision_start = perf_counter()
         collision_masks = self._collision_by_agent_mask_tensor()
+        self._sync_timing_device()
+        done_collision_ms = (perf_counter() - done_collision_start) * 1000.0
+
+        self._sync_timing_device()
+        done_state_start = perf_counter()
+        _goal_pos_b, goal_distance_all = self._compute_goal_distance_all()
+        crash_masks = self._agent_crash_mask_all()
+        lane_forbidden_touch_all = (
+            self._lane_touch_any_type_mask_all(self.cfg.reward_lane_forbidden_types)
+            if bool(self.cfg.reward_lane_forbidden_enable)
+            else torch.zeros((self._num_agents, self.num_envs), dtype=torch.bool, device=self.device)
+        )
         self._pending_goal_done_mask.zero_()
         self._pending_collision_done_mask.zero_()
         self._pending_crash_done_mask.zero_()
         self._pending_lane_forbidden_done_mask.zero_()
         terminated = {}
         for agent_idx in range(self._num_agents):
-            _, goal_distance = self._compute_goal_distance(agent_idx)
+            goal_distance = goal_distance_all[agent_idx]
             self._current_goal_distance[agent_idx] = goal_distance
             active_mask = ~self._agent_done_mask[agent_idx]
             goal_reached = goal_distance <= float(self.cfg.goal_reached_threshold_m)
-            crash_mask = self._agent_crash_mask(agent_idx)
+            crash_mask = crash_masks[agent_idx]
             collision_mask = collision_masks[agent_idx]
-            lane_forbidden_touch = (
-                self._lane_touch_any_type_mask(agent_idx, self.cfg.reward_lane_forbidden_types)
-                if bool(self.cfg.reward_lane_forbidden_enable)
-                else torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-            )
+            lane_forbidden_touch = lane_forbidden_touch_all[agent_idx]
             self._pending_goal_done_mask[agent_idx] = active_mask & goal_reached
             self._pending_crash_done_mask[agent_idx] = active_mask & crash_mask
             self._pending_collision_done_mask[agent_idx] = active_mask & collision_mask
@@ -1761,82 +2584,112 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 | self._pending_collision_done_mask[agent_idx]
                 | self._pending_lane_forbidden_done_mask[agent_idx]
             )
+        self._sync_timing_device()
+        done_state_ms = (perf_counter() - done_state_start) * 1000.0
 
+        self._sync_timing_device()
+        done_finalize_start = perf_counter()
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         time_outs = {agent_id: time_out.clone() for agent_id in self._agent_ids}
+        self._sync_timing_device()
+        done_finalize_ms = (perf_counter() - done_finalize_start) * 1000.0
+
+        self._sync_timing_device()
+        self._step_timing_last_ms["done_lane_ms"] = float(done_lane_ms)
+        self._step_timing_last_ms["done_collision_ms"] = float(done_collision_ms)
+        self._step_timing_last_ms["done_state_ms"] = float(done_state_ms)
+        self._step_timing_last_ms["done_finalize_ms"] = float(done_finalize_ms)
+        self._step_timing_last_ms["done_ms"] = (perf_counter() - done_start) * 1000.0
         return terminated, time_outs
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
+        self._lane_touch_mask_cache_valid = False
+        self._sync_timing_device()
+        reset_start = perf_counter()
+        reset_write_ms = 0.0
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._vehicles[0]._ALL_INDICES
 
+        self._sync_timing_device()
+        reset_metrics_prep_start = perf_counter()
         collision_force_by_agent = self._collision_force_by_agent_n_tensor()
-        self._update_lane_touch_mask()
-        lane_center_touch_by_agent = torch.stack(
-            [
-                self._lane_touch_any_type_mask(agent_idx, self.cfg.reward_lane_center_types)
-                if bool(self.cfg.reward_lane_center_enable)
-                else torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-                for agent_idx in range(self._num_agents)
-            ],
-            dim=0,
-        )
+        lane_center_touch_by_agent = torch.zeros((self._num_agents, self.num_envs), dtype=torch.bool, device=self.device)
+        if bool(self.cfg.reward_lane_center_enable):
+            self._update_lane_touch_mask()
+            lane_center_touch_by_agent = self._lane_touch_any_type_mask_all(self.cfg.reward_lane_center_types)
+        self._sync_timing_device()
+        self._step_timing_last_ms["reset_metrics_prep_ms"] = (perf_counter() - reset_metrics_prep_start) * 1000.0
+        self._step_timing_last_ms["reset_write_ms"] = 0.0
 
-        for agent_idx, agent_id in enumerate(self._agent_ids):
+        self._sync_timing_device()
+        reset_log_start = perf_counter()
+        for agent_id in self._agent_ids:
             self.extras[agent_id] = {"log": {}}
-            for key, value in self._episode_sums.items():
-                self.extras[agent_id]["log"][f"Episode_Reward/{key}"] = torch.mean(value[agent_idx, env_ids]).item() / max(
-                    1.0, float(self.max_episode_length_s)
-                )
-                value[agent_idx, env_ids] = 0.0
-            final_distance = torch.where(
-                self._agent_done_mask[agent_idx, env_ids],
-                self._terminal_goal_distance[agent_idx, env_ids],
-                self._current_goal_distance[agent_idx, env_ids],
-            )
-            self.extras[agent_id]["log"]["Metrics/final_distance_to_goal"] = torch.mean(final_distance).item()
-            self.extras[agent_id]["log"]["Metrics/success_rate"] = torch.mean(
-                self._goal_done_mask[agent_idx, env_ids].float()
-            ).item()
-            self.extras[agent_id]["log"]["Metrics/all_goals_reached_rate"] = torch.mean(
-                torch.all(self._goal_done_mask[:, env_ids], dim=0).float()
-            ).item()
-            self.extras[agent_id]["log"]["Metrics/crash_rate"] = torch.mean(
-                self._crash_done_mask[agent_idx, env_ids].float()
-            ).item()
-            self.extras[agent_id]["log"]["Metrics/collision_rate"] = torch.mean(
-                self._collision_done_mask[agent_idx, env_ids].float()
-            ).item()
-            self.extras[agent_id]["log"]["Metrics/collision_count"] = float(
-                torch.count_nonzero(self._collision_done_mask[agent_idx, env_ids]).item()
-            )
-            self.extras[agent_id]["log"]["Metrics/max_collision_force_n"] = torch.mean(
-                collision_force_by_agent[agent_idx, env_ids]
-            ).item()
-            self.extras[agent_id]["log"]["Metrics/lane_center_touch_rate"] = torch.mean(
-                lane_center_touch_by_agent[agent_idx, env_ids].float()
-            ).item()
-            self.extras[agent_id]["log"]["Metrics/lane_forbidden_done_count"] = float(
-                torch.count_nonzero(self._lane_forbidden_done_mask[agent_idx, env_ids]).item()
-            )
-            self.extras[agent_id]["log"]["Metrics/lane_forbidden_done_rate"] = torch.mean(
-                self._lane_forbidden_done_mask[agent_idx, env_ids].float()
-            ).item()
 
         if self._agent_ids:
-            world_spawned_count = torch.full(
-                (len(env_ids),),
-                float(self._num_agents),
-                dtype=torch.float32,
-                device=self.device,
+            world_active_mask = self._spawned_agent_mask[:, env_ids]
+            active_spawn_float = world_active_mask.float()
+            active_spawn_count = torch.clamp(active_spawn_float.sum(dim=1), min=1.0)
+
+            aggregate_log: dict[str, float | torch.Tensor] = {}
+            reward_time_norm = max(1.0, float(self.max_episode_length_s))
+            for key, value in self._episode_sums.items():
+                aggregate_log[f"Episode_Reward/{key}"] = (value[:, env_ids].mean(dim=1).mean() / reward_time_norm).item()
+                value[:, env_ids] = 0.0
+
+            final_distance = torch.where(
+                self._agent_done_mask[:, env_ids],
+                self._terminal_goal_distance[:, env_ids],
+                self._current_goal_distance[:, env_ids],
             )
-            world_success_mask = self._goal_done_mask[:, env_ids]
-            world_collision_mask = self._collision_done_mask[:, env_ids] & (~world_success_mask)
+            aggregate_log["Metrics/final_distance_to_goal"] = (
+                ((final_distance * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            aggregate_log["Metrics/success_rate"] = (
+                ((self._goal_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            all_goals_reached = torch.all(self._goal_done_mask[:, env_ids] | (~world_active_mask), dim=0)
+            aggregate_log["Metrics/all_goals_reached_rate"] = torch.mean(all_goals_reached.float()).item()
+            aggregate_log["Metrics/crash_rate"] = (
+                ((self._crash_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            aggregate_log["Metrics/collision_rate"] = (
+                ((self._collision_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            aggregate_log["Metrics/collision_count"] = (
+                torch.count_nonzero(self._collision_done_mask[:, env_ids] & world_active_mask, dim=1).to(torch.float32).mean().item()
+            )
+            aggregate_log["Metrics/max_collision_force_n"] = (
+                ((collision_force_by_agent[:, env_ids] * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            aggregate_log["Metrics/lane_center_touch_rate"] = (
+                ((lane_center_touch_by_agent[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            aggregate_log["Metrics/lane_forbidden_done_count"] = (
+                torch.count_nonzero(self._lane_forbidden_done_mask[:, env_ids] & world_active_mask, dim=1)
+                .to(torch.float32)
+                .mean()
+                .item()
+            )
+            aggregate_log["Metrics/lane_forbidden_done_rate"] = (
+                ((self._lane_forbidden_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+            ).item()
+            self.extras[self._agent_ids[0]]["log"].update(aggregate_log)
+
+        if self._agent_ids:
+            world_spawned_mask = self._spawned_agent_mask[:, env_ids]
+            world_spawned_count = world_spawned_mask.sum(dim=0).to(dtype=torch.float32)
+            world_success_mask = self._goal_done_mask[:, env_ids] & world_spawned_mask
+            world_collision_mask = self._collision_done_mask[:, env_ids] & world_spawned_mask & (~world_success_mask)
             world_lane_forbidden_mask = (
-                self._lane_forbidden_done_mask[:, env_ids] & (~world_success_mask) & (~world_collision_mask)
+                self._lane_forbidden_done_mask[:, env_ids]
+                & world_spawned_mask
+                & (~world_success_mask)
+                & (~world_collision_mask)
             )
             world_crash_mask = (
                 self._crash_done_mask[:, env_ids]
+                & world_spawned_mask
                 & (~world_success_mask)
                 & (~world_collision_mask)
                 & (~world_lane_forbidden_mask)
@@ -1864,15 +2717,43 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             world_log["WorldEpisode/collision_rate"] = world_collision_count / spawned_denom
             world_log["WorldEpisode/lane_forbidden_rate"] = world_lane_forbidden_count / spawned_denom
             world_log["WorldEpisode/crash_rate"] = world_crash_count / spawned_denom
+        self._sync_timing_device()
+        self._step_timing_last_ms["reset_log_ms"] = (perf_counter() - reset_log_start) * 1000.0
 
-        for vehicle in self._vehicles:
-            vehicle.reset(env_ids)
-        super()._reset_idx(env_ids)
+        self._sync_timing_device()
+        reset_backend_start = perf_counter()
+        if self._should_use_teleport_only_reset():
+            self._apply_lightweight_reset_state(env_ids)
+        else:
+            for vehicle in self._vehicles:
+                vehicle.reset(env_ids)
+            super()._reset_idx(env_ids)
+            self._teleport_only_reset_initialized = True
+            if self._reset_mode_name() == "teleport_only" and not bool(self._teleport_only_reset_announced):
+                print(
+                    "[INFO][SceneFactory] reset_mode=teleport_only: using one full initialization reset, "
+                    "then teleport-only resets for subsequent episodes.",
+                    flush=True,
+                )
+                self._teleport_only_reset_announced = True
+                self._sync_timing_device()
+        self._step_timing_last_ms["reset_backend_ms"] = (perf_counter() - reset_backend_start) * 1000.0
 
         if len(env_ids) == self.num_envs:
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         self._steps_since_reset_buf[env_ids] = 0
 
+        self._sync_timing_device()
+        reset_spawn_prep_start = perf_counter()
+        reset_state_clear_ms = 0.0
+        reset_pose_build_ms = 0.0
+        reset_pose_park_ms = 0.0
+        reset_pose_spawn_ms = 0.0
+        reset_pose_finalize_ms = 0.0
+        reset_pose_quat_ms = 0.0
+        reset_pose_goal_ms = 0.0
+        reset_pose_inactive_ms = 0.0
+        reset_pose_joint_defaults_ms = 0.0
         num_resets = len(env_ids)
         env_origins = self.scene.env_origins[env_ids]
         test_mode = str(self.cfg.test_mode).strip().lower()
@@ -1902,6 +2783,13 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             )
 
         for agent_idx, vehicle in enumerate(self._vehicles):
+            self._sync_timing_device()
+            reset_state_clear_start = perf_counter()
+            if use_scene_factory_roads:
+                spawned_mask = self._scene_factory_spawn_valid[env_ids, agent_idx]
+            else:
+                spawned_mask = torch.ones(num_resets, dtype=torch.bool, device=self.device)
+            self._spawned_agent_mask[agent_idx, env_ids] = spawned_mask
             self._raw_actions[agent_idx, env_ids] = 0.0
             self._semantic_actions[agent_idx, env_ids] = 0.0
             self._previous_raw_actions[agent_idx, env_ids] = 0.0
@@ -1919,66 +2807,68 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._external_forces[agent_idx][env_ids] = 0.0
             self._external_torques[agent_idx][env_ids] = 0.0
             self._brake_sign_memory[agent_idx][env_ids] = 1.0
+            self._sync_timing_device()
+            reset_state_clear_ms += (perf_counter() - reset_state_clear_start) * 1000.0
 
-            root_state = vehicle.data.default_root_state[env_ids].clone()
+            self._sync_timing_device()
+            reset_pose_build_start = perf_counter()
+            self._sync_timing_device()
+            reset_pose_park_start = perf_counter()
+            root_pose = self._done_vehicle_root_pose(agent_idx, env_ids)
+            root_velocity = self._default_joint_vel[agent_idx].new_zeros((num_resets, 6))
+            goal_pos_w = root_pose[:, :3].clone()
+            yaw = torch.zeros(num_resets, device=self.device)
+            self._sync_timing_device()
+            reset_pose_park_ms += (perf_counter() - reset_pose_park_start) * 1000.0
+
+            self._sync_timing_device()
+            reset_pose_spawn_start = perf_counter()
             if use_collision_test:
                 half_distance = float(self.cfg.collision_test_half_distance_m)
                 goal_distance = float(self.cfg.collision_test_goal_distance_m)
                 start_x = -half_distance if agent_idx == 0 else half_distance
                 goal_x = goal_distance if agent_idx == 0 else -goal_distance
                 yaw_value = 0.0 if agent_idx == 0 else math.pi
-                root_state[:, 0] = env_origins[:, 0] + start_x
-                root_state[:, 1] = env_origins[:, 1]
-                root_state[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
+                root_pose[:, 0] = env_origins[:, 0] + start_x
+                root_pose[:, 1] = env_origins[:, 1]
+                root_pose[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
                 yaw = torch.full((num_resets,), yaw_value, device=self.device)
                 goal_local = torch.tensor(
                     [goal_x, 0.0, float(self.cfg.goal_height_m)],
                     device=self.device,
                 ).unsqueeze(0).repeat(num_resets, 1)
-                self._goal_pos_w[agent_idx, env_ids] = env_origins + goal_local
+                goal_pos_w = env_origins + goal_local
             elif use_scene_factory_roads:
-                spawn_jitter = sample_uniform(
-                    -float(self.cfg.agent_spawn_jitter_m),
-                    float(self.cfg.agent_spawn_jitter_m),
-                    (num_resets, 2),
-                    self.device,
-                )
-                env_id_list = env_ids.detach().cpu().tolist()
-                scenario_spawns = [self._scenario_spawns_by_env[int(env_id)][agent_idx] for env_id in env_id_list]
-                start_local_xyz = torch.tensor(
-                    [spawn.start_local_xyz for spawn in scenario_spawns],
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-                start_yaw = torch.tensor(
-                    [float(spawn.start_yaw_rad) for spawn in scenario_spawns],
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-                goal_local_xyz = torch.tensor(
-                    [spawn.goal_local_xyz for spawn in scenario_spawns],
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-                root_state[:, 0] = env_origins[:, 0] + start_local_xyz[:, 0] + spawn_jitter[:, 0]
-                root_state[:, 1] = env_origins[:, 1] + start_local_xyz[:, 1] + spawn_jitter[:, 1]
-                root_state[:, 2] = (
-                    env_origins[:, 2]
-                    + float(self.cfg.spawn_height_m)
-                    + start_local_xyz[:, 2]
-                )
-                yaw = start_yaw + sample_uniform(
-                    -float(self.cfg.spawn_yaw_noise_rad),
-                    float(self.cfg.spawn_yaw_noise_rad),
-                    (num_resets,),
-                    self.device,
-                )
-                goal_local = goal_local_xyz.clone()
-                goal_local[:, 2] = torch.maximum(
-                    goal_local[:, 2],
-                    torch.full((num_resets,), float(self.cfg.goal_height_m), dtype=torch.float32, device=self.device),
-                )
-                self._goal_pos_w[agent_idx, env_ids] = env_origins + goal_local
+                if bool(torch.any(spawned_mask).item()):
+                    valid_rows = torch.nonzero(spawned_mask, as_tuple=False).squeeze(-1)
+                    spawn_jitter = sample_uniform(
+                        -float(self.cfg.agent_spawn_jitter_m),
+                        float(self.cfg.agent_spawn_jitter_m),
+                        (int(valid_rows.numel()), 2),
+                        self.device,
+                    )
+                    start_local_xyz = self._scene_factory_spawn_start_local[env_ids[valid_rows], agent_idx]
+                    start_yaw = self._scene_factory_spawn_start_yaw[env_ids[valid_rows], agent_idx]
+                    goal_local_xyz = self._scene_factory_spawn_goal_local[env_ids[valid_rows], agent_idx]
+                    root_pose[valid_rows, 0] = env_origins[valid_rows, 0] + start_local_xyz[:, 0] + spawn_jitter[:, 0]
+                    root_pose[valid_rows, 1] = env_origins[valid_rows, 1] + start_local_xyz[:, 1] + spawn_jitter[:, 1]
+                    root_pose[valid_rows, 2] = (
+                        env_origins[valid_rows, 2]
+                        + float(self.cfg.spawn_height_m)
+                        + start_local_xyz[:, 2]
+                    )
+                    yaw[valid_rows] = start_yaw + sample_uniform(
+                        -float(self.cfg.spawn_yaw_noise_rad),
+                        float(self.cfg.spawn_yaw_noise_rad),
+                        (int(valid_rows.numel()),),
+                        self.device,
+                    )
+                    goal_local = goal_local_xyz.clone()
+                    goal_local[:, 2] = torch.maximum(
+                        goal_local[:, 2],
+                        torch.full((int(valid_rows.numel()),), float(self.cfg.goal_height_m), dtype=torch.float32, device=self.device),
+                    )
+                    goal_pos_w[valid_rows] = env_origins[valid_rows] + goal_local
             else:
                 formation_angle = phase + (2.0 * math.pi * agent_idx / max(1, self._num_agents))
                 spawn_jitter = sample_uniform(
@@ -1994,8 +2884,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     ],
                     dim=-1,
                 )
-                root_state[:, 0:2] = env_origins[:, 0:2] + shared_world_offset + spawn_offset + spawn_jitter
-                root_state[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
+                root_pose[:, 0:2] = env_origins[:, 0:2] + shared_world_offset + spawn_offset + spawn_jitter
+                root_pose[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
                 yaw = formation_angle + math.pi + sample_uniform(
                     -float(self.cfg.spawn_yaw_noise_rad),
                     float(self.cfg.spawn_yaw_noise_rad),
@@ -2016,22 +2906,55 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     ],
                     dim=-1,
                 )
-                self._goal_pos_w[agent_idx, env_ids] = env_origins + env_goal_offset
+                goal_pos_w = env_origins + env_goal_offset
+            self._sync_timing_device()
+            reset_pose_spawn_ms += (perf_counter() - reset_pose_spawn_start) * 1000.0
 
-            zeros = torch.zeros_like(yaw)
-            root_state[:, 3:7] = quat_from_euler_xyz(zeros, zeros, yaw)
-            root_state[:, 7:] = 0.0
+            self._sync_timing_device()
+            reset_pose_finalize_start = perf_counter()
+
+            self._sync_timing_device()
+            reset_pose_quat_start = perf_counter()
+            self._set_root_pose_quat_from_yaw(root_pose, yaw)
+            root_velocity.zero_()
+            self._sync_timing_device()
+            reset_pose_quat_ms += (perf_counter() - reset_pose_quat_start) * 1000.0
+
+            self._sync_timing_device()
+            reset_pose_goal_start = perf_counter()
+            self._goal_pos_w[agent_idx, env_ids] = goal_pos_w
             self._previous_goal_distance[agent_idx, env_ids] = torch.linalg.norm(
-                self._goal_pos_w[agent_idx, env_ids, :2] - root_state[:, :2],
+                self._goal_pos_w[agent_idx, env_ids, :2] - root_pose[:, :2],
                 dim=1,
             )
             self._current_goal_distance[agent_idx, env_ids] = self._previous_goal_distance[agent_idx, env_ids]
+            self._sync_timing_device()
+            reset_pose_goal_ms += (perf_counter() - reset_pose_goal_start) * 1000.0
 
-            joint_pos = vehicle.data.default_joint_pos[env_ids].clone()
-            joint_vel = vehicle.data.default_joint_vel[env_ids].clone()
+            self._sync_timing_device()
+            reset_pose_inactive_start = perf_counter()
+            if bool(torch.any(~spawned_mask).item()):
+                inactive_env_ids = env_ids[~spawned_mask]
+                self._previous_goal_distance[agent_idx, inactive_env_ids] = 0.0
+                self._current_goal_distance[agent_idx, inactive_env_ids] = 0.0
+                self._agent_done_mask[agent_idx, inactive_env_ids] = True
+            self._sync_timing_device()
+            reset_pose_inactive_ms += (perf_counter() - reset_pose_inactive_start) * 1000.0
 
-            vehicle.write_root_pose_to_sim(root_state[:, :7], env_ids)
-            vehicle.write_root_velocity_to_sim(root_state[:, 7:], env_ids)
+            self._sync_timing_device()
+            reset_pose_joint_defaults_start = perf_counter()
+            joint_pos = self._default_joint_pos[agent_idx][env_ids].clone()
+            joint_vel = self._default_joint_vel[agent_idx][env_ids].clone()
+            self._sync_timing_device()
+            reset_pose_joint_defaults_ms += (perf_counter() - reset_pose_joint_defaults_start) * 1000.0
+            reset_pose_finalize_ms += (perf_counter() - reset_pose_finalize_start) * 1000.0
+            self._sync_timing_device()
+            reset_pose_build_ms += (perf_counter() - reset_pose_build_start) * 1000.0
+
+            self._sync_timing_device()
+            reset_write_start = perf_counter()
+            vehicle.write_root_pose_to_sim(root_pose, env_ids)
+            vehicle.write_root_velocity_to_sim(root_velocity, env_ids)
             vehicle.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
             vehicle.set_joint_effort_target(self._joint_effort_targets[agent_idx][env_ids], env_ids=env_ids)
             vehicle.permanent_wrench_composer.set_forces_and_torques(
@@ -2041,6 +2964,225 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 env_ids=env_ids,
                 is_global=False,
             )
+            self._sync_timing_device()
+            reset_write_ms += (perf_counter() - reset_write_start) * 1000.0
+        self._step_timing_last_ms["reset_state_clear_ms"] = float(reset_state_clear_ms)
+        self._step_timing_last_ms["reset_pose_build_ms"] = float(reset_pose_build_ms)
+        self._step_timing_last_ms["reset_pose_park_ms"] = float(reset_pose_park_ms)
+        self._step_timing_last_ms["reset_pose_spawn_ms"] = float(reset_pose_spawn_ms)
+        self._step_timing_last_ms["reset_pose_finalize_ms"] = float(reset_pose_finalize_ms)
+        self._step_timing_last_ms["reset_pose_quat_ms"] = float(reset_pose_quat_ms)
+        self._step_timing_last_ms["reset_pose_goal_ms"] = float(reset_pose_goal_ms)
+        self._step_timing_last_ms["reset_pose_inactive_ms"] = float(reset_pose_inactive_ms)
+        self._step_timing_last_ms["reset_pose_joint_defaults_ms"] = float(reset_pose_joint_defaults_ms)
+        self._step_timing_last_ms["reset_write_ms"] = float(reset_write_ms)
+        self._sync_timing_device()
+        self._step_timing_last_ms["reset_spawn_prep_ms"] = max(
+            0.0,
+            (perf_counter() - reset_spawn_prep_start) * 1000.0 - float(reset_write_ms),
+        )
+        self._lane_touch_mask_cache_valid = False
+        self._sync_timing_device()
+        self._step_timing_last_ms["reset_ms"] = (perf_counter() - reset_start) * 1000.0
+
+    def _inject_step_timing_logs(self, extras: dict) -> dict:
+        if not bool(self.cfg.step_timing_log_enable):
+            return extras
+        if not isinstance(extras, dict):
+            extras = {}
+
+        self._step_timing_call_count += 1
+        known_ms = sum(
+            float(self._step_timing_last_ms.get(key, 0.0))
+            for key in (
+                "pre_physics_ms",
+                "apply_action_ms",
+                "physics_write_ms",
+                "physics_sim_ms",
+                "physics_update_ms",
+                "obs_ms",
+                "reward_ms",
+                "done_ms",
+                "reset_ms",
+                "step_bookkeeping_ms",
+                "step_event_ms",
+                "step_obs_noise_ms",
+            )
+        )
+        step_total_ms = float(self._step_timing_last_ms.get("step_total_ms", 0.0))
+        self._step_timing_last_ms["step_other_ms"] = max(0.0, step_total_ms - known_ms)
+
+        for key, value in self._step_timing_last_ms.items():
+            prev = float(self._step_timing_ema_ms.get(key, 0.0))
+            self._step_timing_ema_ms[key] = float(value) if self._step_timing_call_count == 1 else (0.9 * prev + 0.1 * float(value))
+
+        timing_agent_ids = self._agent_ids[:1] if self._agent_ids else []
+        for agent_id in timing_agent_ids:
+            agent_extra = extras.get(agent_id)
+            if not isinstance(agent_extra, dict):
+                agent_extra = {}
+                extras[agent_id] = agent_extra
+            log = agent_extra.get("log")
+            if not isinstance(log, dict):
+                log = {}
+                agent_extra["log"] = log
+            for key, value in self._step_timing_last_ms.items():
+                log[f"Perf/{key}"] = float(value)
+            for key, value in self._step_timing_ema_ms.items():
+                log[f"PerfEma/{key}"] = float(value)
+
+        if bool(self.cfg.step_timing_print_enable):
+            every_n = max(1, int(self.cfg.step_timing_print_every_n))
+            if self._step_timing_call_count % every_n == 0:
+                print(
+                    "[INFO][SceneFactory][StepTiming] "
+                    f"step={self._step_timing_call_count} total_ms={self._step_timing_last_ms['step_total_ms']:.2f} "
+                    f"pre_ms={self._step_timing_last_ms['pre_physics_ms']:.2f} "
+                    f"apply_ms={self._step_timing_last_ms['apply_action_ms']:.2f} "
+                    f"write_ms={self._step_timing_last_ms['physics_write_ms']:.2f} "
+                    f"sim_ms={self._step_timing_last_ms['physics_sim_ms']:.2f} "
+                    f"update_ms={self._step_timing_last_ms['physics_update_ms']:.2f} "
+                    f"obs_ms={self._step_timing_last_ms['obs_ms']:.2f} "
+                    f"obs_lane_ms={self._step_timing_last_ms['obs_lane_ms']:.2f} "
+                    f"obs_shared_ms={self._step_timing_last_ms['obs_shared_ms']:.2f} "
+                    f"obs_goal_ms={self._step_timing_last_ms['obs_goal_ms']:.2f} "
+                    f"obs_road_ms={self._step_timing_last_ms['obs_road_ms']:.2f} "
+                    f"obs_neighbor_ms={self._step_timing_last_ms['obs_neighbor_ms']:.2f} "
+                    f"obs_finalize_ms={self._step_timing_last_ms['obs_finalize_ms']:.2f} "
+                    f"reward_ms={self._step_timing_last_ms['reward_ms']:.2f} "
+                    f"reward_lane_ms={self._step_timing_last_ms['reward_lane_ms']:.2f} "
+                    f"reward_shared_ms={self._step_timing_last_ms['reward_shared_ms']:.2f} "
+                    f"reward_goal_ms={self._step_timing_last_ms['reward_goal_ms']:.2f} "
+                    f"reward_geom_ms={self._step_timing_last_ms['reward_geom_ms']:.2f} "
+                    f"reward_ttc_ms={self._step_timing_last_ms['reward_ttc_ms']:.2f} "
+                    f"reward_road_edge_ttc_ms={self._step_timing_last_ms['reward_road_edge_ttc_ms']:.2f} "
+                    f"reward_finalize_ms={self._step_timing_last_ms['reward_finalize_ms']:.2f} "
+                    f"done_ms={self._step_timing_last_ms['done_ms']:.2f} "
+                    f"reset_ms={self._step_timing_last_ms['reset_ms']:.2f} "
+                    f"reset_metrics_prep_ms={self._step_timing_last_ms['reset_metrics_prep_ms']:.2f} "
+                    f"reset_log_ms={self._step_timing_last_ms['reset_log_ms']:.2f} "
+                    f"reset_backend_ms={self._step_timing_last_ms['reset_backend_ms']:.2f} "
+                    f"reset_spawn_prep_ms={self._step_timing_last_ms['reset_spawn_prep_ms']:.2f} "
+                    f"reset_state_clear_ms={self._step_timing_last_ms['reset_state_clear_ms']:.2f} "
+                    f"reset_pose_build_ms={self._step_timing_last_ms['reset_pose_build_ms']:.2f} "
+                    f"reset_pose_park_ms={self._step_timing_last_ms['reset_pose_park_ms']:.2f} "
+                    f"reset_pose_spawn_ms={self._step_timing_last_ms['reset_pose_spawn_ms']:.2f} "
+                    f"reset_pose_finalize_ms={self._step_timing_last_ms['reset_pose_finalize_ms']:.2f} "
+                    f"reset_pose_quat_ms={self._step_timing_last_ms['reset_pose_quat_ms']:.2f} "
+                    f"reset_pose_goal_ms={self._step_timing_last_ms['reset_pose_goal_ms']:.2f} "
+                    f"reset_pose_inactive_ms={self._step_timing_last_ms['reset_pose_inactive_ms']:.2f} "
+                    f"reset_pose_joint_defaults_ms={self._step_timing_last_ms['reset_pose_joint_defaults_ms']:.2f} "
+                    f"reset_write_ms={self._step_timing_last_ms['reset_write_ms']:.2f} "
+                    f"bookkeeping_ms={self._step_timing_last_ms['step_bookkeeping_ms']:.2f} "
+                    f"event_ms={self._step_timing_last_ms['step_event_ms']:.2f} "
+                    f"obs_noise_ms={self._step_timing_last_ms['step_obs_noise_ms']:.2f} "
+                    f"other_ms={self._step_timing_last_ms['step_other_ms']:.2f}",
+                    flush=True,
+                )
+        return extras
+
+    def step(self, actions):
+        self._sync_timing_device()
+        step_start = perf_counter()
+        self._lane_touch_mask_cache_valid = False
+        self._collision_force_cache_valid = False
+        actions = {agent: action.to(self.device) for agent, action in actions.items()}
+        if self.cfg.action_noise_model:
+            for agent, action in actions.items():
+                if agent in self._action_noise_model:
+                    actions[agent] = self._action_noise_model[agent](action)
+
+        self._pre_physics_step(actions)
+
+        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        apply_action_total_ms = 0.0
+        self._step_timing_last_ms["apply_action_math_ms"] = 0.0
+        self._step_timing_last_ms["apply_action_target_submit_ms"] = 0.0
+        self._step_timing_last_ms["apply_action_wrench_submit_ms"] = 0.0
+        physics_write_ms = 0.0
+        physics_sim_ms = 0.0
+        physics_update_ms = 0.0
+        for _ in range(self.cfg.decimation):
+            self._sim_step_counter += 1
+
+            self._sync_timing_device()
+            apply_action_start = perf_counter()
+            self._apply_action()
+            self._sync_timing_device()
+            apply_action_total_ms += (perf_counter() - apply_action_start) * 1000.0
+
+            self._sync_timing_device()
+            physics_write_start = perf_counter()
+            self.scene.write_data_to_sim()
+            self._sync_timing_device()
+            physics_write_ms += (perf_counter() - physics_write_start) * 1000.0
+
+            self._sync_timing_device()
+            physics_sim_start = perf_counter()
+            self.sim.step(render=False)
+            self._sync_timing_device()
+            physics_sim_ms += (perf_counter() - physics_sim_start) * 1000.0
+
+            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                self.sim.render()
+
+            self._sync_timing_device()
+            physics_update_start = perf_counter()
+            self.scene.update(dt=self.physics_dt)
+            self._sync_timing_device()
+            physics_update_ms += (perf_counter() - physics_update_start) * 1000.0
+
+        self._step_timing_last_ms["apply_action_ms"] = float(apply_action_total_ms)
+        self._step_timing_last_ms["physics_write_ms"] = float(physics_write_ms)
+        self._step_timing_last_ms["physics_sim_ms"] = float(physics_sim_ms)
+        self._step_timing_last_ms["physics_update_ms"] = float(physics_update_ms)
+
+        self._sync_timing_device()
+        step_bookkeeping_start = perf_counter()
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+
+        self._sync_timing_device()
+        step_bookkeeping_ms = (perf_counter() - step_bookkeeping_start) * 1000.0
+
+        terminated, time_outs = self._get_dones()
+        self.terminated_dict = terminated
+        self.time_out_dict = time_outs
+        self.reset_buf[:] = math.prod(self.terminated_dict.values()) | math.prod(self.time_out_dict.values())
+        rewards = self._get_rewards()
+        self.reward_dict = rewards
+        self._step_timing_last_ms["step_bookkeeping_ms"] = float(step_bookkeeping_ms)
+
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self._reset_idx(reset_env_ids)
+
+        self._sync_timing_device()
+        step_event_start = perf_counter()
+        if self.cfg.events:
+            if "interval" in self.event_manager.available_modes:
+                self.event_manager.apply(mode="interval", dt=self.step_dt)
+        self._sync_timing_device()
+        self._step_timing_last_ms["step_event_ms"] = (perf_counter() - step_event_start) * 1000.0
+
+        obs = self._get_observations()
+        self.obs_dict = obs
+        self.agents = [agent for agent in self.possible_agents if agent in self.obs_dict]
+
+        self._sync_timing_device()
+        step_obs_noise_start = perf_counter()
+        if self.cfg.observation_noise_model:
+            for agent, obs_value in self.obs_dict.items():
+                if agent in self._observation_noise_model:
+                    self.obs_dict[agent] = self._observation_noise_model[agent](obs_value)
+        self._sync_timing_device()
+        self._step_timing_last_ms["step_obs_noise_ms"] = (perf_counter() - step_obs_noise_start) * 1000.0
+
+        extras = self.extras
+        self._sync_timing_device()
+        self._step_timing_last_ms["step_total_ms"] = (perf_counter() - step_start) * 1000.0
+        extras = self._inject_step_timing_logs(extras)
+        return self.obs_dict, self.reward_dict, self.terminated_dict, self.time_out_dict, extras
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:

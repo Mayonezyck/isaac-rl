@@ -10,6 +10,7 @@ import sys
 import time
 import types
 from datetime import datetime
+from time import perf_counter
 from typing import Any
 
 import yaml
@@ -54,11 +55,29 @@ def _cfg_int_tuple(cfg: dict[str, Any], section: str, key: str, default: tuple[i
     return (int(value),)
 
 
+def _validate_training_config_shape(cfg: dict[str, Any], config_path: str | Path) -> None:
+    required_training_sections = ("runner", "scene_factory", "assets")
+    if all(isinstance(cfg.get(section), dict) for section in required_training_sections):
+        return
+
+    scene_config_markers = ("world", "road", "vehicles")
+    looks_like_scene_config = all(isinstance(cfg.get(section), dict) for section in scene_config_markers)
+    if looks_like_scene_config:
+        raise SystemExit(
+            "The provided --config appears to be a SceneFactory world/scene config, not a training config: "
+            f"{Path(config_path).expanduser().resolve()}\n"
+            "Use a training preset such as\n"
+            "  configs/scene_factory/goal_reaching_roads_choco_obs_random4_curated32_agent_slots_goal3_late_fusion_obs_aligned_ttc_index.yaml\n"
+            "which references the scene config via scene_factory.config_path."
+        )
+
+
 pre_parser = argparse.ArgumentParser(add_help=False)
 pre_parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
 pre_args, _ = pre_parser.parse_known_args()
 config_path = str(Path(pre_args.config).expanduser().resolve())
 file_cfg = _load_yaml_config(config_path)
+_validate_training_config_shape(file_cfg, config_path)
 
 parser = argparse.ArgumentParser(
     parents=[pre_parser],
@@ -90,7 +109,7 @@ parser.add_argument(
 parser.add_argument(
     "--obs_road_points_k",
     type=int,
-    default=int(_cfg_value(file_cfg, "observation", "road_points_k", 64)),
+    default=int(_cfg_value(file_cfg, "observation", "road_points_k", 200)),
 )
 parser.add_argument(
     "--obs_road_points_radius_m",
@@ -100,17 +119,17 @@ parser.add_argument(
 parser.add_argument(
     "--obs_road_points_type_norm",
     type=float,
-    default=float(_cfg_value(file_cfg, "observation", "road_points_type_norm", 1.0)),
+    default=float(_cfg_value(file_cfg, "observation", "road_points_type_norm", 20.0)),
 )
 parser.add_argument(
     "--obs_road_points_mode",
     choices=("knn", "road_running", "road-running"),
-    default=str(_cfg_value(file_cfg, "observation", "road_points_mode", "knn")),
+    default=str(_cfg_value(file_cfg, "observation", "road_points_mode", "road-running")),
 )
 parser.add_argument(
     "--obs_road_points_include_dirs",
     action=argparse.BooleanOptionalAction,
-    default=bool(_cfg_value(file_cfg, "observation", "road_points_include_dirs", True)),
+    default=bool(_cfg_value(file_cfg, "observation", "road_points_include_dirs", False)),
 )
 parser.add_argument(
     "--obs_neighbor_enable",
@@ -120,17 +139,17 @@ parser.add_argument(
 parser.add_argument(
     "--obs_neighbor_k",
     type=int,
-    default=int(_cfg_value(file_cfg, "observation", "neighbor_k", 8)),
+    default=int(_cfg_value(file_cfg, "observation", "neighbor_k", 63)),
 )
 parser.add_argument(
     "--obs_neighbor_include_ttc",
     action=argparse.BooleanOptionalAction,
-    default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_ttc", True)),
+    default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_ttc", False)),
 )
 parser.add_argument(
     "--obs_neighbor_include_index",
     action=argparse.BooleanOptionalAction,
-    default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_index", True)),
+    default=bool(_cfg_value(file_cfg, "observation", "neighbor_include_index", False)),
 )
 parser.add_argument(
     "--obs_neighbor_ttc_max_s",
@@ -146,6 +165,29 @@ parser.add_argument(
     "--obs_timing_print_every_n",
     type=int,
     default=int(_cfg_value(file_cfg, "observation", "timing_print_every_n", 32)),
+)
+parser.add_argument(
+    "--step_timing_log_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "timing", "step_log_enable", False)),
+    help="Log per-step SceneFactory timing metrics into extras/TensorBoard.",
+)
+parser.add_argument(
+    "--step_timing_print_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "timing", "step_print_enable", False)),
+    help="Print per-step SceneFactory timing breakdowns every N steps.",
+)
+parser.add_argument(
+    "--step_timing_print_every_n",
+    type=int,
+    default=int(_cfg_value(file_cfg, "timing", "step_print_every_n", 128)),
+)
+parser.add_argument(
+    "--step_timing_cuda_sync_enable",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "timing", "step_cuda_sync_enable", False)),
+    help="Synchronize CUDA around step/reset timing regions for more accurate profiling at the cost of runtime overhead.",
 )
 parser.add_argument(
     "--reward_lane_center_enable",
@@ -168,10 +210,47 @@ parser.add_argument(
     default=float(_cfg_value(file_cfg, "reward", "lane_forbidden_penalty", -30.0)),
 )
 parser.add_argument(
+    "--reward_collision_penalty",
+    type=float,
+    default=float(_cfg_value(file_cfg, "reward", "collision_penalty", -15.0)),
+)
+parser.add_argument(
+    "--reward_crash_penalty",
+    type=float,
+    default=float(_cfg_value(file_cfg, "reward", "crash_penalty", -10.0)),
+)
+parser.add_argument(
+    "--reward_mode",
+    choices=("scene_factory_default", "choco_baseline"),
+    default=str(_cfg_value(file_cfg, "reward", "mode", "scene_factory_default")),
+)
+parser.add_argument(
     "--reward_goal_bonus",
     type=float,
     default=float(_cfg_value(file_cfg, "reward", "goal_bonus", 20.0)),
 )
+parser.add_argument("--reward_choco_offroad_penalty", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_offroad_penalty", -0.5)))
+parser.add_argument("--reward_choco_idle_penalty_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_idle_penalty_enable", True)))
+parser.add_argument("--reward_choco_idle_penalty_per_step", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_idle_penalty_per_step", 0.03)))
+parser.add_argument("--reward_choco_idle_speed_threshold_mps", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_idle_speed_threshold_mps", 0.5)))
+parser.add_argument("--reward_choco_geom_lane_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_geom_lane_enable", True)))
+parser.add_argument("--reward_choco_geom_lane_per_step", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_per_step", 0.12)))
+parser.add_argument("--reward_choco_geom_lane_tolerance_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_tolerance_m", 1.75)))
+parser.add_argument("--reward_choco_geom_lane_heading_weight", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_heading_weight", 0.8)))
+parser.add_argument("--reward_choco_geom_lane_min_alignment", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_min_alignment", 0.35)))
+parser.add_argument("--reward_choco_geom_offroad_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_geom_offroad_enable", True)))
+parser.add_argument("--reward_choco_geom_offroad_lateral_threshold_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_offroad_lateral_threshold_m", 3.25)))
+parser.add_argument("--reward_choco_geom_offroad_distance_threshold_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_offroad_distance_threshold_m", 6.0)))
+parser.add_argument("--reward_choco_ttc_penalty_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_ttc_penalty_enable", True)))
+parser.add_argument("--reward_choco_ttc_penalty_alpha", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_ttc_penalty_alpha", 0.15)))
+parser.add_argument("--reward_choco_ttc_penalty_max", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_ttc_penalty_max", 0.5)))
+parser.add_argument("--reward_choco_ttc_penalty_min_ttc", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_ttc_penalty_min_ttc", 0.5)))
+parser.add_argument("--reward_choco_road_edge_ttc_penalty_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_road_edge_ttc_penalty_enable", True)))
+parser.add_argument("--reward_choco_road_edge_ttc_penalty_alpha", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_road_edge_ttc_penalty_alpha", 0.10)))
+parser.add_argument("--reward_choco_road_edge_ttc_penalty_max", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_road_edge_ttc_penalty_max", 0.60)))
+parser.add_argument("--reward_choco_road_edge_ttc_penalty_min_ttc", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_road_edge_ttc_penalty_min_ttc", 0.5)))
+parser.add_argument("--reward_choco_road_edge_ttc_hard_min_ttc", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_road_edge_ttc_hard_min_ttc", 0.5)))
+parser.add_argument("--reward_choco_road_edge_ttc_radius_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_road_edge_ttc_radius_m", 40.0)))
 parser.add_argument(
     "--tunable_config_json",
     type=str,
@@ -180,10 +259,22 @@ parser.add_argument(
 )
 parser.add_argument("--spawn_height_m", type=float, default=float(_cfg_value(file_cfg, "env", "spawn_height_m", 1.6)), help="Vehicle spawn height above each env origin.")
 parser.add_argument(
+    "--decimation",
+    type=int,
+    default=int(_cfg_value(file_cfg, "env", "decimation", 4)),
+    help="Number of physics substeps per environment step.",
+)
+parser.add_argument(
     "--ground_mode",
     choices=("plane", "cuboid"),
     default=str(_cfg_value(file_cfg, "env", "ground_mode", "plane")),
     help="Ground implementation for the training scene.",
+)
+parser.add_argument(
+    "--apply_runtime_external_wrench",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "env", "apply_runtime_external_wrench", True)),
+    help="Apply the runtime lateral/yaw damping wrench each physics substep.",
 )
 parser.add_argument(
     "--use_scene_factory_roads",
@@ -214,6 +305,12 @@ parser.add_argument(
     type=int,
     default=int(_cfg_value(file_cfg, "scene_factory", "random_world_seed", 42)),
     help="Seed used when SceneFactory world_selection_mode=random_envs.",
+)
+parser.add_argument(
+    "--reset_mode",
+    choices=("isaac_reset", "teleport_only"),
+    default=str(_cfg_value(file_cfg, "env", "reset_mode", "isaac_reset")),
+    help="Reset implementation used after episode termination. 'teleport_only' keeps the vehicle pool alive and teleports slots instead of running the heavy reset path.",
 )
 parser.add_argument(
     "--test_mode",
@@ -384,7 +481,7 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(
-    device=_cfg_value(file_cfg, "app", "device", None),
+    device=str(_cfg_value(file_cfg, "app", "device", "")),
     enable_cameras=bool(_cfg_value(file_cfg, "video", "enabled", False)),
 )
 args_cli = parser.parse_args()
@@ -524,14 +621,28 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.scene_factory_world_index = int(args_cli.scene_factory_world_index)
     cfg.scene_factory_world_selection_mode = str(args_cli.scene_factory_world_selection_mode)
     cfg.scene_factory_random_world_seed = int(args_cli.scene_factory_random_world_seed)
+    cfg.reset_mode = str(args_cli.reset_mode)
     if bool(cfg.use_scene_factory_roads):
-        road_cfg = dict(_load_yaml_config(cfg.scene_factory_config_path).get("road", {}) or {})
+        scene_factory_cfg = _load_yaml_config(cfg.scene_factory_config_path)
+        road_cfg = dict(scene_factory_cfg.get("road", {}) or {})
+        vehicles_cfg = dict(scene_factory_cfg.get("vehicles", {}) or {})
+        if "max_controllable_per_world" in vehicles_cfg:
+            print(
+                "[INFO][SceneFactory]: env.num_agents_per_env from the training preset governs runtime controllable "
+                f"agents per scene ({int(args_cli.num_agents_per_env)} requested); "
+                "vehicles.max_controllable_per_world in the scene config is not used as a training-time override."
+            )
         if str(road_cfg.get("render_mode", "point_instancer")).strip().lower() == "point_instancer":
             print(
                 "[INFO][SceneFactory]: road_render_mode=point_instancer "
                 f"use_fabric={cfg.sim.use_fabric} clone_in_fabric={cfg.scene.clone_in_fabric}"
             )
+        if str(cfg.reset_mode).strip().lower().replace("-", "_") == "teleport_only":
+            print("[INFO][SceneFactory]: reset_mode=teleport_only requested from the training preset.")
     cfg.start_radius_m = float(args_cli.start_radius_m)
+    cfg.decimation = int(args_cli.decimation)
+    cfg.sim.render_interval = int(args_cli.decimation)
+    cfg.apply_runtime_external_wrench = bool(args_cli.apply_runtime_external_wrench)
     cfg.agent_spawn_circle_radius_m = float(args_cli.agent_spawn_circle_radius_m)
     cfg.agent_spawn_jitter_m = float(args_cli.agent_spawn_jitter_m)
     cfg.episode_length_s = float(args_cli.episode_length_s)
@@ -556,13 +667,42 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.obs_neighbor_ttc_max_s = float(args_cli.obs_neighbor_ttc_max_s)
     cfg.obs_timing_print_enable = bool(args_cli.obs_timing_print_enable)
     cfg.obs_timing_print_every_n = int(args_cli.obs_timing_print_every_n)
+    cfg.step_timing_log_enable = bool(args_cli.step_timing_log_enable)
+    cfg.step_timing_print_enable = bool(args_cli.step_timing_print_enable)
+    cfg.step_timing_print_every_n = int(args_cli.step_timing_print_every_n)
+    cfg.step_timing_cuda_sync_enable = bool(args_cli.step_timing_cuda_sync_enable)
     cfg.reward_lane_center_enable = bool(args_cli.reward_lane_center_enable)
     cfg.reward_lane_center_types = _cfg_int_tuple(file_cfg, "reward", "lane_center_types", (1, 2))
     cfg.reward_lane_center_per_step = float(args_cli.reward_lane_center_per_step)
     cfg.reward_lane_forbidden_enable = bool(args_cli.reward_lane_forbidden_enable)
     cfg.reward_lane_forbidden_types = _cfg_int_tuple(file_cfg, "reward", "lane_forbidden_types", (15, 16))
     cfg.reward_lane_forbidden_penalty = float(args_cli.reward_lane_forbidden_penalty)
+    cfg.reward_collision_penalty = float(args_cli.reward_collision_penalty)
+    cfg.reward_crash_penalty = float(args_cli.reward_crash_penalty)
+    cfg.reward_mode = str(args_cli.reward_mode)
     cfg.reward_goal_bonus = float(args_cli.reward_goal_bonus)
+    cfg.reward_choco_offroad_penalty = float(args_cli.reward_choco_offroad_penalty)
+    cfg.reward_choco_idle_penalty_enable = bool(args_cli.reward_choco_idle_penalty_enable)
+    cfg.reward_choco_idle_penalty_per_step = float(args_cli.reward_choco_idle_penalty_per_step)
+    cfg.reward_choco_idle_speed_threshold_mps = float(args_cli.reward_choco_idle_speed_threshold_mps)
+    cfg.reward_choco_geom_lane_enable = bool(args_cli.reward_choco_geom_lane_enable)
+    cfg.reward_choco_geom_lane_per_step = float(args_cli.reward_choco_geom_lane_per_step)
+    cfg.reward_choco_geom_lane_tolerance_m = float(args_cli.reward_choco_geom_lane_tolerance_m)
+    cfg.reward_choco_geom_lane_heading_weight = float(args_cli.reward_choco_geom_lane_heading_weight)
+    cfg.reward_choco_geom_lane_min_alignment = float(args_cli.reward_choco_geom_lane_min_alignment)
+    cfg.reward_choco_geom_offroad_enable = bool(args_cli.reward_choco_geom_offroad_enable)
+    cfg.reward_choco_geom_offroad_lateral_threshold_m = float(args_cli.reward_choco_geom_offroad_lateral_threshold_m)
+    cfg.reward_choco_geom_offroad_distance_threshold_m = float(args_cli.reward_choco_geom_offroad_distance_threshold_m)
+    cfg.reward_choco_ttc_penalty_enable = bool(args_cli.reward_choco_ttc_penalty_enable)
+    cfg.reward_choco_ttc_penalty_alpha = float(args_cli.reward_choco_ttc_penalty_alpha)
+    cfg.reward_choco_ttc_penalty_max = float(args_cli.reward_choco_ttc_penalty_max)
+    cfg.reward_choco_ttc_penalty_min_ttc = float(args_cli.reward_choco_ttc_penalty_min_ttc)
+    cfg.reward_choco_road_edge_ttc_penalty_enable = bool(args_cli.reward_choco_road_edge_ttc_penalty_enable)
+    cfg.reward_choco_road_edge_ttc_penalty_alpha = float(args_cli.reward_choco_road_edge_ttc_penalty_alpha)
+    cfg.reward_choco_road_edge_ttc_penalty_max = float(args_cli.reward_choco_road_edge_ttc_penalty_max)
+    cfg.reward_choco_road_edge_ttc_penalty_min_ttc = float(args_cli.reward_choco_road_edge_ttc_penalty_min_ttc)
+    cfg.reward_choco_road_edge_ttc_hard_min_ttc = float(args_cli.reward_choco_road_edge_ttc_hard_min_ttc)
+    cfg.reward_choco_road_edge_ttc_radius_m = float(args_cli.reward_choco_road_edge_ttc_radius_m)
     cfg.test_mode = str(args_cli.test_mode).strip().lower()
     cfg.collision_test_post_collision_steps = int(_cfg_value(file_cfg, "test", "post_collision_steps", 120))
     cfg.collision_test_post_collision_throttle = float(
@@ -728,12 +868,15 @@ def _build_resolved_config(
             "observation_mode": str(env_cfg.observation_mode),
             "env_spacing": float(env_cfg.scene.env_spacing),
             "spawn_height_m": float(env_cfg.spawn_height_m),
+            "decimation": int(env_cfg.decimation),
             "ground_mode": str(env_cfg.ground_mode),
+            "apply_runtime_external_wrench": bool(env_cfg.apply_runtime_external_wrench),
             "use_scene_factory_roads": bool(env_cfg.use_scene_factory_roads),
             "start_radius_m": float(env_cfg.start_radius_m),
             "agent_spawn_circle_radius_m": float(env_cfg.agent_spawn_circle_radius_m),
             "agent_spawn_jitter_m": float(env_cfg.agent_spawn_jitter_m),
             "episode_length_s": float(env_cfg.episode_length_s),
+            "reset_mode": str(env_cfg.reset_mode),
             "goal_radius_min_m": float(env_cfg.goal_radius_min_m),
             "goal_radius_max_m": float(env_cfg.goal_radius_max_m),
             "goal_reached_threshold_m": float(env_cfg.goal_reached_threshold_m),
@@ -765,14 +908,45 @@ def _build_resolved_config(
             "timing_print_enable": bool(env_cfg.obs_timing_print_enable),
             "timing_print_every_n": int(env_cfg.obs_timing_print_every_n),
         },
+        "timing": {
+            "step_log_enable": bool(env_cfg.step_timing_log_enable),
+            "step_print_enable": bool(env_cfg.step_timing_print_enable),
+            "step_print_every_n": int(env_cfg.step_timing_print_every_n),
+            "step_cuda_sync_enable": bool(env_cfg.step_timing_cuda_sync_enable),
+        },
         "reward": {
+            "mode": str(env_cfg.reward_mode),
             "lane_center_enable": bool(env_cfg.reward_lane_center_enable),
             "lane_center_types": [int(v) for v in env_cfg.reward_lane_center_types],
             "lane_center_per_step": float(env_cfg.reward_lane_center_per_step),
             "lane_forbidden_enable": bool(env_cfg.reward_lane_forbidden_enable),
             "lane_forbidden_types": [int(v) for v in env_cfg.reward_lane_forbidden_types],
             "lane_forbidden_penalty": float(env_cfg.reward_lane_forbidden_penalty),
+            "collision_penalty": float(env_cfg.reward_collision_penalty),
+            "crash_penalty": float(env_cfg.reward_crash_penalty),
             "goal_bonus": float(env_cfg.reward_goal_bonus),
+            "choco_offroad_penalty": float(env_cfg.reward_choco_offroad_penalty),
+            "choco_idle_penalty_enable": bool(env_cfg.reward_choco_idle_penalty_enable),
+            "choco_idle_penalty_per_step": float(env_cfg.reward_choco_idle_penalty_per_step),
+            "choco_idle_speed_threshold_mps": float(env_cfg.reward_choco_idle_speed_threshold_mps),
+            "choco_geom_lane_enable": bool(env_cfg.reward_choco_geom_lane_enable),
+            "choco_geom_lane_per_step": float(env_cfg.reward_choco_geom_lane_per_step),
+            "choco_geom_lane_tolerance_m": float(env_cfg.reward_choco_geom_lane_tolerance_m),
+            "choco_geom_lane_heading_weight": float(env_cfg.reward_choco_geom_lane_heading_weight),
+            "choco_geom_lane_min_alignment": float(env_cfg.reward_choco_geom_lane_min_alignment),
+            "choco_geom_offroad_enable": bool(env_cfg.reward_choco_geom_offroad_enable),
+            "choco_geom_offroad_lateral_threshold_m": float(env_cfg.reward_choco_geom_offroad_lateral_threshold_m),
+            "choco_geom_offroad_distance_threshold_m": float(env_cfg.reward_choco_geom_offroad_distance_threshold_m),
+            "choco_ttc_penalty_enable": bool(env_cfg.reward_choco_ttc_penalty_enable),
+            "choco_ttc_penalty_alpha": float(env_cfg.reward_choco_ttc_penalty_alpha),
+            "choco_ttc_penalty_max": float(env_cfg.reward_choco_ttc_penalty_max),
+            "choco_ttc_penalty_min_ttc": float(env_cfg.reward_choco_ttc_penalty_min_ttc),
+            "choco_road_edge_ttc_penalty_enable": bool(env_cfg.reward_choco_road_edge_ttc_penalty_enable),
+            "choco_road_edge_ttc_penalty_alpha": float(env_cfg.reward_choco_road_edge_ttc_penalty_alpha),
+            "choco_road_edge_ttc_penalty_max": float(env_cfg.reward_choco_road_edge_ttc_penalty_max),
+            "choco_road_edge_ttc_penalty_min_ttc": float(env_cfg.reward_choco_road_edge_ttc_penalty_min_ttc),
+            "choco_road_edge_ttc_hard_min_ttc": float(env_cfg.reward_choco_road_edge_ttc_hard_min_ttc),
+            "choco_road_edge_ttc_radius_m": float(env_cfg.reward_choco_road_edge_ttc_radius_m),
         },
         "policy": policy_cfg,
         "test": {
@@ -852,7 +1026,9 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "student_usd_path": env_cfg.student_usd_path,
             "tunable_config_json": env_cfg.tunable_config_json,
             "spawn_height_m": env_cfg.spawn_height_m,
+            "decimation": env_cfg.decimation,
             "ground_mode": env_cfg.ground_mode,
+            "apply_runtime_external_wrench": env_cfg.apply_runtime_external_wrench,
             "use_scene_factory_roads": env_cfg.use_scene_factory_roads,
             "scene_factory_config_path": env_cfg.scene_factory_config_path,
             "scene_factory_world_index": env_cfg.scene_factory_world_index,
@@ -880,6 +1056,7 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "agent_collision_force_threshold_n": env_cfg.agent_collision_force_threshold_n,
             "agent_collision_warmup_steps": env_cfg.agent_collision_warmup_steps,
             "episode_length_s": env_cfg.episode_length_s,
+            "reset_mode": env_cfg.reset_mode,
             "goal_radius_min_m": env_cfg.goal_radius_min_m,
             "goal_radius_max_m": env_cfg.goal_radius_max_m,
             "goal_reached_threshold_m": env_cfg.goal_reached_threshold_m,
@@ -900,13 +1077,42 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "obs_neighbor_ttc_max_s": env_cfg.obs_neighbor_ttc_max_s,
             "obs_timing_print_enable": env_cfg.obs_timing_print_enable,
             "obs_timing_print_every_n": env_cfg.obs_timing_print_every_n,
+            "step_timing_log_enable": env_cfg.step_timing_log_enable,
+            "step_timing_print_enable": env_cfg.step_timing_print_enable,
+            "step_timing_print_every_n": env_cfg.step_timing_print_every_n,
+            "step_timing_cuda_sync_enable": env_cfg.step_timing_cuda_sync_enable,
             "reward_lane_center_enable": env_cfg.reward_lane_center_enable,
             "reward_lane_center_types": list(env_cfg.reward_lane_center_types),
             "reward_lane_center_per_step": env_cfg.reward_lane_center_per_step,
             "reward_lane_forbidden_enable": env_cfg.reward_lane_forbidden_enable,
             "reward_lane_forbidden_types": list(env_cfg.reward_lane_forbidden_types),
             "reward_lane_forbidden_penalty": env_cfg.reward_lane_forbidden_penalty,
+            "reward_collision_penalty": env_cfg.reward_collision_penalty,
+            "reward_crash_penalty": env_cfg.reward_crash_penalty,
+            "reward_mode": env_cfg.reward_mode,
             "reward_goal_bonus": env_cfg.reward_goal_bonus,
+            "reward_choco_offroad_penalty": env_cfg.reward_choco_offroad_penalty,
+            "reward_choco_idle_penalty_enable": env_cfg.reward_choco_idle_penalty_enable,
+            "reward_choco_idle_penalty_per_step": env_cfg.reward_choco_idle_penalty_per_step,
+            "reward_choco_idle_speed_threshold_mps": env_cfg.reward_choco_idle_speed_threshold_mps,
+            "reward_choco_geom_lane_enable": env_cfg.reward_choco_geom_lane_enable,
+            "reward_choco_geom_lane_per_step": env_cfg.reward_choco_geom_lane_per_step,
+            "reward_choco_geom_lane_tolerance_m": env_cfg.reward_choco_geom_lane_tolerance_m,
+            "reward_choco_geom_lane_heading_weight": env_cfg.reward_choco_geom_lane_heading_weight,
+            "reward_choco_geom_lane_min_alignment": env_cfg.reward_choco_geom_lane_min_alignment,
+            "reward_choco_geom_offroad_enable": env_cfg.reward_choco_geom_offroad_enable,
+            "reward_choco_geom_offroad_lateral_threshold_m": env_cfg.reward_choco_geom_offroad_lateral_threshold_m,
+            "reward_choco_geom_offroad_distance_threshold_m": env_cfg.reward_choco_geom_offroad_distance_threshold_m,
+            "reward_choco_ttc_penalty_enable": env_cfg.reward_choco_ttc_penalty_enable,
+            "reward_choco_ttc_penalty_alpha": env_cfg.reward_choco_ttc_penalty_alpha,
+            "reward_choco_ttc_penalty_max": env_cfg.reward_choco_ttc_penalty_max,
+            "reward_choco_ttc_penalty_min_ttc": env_cfg.reward_choco_ttc_penalty_min_ttc,
+            "reward_choco_road_edge_ttc_penalty_enable": env_cfg.reward_choco_road_edge_ttc_penalty_enable,
+            "reward_choco_road_edge_ttc_penalty_alpha": env_cfg.reward_choco_road_edge_ttc_penalty_alpha,
+            "reward_choco_road_edge_ttc_penalty_max": env_cfg.reward_choco_road_edge_ttc_penalty_max,
+            "reward_choco_road_edge_ttc_penalty_min_ttc": env_cfg.reward_choco_road_edge_ttc_penalty_min_ttc,
+            "reward_choco_road_edge_ttc_hard_min_ttc": env_cfg.reward_choco_road_edge_ttc_hard_min_ttc,
+            "reward_choco_road_edge_ttc_radius_m": env_cfg.reward_choco_road_edge_ttc_radius_m,
         },
         "runner_cfg": {
             **runner_cfg.to_dict(),
@@ -966,7 +1172,8 @@ def _aggregate_agent_log_dict(
     if "log" in extras or "episode" in extras:
         return extras
 
-    aggregated_values: dict[str, list[torch.Tensor]] = {}
+    aggregated_sums: dict[str, torch.Tensor] = {}
+    aggregated_counts: dict[str, int] = {}
     for agent_id in agent_ids:
         agent_extra = extras.get(agent_id)
         if not isinstance(agent_extra, dict):
@@ -982,15 +1189,15 @@ def _aggregate_agent_log_dict(
                     tensor_value = torch.tensor([float(value)], device=device, dtype=torch.float32)
                 except (TypeError, ValueError):
                     continue
-            aggregated_values.setdefault(key, []).append(tensor_value)
+            aggregated_sums[key] = aggregated_sums.get(key, torch.zeros((), device=device, dtype=torch.float32)) + tensor_value.sum()
+            aggregated_counts[key] = aggregated_counts.get(key, 0) + int(tensor_value.numel())
 
-    if not aggregated_values:
+    if not aggregated_sums:
         return extras
 
     aggregated_log = {
-        key: torch.mean(torch.cat(values, dim=0))
-        for key, values in aggregated_values.items()
-        if values
+        key: aggregated_sums[key] / max(1, aggregated_counts[key])
+        for key in aggregated_sums.keys()
     }
     merged_extras = dict(extras)
     merged_extras["log"] = aggregated_log
@@ -1185,6 +1392,7 @@ class AgentSlotSharedPolicyVecEnv(VecEnv):
         return TensorDict({"policy": self._flatten_obs_dict(obs_dict)}, batch_size=[self.num_envs])
 
     def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        step_start = perf_counter()
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
 
@@ -1208,11 +1416,23 @@ class AgentSlotSharedPolicyVecEnv(VecEnv):
         self._slot_episode_length_buf[dones] = 0
         self._slot_dead_mask = self._flatten_agent_done_mask()
 
+        extras_agg_start = perf_counter()
         merged_extras = _aggregate_agent_log_dict(
             extras,
             agent_ids=self.agent_ids,
             device=self.device,
         )
+        wrapper_total_ms = (perf_counter() - step_start) * 1000.0
+        wrapper_aggregate_ms = (perf_counter() - extras_agg_start) * 1000.0
+        if bool(getattr(self.env.cfg, "step_timing_log_enable", False)):
+            log = merged_extras.get("log") if isinstance(merged_extras, dict) else None
+            if not isinstance(log, dict):
+                log = {}
+                if not isinstance(merged_extras, dict):
+                    merged_extras = {}
+                merged_extras["log"] = log
+            log["Perf/wrapper_step_total_ms"] = float(wrapper_total_ms)
+            log["Perf/wrapper_aggregate_extras_ms"] = float(wrapper_aggregate_ms)
         if not bool(getattr(self.env.cfg, "is_finite_horizon", True)):
             merged_extras["time_outs"] = flat_truncated
 
