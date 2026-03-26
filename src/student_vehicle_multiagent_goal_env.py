@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import random
 from time import perf_counter
-from typing import Sequence
+from typing import Any, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -492,6 +492,7 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     reward_choco_geom_lane_tolerance_m: float = 1.75
     reward_choco_geom_lane_heading_weight: float = 0.8
     reward_choco_geom_lane_min_alignment: float = 0.35
+    reward_choco_geom_route_progress_weight: float = 0.0
     reward_choco_geom_offroad_enable: bool = True
     reward_choco_geom_offroad_lateral_threshold_m: float = 3.25
     reward_choco_geom_offroad_distance_threshold_m: float = 6.0
@@ -547,6 +548,7 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     random_steer_test_steering_max: float = 1.0
     random_steer_test_steering_hold_steps: int = 12
     random_steer_test_seed: int = 123
+    invincible: bool = False
 
     reward_scale_alive: float = 0.05
     reward_scale_progress: float = 10.0
@@ -588,7 +590,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._scene_factory_scene_json_path: str | None = None
         self._scene_factory_scene_json_paths_by_env: list[str] | None = None
         self._scene_factory_specs_by_env: list | None = None
+        self._scene_factory_flatten_road_z = False
+        self._scene_factory_ignore_dataset_spawn_z = False
         self._scene_factory_bounds_size_m = float(_scene_factory_bounds_size_from_cfg(cfg))
+        self._last_reset_world_episode_summaries: list[dict[str, Any]] = []
         self._weather_context_np = np.zeros((weather_context_dim(),), dtype=np.float32)
         self._weather_context = torch.zeros((0, weather_context_dim()), dtype=torch.float32)
         self._obs_timing_call_count = 0
@@ -619,6 +624,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             "reward_shared_ms": 0.0,
             "reward_goal_ms": 0.0,
             "reward_geom_ms": 0.0,
+            "reward_route_progress_ms": 0.0,
             "reward_ttc_ms": 0.0,
             "reward_road_edge_ttc_ms": 0.0,
             "reward_finalize_ms": 0.0,
@@ -669,6 +675,12 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._lane_touch_circle_radius_m = 1.0
         self._lane_touch_mask = torch.zeros((0, 0, 1), dtype=torch.bool)
         if bool(cfg.use_scene_factory_roads) and str(cfg.test_mode).strip().lower() != "collision_test":
+            scene_factory_cfg = _load_yaml(cfg.scene_factory_config_path)
+            road_cfg = dict(scene_factory_cfg.get("road", {}) or {})
+            self._scene_factory_flatten_road_z = bool(
+                road_cfg.get("flatten_road_z", road_cfg.get("flatten_road", True))
+            )
+            self._scene_factory_ignore_dataset_spawn_z = bool(self._scene_factory_flatten_road_z)
             resolved_specs, resolved_spawns_by_env = resolve_scene_factory_env_assignments(cfg)
             cfg.scene_factory_world_index = int(resolved_specs[0].world_index)
             self._scene_factory_specs_by_env = list(resolved_specs)
@@ -700,6 +712,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._scene_factory_spawn_start_yaw = spawn_start_yaw_np
             self._scene_factory_spawn_goal_local = spawn_goal_local_np
             self._scene_factory_spawn_valid = spawn_valid_np
+            if self._scene_factory_ignore_dataset_spawn_z:
+                print(
+                    "[INFO][SceneFactory] flatten_road_z=true: ignoring dataset spawn/goal z and using flat training heights.",
+                    flush=True,
+                )
         configure_multi_agent_spaces(cfg, cfg.num_agents_per_env)
         self._tunable_config = normalize_tunable_config(
             load_tunable_config(cfg.tunable_config_json) if str(cfg.tunable_config_json) else StudentTunableConfig()
@@ -747,20 +764,37 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._previous_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
         self._current_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
         self._terminal_goal_distance = torch.zeros(self._num_agents, self.num_envs, device=self.device)
+        self._previous_root_pos_xy = torch.zeros(self._num_agents, self.num_envs, 2, device=self.device)
         self._spawned_agent_mask = torch.ones(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._agent_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._goal_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._collision_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._crash_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._crash_too_low_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._crash_too_far_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._crash_bad_tilt_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._lane_forbidden_done_mask = torch.zeros(
             self._num_agents, self.num_envs, dtype=torch.bool, device=self.device
         )
         self._pending_goal_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._pending_collision_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._pending_crash_done_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_crash_too_low_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_crash_too_far_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_crash_bad_tilt_mask = torch.zeros(self._num_agents, self.num_envs, dtype=torch.bool, device=self.device)
         self._pending_lane_forbidden_done_mask = torch.zeros(
             self._num_agents, self.num_envs, dtype=torch.bool, device=self.device
         )
+        self._lifetime_controlled_spawn_count = 0.0
+        self._lifetime_success_count = 0.0
+        self._lifetime_all_goals_reached_count = 0.0
+        self._lifetime_crash_count = 0.0
+        self._lifetime_crash_too_low_count = 0.0
+        self._lifetime_crash_too_far_count = 0.0
+        self._lifetime_crash_bad_tilt_count = 0.0
+        self._lifetime_collision_count = 0.0
+        self._lifetime_lane_center_touch_count = 0.0
+        self._lifetime_lane_forbidden_count = 0.0
         if self._scene_factory_spawn_valid is not None:
             self._spawned_agent_mask = self._scene_factory_spawn_valid.transpose(0, 1).clone()
 
@@ -875,6 +909,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             "ttc_penalty",
             "road_edge_ttc_penalty",
             "geom_lane_reward",
+            "geom_route_progress",
         )
         self._episode_sums = {
             key: torch.zeros(self._num_agents, self.num_envs, dtype=torch.float32, device=self.device)
@@ -1260,6 +1295,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def _reset_mode_name(self) -> str:
         return str(getattr(self.cfg, "reset_mode", "isaac_reset")).strip().lower().replace("-", "_")
+
+    def _invincible_mode_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "invincible", False))
 
     def _should_use_teleport_only_reset(self) -> bool:
         return self._reset_mode_name() == "teleport_only" and bool(self._teleport_only_reset_initialized)
@@ -1800,13 +1838,17 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         bad_tilt = vehicle.data.projected_gravity_b[:, 2] > float(self.cfg.bad_tilt_gravity_threshold)
         return too_low | too_far | bad_tilt
 
-    def _agent_crash_mask_all(self) -> torch.Tensor:
+    def _agent_crash_components_all(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         root_pos_w = torch.stack([vehicle.data.root_pos_w for vehicle in self._vehicles], dim=0)
         projected_gravity_b = torch.stack([vehicle.data.projected_gravity_b for vehicle in self._vehicles], dim=0)
         root_pos_rel = root_pos_w - self.scene.env_origins.unsqueeze(0)
         too_low = root_pos_rel[..., 2] < float(self.cfg.fall_height_threshold_m)
         too_far = torch.linalg.norm(root_pos_rel[..., :2], dim=-1) > float(self.cfg.max_distance_from_origin_m)
         bad_tilt = projected_gravity_b[..., 2] > float(self.cfg.bad_tilt_gravity_threshold)
+        return too_low, too_far, bad_tilt
+
+    def _agent_crash_mask_all(self) -> torch.Tensor:
+        too_low, too_far, bad_tilt = self._agent_crash_components_all()
         return too_low | too_far | bad_tilt
 
     def _lane_touch_any_type_mask_all(self, lane_types: Sequence[int]) -> torch.Tensor:
@@ -2083,7 +2125,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         root_pos_xy: torch.Tensor,
         yaw: torch.Tensor,
         lane_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         zeros = torch.zeros((self._num_agents, self.num_envs), dtype=torch.float32, device=self.device)
         false_mask = torch.zeros((self._num_agents, self.num_envs), dtype=torch.bool, device=self.device)
         if (
@@ -2091,13 +2133,13 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             or self._lane_touch_valid.shape[1] == 0
             or not bool(torch.any(self._lane_touch_valid).item())
         ):
-            return zeros, false_mask, zeros, zeros
+            return zeros, false_mask, zeros, zeros, zeros
 
         if lane_mask is None:
             lane_types = torch.tensor(self.cfg.reward_choco_geom_lane_types, dtype=torch.long, device=self.device)
             lane_mask = self._lane_touch_valid & torch.isin(self._lane_touch_types, lane_types)
         if not bool(torch.any(lane_mask).item()):
-            return zeros, false_mask, zeros, zeros
+            return zeros, false_mask, zeros, zeros, zeros
 
         deltas = self._lane_touch_points_xy_m.unsqueeze(0) - root_pos_xy.unsqueeze(2)
         dist_sq = torch.sum(deltas.square(), dim=-1)
@@ -2134,11 +2176,13 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         quality = torch.exp(-torch.square(lateral / tol))
         quality = quality * ((1.0 - heading_weight) + heading_weight * align)
         quality = torch.where(has_lane, quality, zeros)
+        route_progress = torch.sum((root_pos_xy - self._previous_root_pos_xy) * tangent, dim=-1)
+        route_progress = torch.where(has_lane, route_progress, zeros)
         offroad = has_lane & (
             (lateral > float(self.cfg.reward_choco_geom_offroad_lateral_threshold_m))
             | (nearest_dist > float(self.cfg.reward_choco_geom_offroad_distance_threshold_m))
         )
-        return quality, offroad, lateral, align
+        return quality, offroad, lateral, align, route_progress
 
     def _compute_choco_road_edge_ttc_penalty(
         self,
@@ -2277,13 +2321,14 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
         reward_goal_ms = 0.0
         reward_geom_ms = 0.0
+        reward_route_progress_ms = 0.0
         reward_ttc_ms = 0.0
         reward_road_edge_ttc_ms = 0.0
         reward_finalize_ms = 0.0
 
         self._sync_timing_device()
         reward_geom_start = perf_counter()
-        lane_quality_all, offroad_mask_all, _lane_error_all, _heading_alignment_all = self._compute_choco_geometric_lane_features_all(
+        lane_quality_all, offroad_mask_all, _lane_error_all, _heading_alignment_all, route_progress_all = self._compute_choco_geometric_lane_features_all(
             goal_pos_b_all,
             root_pos_xy=root_pos_xy,
             yaw=yaw_by_agent,
@@ -2316,9 +2361,15 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             reward_goal_ms += (perf_counter() - reward_goal_start) * 1000.0
 
             success_bonus = self._pending_goal_done_mask[agent_idx].float() * float(self.cfg.reward_goal_bonus)
-            collision_penalty = self._pending_collision_done_mask[agent_idx].float() * float(self.cfg.reward_collision_penalty)
-            crash_penalty = self._pending_crash_done_mask[agent_idx].float() * float(self.cfg.reward_crash_penalty)
-            lane_forbidden_penalty = self._pending_lane_forbidden_done_mask[agent_idx].float() * float(self.cfg.reward_lane_forbidden_penalty)
+            new_collision_event = self._pending_collision_done_mask[agent_idx] & (~self._collision_done_mask[agent_idx])
+            new_crash_event = self._pending_crash_done_mask[agent_idx] & (~self._crash_done_mask[agent_idx])
+            new_crash_too_low_event = self._pending_crash_too_low_mask[agent_idx] & (~self._crash_too_low_done_mask[agent_idx])
+            new_crash_too_far_event = self._pending_crash_too_far_mask[agent_idx] & (~self._crash_too_far_done_mask[agent_idx])
+            new_crash_bad_tilt_event = self._pending_crash_bad_tilt_mask[agent_idx] & (~self._crash_bad_tilt_done_mask[agent_idx])
+            new_lane_forbidden_event = self._pending_lane_forbidden_done_mask[agent_idx] & (~self._lane_forbidden_done_mask[agent_idx])
+            collision_penalty = new_collision_event.float() * float(self.cfg.reward_collision_penalty)
+            crash_penalty = new_crash_event.float() * float(self.cfg.reward_crash_penalty)
+            lane_forbidden_penalty = new_lane_forbidden_event.float() * float(self.cfg.reward_lane_forbidden_penalty)
 
             idle_penalty = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
             if bool(self.cfg.reward_choco_idle_penalty_enable):
@@ -2333,6 +2384,15 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 if bool(self.cfg.reward_choco_geom_lane_enable)
                 else torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
             )
+            self._sync_timing_device()
+            reward_route_progress_start = perf_counter()
+            geom_route_progress = (
+                torch.clamp(route_progress_all[agent_idx], min=-2.0, max=2.0)
+                * float(self.cfg.reward_choco_geom_route_progress_weight)
+                * active_float
+            )
+            self._sync_timing_device()
+            reward_route_progress_ms += (perf_counter() - reward_route_progress_start) * 1000.0
             offroad_penalty = (
                 offroad_mask.float() * float(self.cfg.reward_choco_offroad_penalty) * active_float
                 if bool(self.cfg.reward_choco_geom_offroad_enable)
@@ -2370,6 +2430,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 + ttc_penalty
                 + road_edge_ttc_penalty
                 + geom_lane_reward
+                + geom_route_progress
             )
 
             self._episode_sums["goal_bonus"][agent_idx] += success_bonus
@@ -2381,30 +2442,39 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._episode_sums["ttc_penalty"][agent_idx] += ttc_penalty
             self._episode_sums["road_edge_ttc_penalty"][agent_idx] += road_edge_ttc_penalty
             self._episode_sums["geom_lane_reward"][agent_idx] += geom_lane_reward
+            self._episode_sums["geom_route_progress"][agent_idx] += geom_route_progress
 
             self._previous_goal_distance[agent_idx] = goal_distance
             self._previous_raw_actions[agent_idx] = self._raw_actions[agent_idx]
-            new_done = (
-                self._pending_goal_done_mask[agent_idx]
-                | self._pending_collision_done_mask[agent_idx]
-                | self._pending_crash_done_mask[agent_idx]
-                | self._pending_lane_forbidden_done_mask[agent_idx]
-            )
+            if self._invincible_mode_enabled():
+                new_done = self._pending_goal_done_mask[agent_idx]
+            else:
+                new_done = (
+                    self._pending_goal_done_mask[agent_idx]
+                    | self._pending_collision_done_mask[agent_idx]
+                    | self._pending_crash_done_mask[agent_idx]
+                    | self._pending_lane_forbidden_done_mask[agent_idx]
+                )
             new_done_env_ids = torch.nonzero(new_done, as_tuple=False).squeeze(-1)
             if new_done_env_ids.numel() > 0:
                 self._park_done_vehicle(agent_idx, new_done_env_ids)
             self._terminal_goal_distance[agent_idx] = torch.where(new_done, goal_distance, self._terminal_goal_distance[agent_idx])
             self._agent_done_mask[agent_idx] |= new_done
             self._goal_done_mask[agent_idx] |= self._pending_goal_done_mask[agent_idx]
-            self._collision_done_mask[agent_idx] |= self._pending_collision_done_mask[agent_idx]
-            self._crash_done_mask[agent_idx] |= self._pending_crash_done_mask[agent_idx]
-            self._lane_forbidden_done_mask[agent_idx] |= self._pending_lane_forbidden_done_mask[agent_idx]
+            self._collision_done_mask[agent_idx] |= new_collision_event
+            self._crash_done_mask[agent_idx] |= new_crash_event
+            self._crash_too_low_done_mask[agent_idx] |= new_crash_too_low_event
+            self._crash_too_far_done_mask[agent_idx] |= new_crash_too_far_event
+            self._crash_bad_tilt_done_mask[agent_idx] |= new_crash_bad_tilt_event
+            self._lane_forbidden_done_mask[agent_idx] |= new_lane_forbidden_event
             self._sync_timing_device()
             reward_finalize_ms += (perf_counter() - reward_finalize_start) * 1000.0
+        self._previous_root_pos_xy.copy_(root_pos_xy)
 
         self._step_timing_last_ms["reward_shared_ms"] = float(reward_shared_ms)
         self._step_timing_last_ms["reward_goal_ms"] = float(reward_goal_ms)
         self._step_timing_last_ms["reward_geom_ms"] = float(reward_geom_ms)
+        self._step_timing_last_ms["reward_route_progress_ms"] = float(reward_route_progress_ms)
         self._step_timing_last_ms["reward_ttc_ms"] = float(reward_ttc_ms)
         self._step_timing_last_ms["reward_road_edge_ttc_ms"] = float(reward_road_edge_ttc_ms)
         self._step_timing_last_ms["reward_finalize_ms"] = float(reward_finalize_ms)
@@ -2423,6 +2493,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._pending_goal_done_mask.zero_()
             self._pending_collision_done_mask.zero_()
             self._pending_crash_done_mask.zero_()
+            self._pending_crash_too_low_mask.zero_()
+            self._pending_crash_too_far_mask.zero_()
+            self._pending_crash_bad_tilt_mask.zero_()
             self._pending_lane_forbidden_done_mask.zero_()
             self._step_timing_last_ms["reward_ms"] = (perf_counter() - reward_start) * 1000.0
             return rewards
@@ -2449,16 +2522,19 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             throttle_brake_conflict = self._semantic_actions[agent_idx, :, 0] * self._semantic_actions[agent_idx, :, 2]
             goal_shaping = 1.0 - torch.tanh(goal_distance / float(max(1.0, self.cfg.goal_radius_max_m * 0.5)))
             goal_bonus = self._pending_goal_done_mask[agent_idx].float() * float(self.cfg.reward_goal_bonus)
-            crash_penalty = self._pending_crash_done_mask[agent_idx].float() * float(self.cfg.reward_crash_penalty)
-            collision_penalty = (
-                self._pending_collision_done_mask[agent_idx].float() * float(self.cfg.reward_collision_penalty)
-            )
+            new_collision_event = self._pending_collision_done_mask[agent_idx] & (~self._collision_done_mask[agent_idx])
+            new_crash_event = self._pending_crash_done_mask[agent_idx] & (~self._crash_done_mask[agent_idx])
+            new_crash_too_low_event = self._pending_crash_too_low_mask[agent_idx] & (~self._crash_too_low_done_mask[agent_idx])
+            new_crash_too_far_event = self._pending_crash_too_far_mask[agent_idx] & (~self._crash_too_far_done_mask[agent_idx])
+            new_crash_bad_tilt_event = self._pending_crash_bad_tilt_mask[agent_idx] & (~self._crash_bad_tilt_done_mask[agent_idx])
+            crash_penalty = new_crash_event.float() * float(self.cfg.reward_crash_penalty)
+            collision_penalty = new_collision_event.float() * float(self.cfg.reward_collision_penalty)
             lane_center_touch = (
                 self._lane_touch_any_type_mask(agent_idx, self.cfg.reward_lane_center_types)
                 if bool(self.cfg.reward_lane_center_enable)
                 else torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             )
-            lane_forbidden_new = self._pending_lane_forbidden_done_mask[agent_idx]
+            lane_forbidden_new = self._pending_lane_forbidden_done_mask[agent_idx] & (~self._lane_forbidden_done_mask[agent_idx])
 
             if nearest_distances is not None:
                 proximity_violation = torch.relu(
@@ -2495,12 +2571,15 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
             self._previous_goal_distance[agent_idx] = goal_distance
             self._previous_raw_actions[agent_idx] = self._raw_actions[agent_idx]
-            new_done = (
-                self._pending_goal_done_mask[agent_idx]
-                | self._pending_collision_done_mask[agent_idx]
-                | self._pending_crash_done_mask[agent_idx]
-                | self._pending_lane_forbidden_done_mask[agent_idx]
-            )
+            if self._invincible_mode_enabled():
+                new_done = self._pending_goal_done_mask[agent_idx]
+            else:
+                new_done = (
+                    self._pending_goal_done_mask[agent_idx]
+                    | self._pending_collision_done_mask[agent_idx]
+                    | self._pending_crash_done_mask[agent_idx]
+                    | self._pending_lane_forbidden_done_mask[agent_idx]
+                )
             new_done_env_ids = torch.nonzero(new_done, as_tuple=False).squeeze(-1)
             if new_done_env_ids.numel() > 0:
                 self._park_done_vehicle(agent_idx, new_done_env_ids)
@@ -2511,13 +2590,19 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             )
             self._agent_done_mask[agent_idx] |= new_done
             self._goal_done_mask[agent_idx] |= self._pending_goal_done_mask[agent_idx]
-            self._collision_done_mask[agent_idx] |= self._pending_collision_done_mask[agent_idx]
-            self._crash_done_mask[agent_idx] |= self._pending_crash_done_mask[agent_idx]
-            self._lane_forbidden_done_mask[agent_idx] |= self._pending_lane_forbidden_done_mask[agent_idx]
+            self._collision_done_mask[agent_idx] |= new_collision_event
+            self._crash_done_mask[agent_idx] |= new_crash_event
+            self._crash_too_low_done_mask[agent_idx] |= new_crash_too_low_event
+            self._crash_too_far_done_mask[agent_idx] |= new_crash_too_far_event
+            self._crash_bad_tilt_done_mask[agent_idx] |= new_crash_bad_tilt_event
+            self._lane_forbidden_done_mask[agent_idx] |= lane_forbidden_new
 
         self._pending_goal_done_mask.zero_()
         self._pending_collision_done_mask.zero_()
         self._pending_crash_done_mask.zero_()
+        self._pending_crash_too_low_mask.zero_()
+        self._pending_crash_too_far_mask.zero_()
+        self._pending_crash_bad_tilt_mask.zero_()
         self._pending_lane_forbidden_done_mask.zero_()
         self._step_timing_last_ms["reward_ms"] = (perf_counter() - reward_start) * 1000.0
         return rewards
@@ -2554,7 +2639,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._sync_timing_device()
         done_state_start = perf_counter()
         _goal_pos_b, goal_distance_all = self._compute_goal_distance_all()
-        crash_masks = self._agent_crash_mask_all()
+        crash_too_low_all, crash_too_far_all, crash_bad_tilt_all = self._agent_crash_components_all()
+        crash_masks = crash_too_low_all | crash_too_far_all | crash_bad_tilt_all
         lane_forbidden_touch_all = (
             self._lane_touch_any_type_mask_all(self.cfg.reward_lane_forbidden_types)
             if bool(self.cfg.reward_lane_forbidden_enable)
@@ -2563,6 +2649,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._pending_goal_done_mask.zero_()
         self._pending_collision_done_mask.zero_()
         self._pending_crash_done_mask.zero_()
+        self._pending_crash_too_low_mask.zero_()
+        self._pending_crash_too_far_mask.zero_()
+        self._pending_crash_bad_tilt_mask.zero_()
         self._pending_lane_forbidden_done_mask.zero_()
         terminated = {}
         for agent_idx in range(self._num_agents):
@@ -2575,15 +2664,24 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             lane_forbidden_touch = lane_forbidden_touch_all[agent_idx]
             self._pending_goal_done_mask[agent_idx] = active_mask & goal_reached
             self._pending_crash_done_mask[agent_idx] = active_mask & crash_mask
+            self._pending_crash_too_low_mask[agent_idx] = active_mask & crash_too_low_all[agent_idx]
+            self._pending_crash_too_far_mask[agent_idx] = active_mask & crash_too_far_all[agent_idx]
+            self._pending_crash_bad_tilt_mask[agent_idx] = active_mask & crash_bad_tilt_all[agent_idx]
             self._pending_collision_done_mask[agent_idx] = active_mask & collision_mask
             self._pending_lane_forbidden_done_mask[agent_idx] = active_mask & lane_forbidden_touch
-            terminated[self._agent_ids[agent_idx]] = (
-                self._agent_done_mask[agent_idx]
-                | self._pending_goal_done_mask[agent_idx]
-                | self._pending_crash_done_mask[agent_idx]
-                | self._pending_collision_done_mask[agent_idx]
-                | self._pending_lane_forbidden_done_mask[agent_idx]
-            )
+            if self._invincible_mode_enabled():
+                terminated[self._agent_ids[agent_idx]] = (
+                    self._agent_done_mask[agent_idx]
+                    | self._pending_goal_done_mask[agent_idx]
+                )
+            else:
+                terminated[self._agent_ids[agent_idx]] = (
+                    self._agent_done_mask[agent_idx]
+                    | self._pending_goal_done_mask[agent_idx]
+                    | self._pending_crash_done_mask[agent_idx]
+                    | self._pending_collision_done_mask[agent_idx]
+                    | self._pending_lane_forbidden_done_mask[agent_idx]
+                )
         self._sync_timing_device()
         done_state_ms = (perf_counter() - done_state_start) * 1000.0
 
@@ -2602,8 +2700,14 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._step_timing_last_ms["done_ms"] = (perf_counter() - done_start) * 1000.0
         return terminated, time_outs
 
+    def consume_last_reset_world_episode_summaries(self) -> list[dict[str, Any]]:
+        payload = list(self._last_reset_world_episode_summaries)
+        self._last_reset_world_episode_summaries = []
+        return payload
+
     def _reset_idx(self, env_ids: Sequence[int] | None):
         self._lane_touch_mask_cache_valid = False
+        self._last_reset_world_episode_summaries = []
         self._sync_timing_device()
         reset_start = perf_counter()
         reset_write_ms = 0.0
@@ -2629,7 +2733,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if self._agent_ids:
             world_active_mask = self._spawned_agent_mask[:, env_ids]
             active_spawn_float = world_active_mask.float()
-            active_spawn_count = torch.clamp(active_spawn_float.sum(dim=1), min=1.0)
+            total_spawned_count = active_spawn_float.sum()
+            spawned_denom = torch.clamp(total_spawned_count, min=1.0)
 
             aggregate_log: dict[str, float | torch.Tensor] = {}
             reward_time_norm = max(1.0, float(self.max_episode_length_s))
@@ -2643,80 +2748,212 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 self._current_goal_distance[:, env_ids],
             )
             aggregate_log["Metrics/final_distance_to_goal"] = (
-                ((final_distance * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                (final_distance * active_spawn_float).sum() / spawned_denom
             ).item()
+            success_count_total = (self._goal_done_mask[:, env_ids].float() * active_spawn_float).sum()
+            crash_count_total = (self._crash_done_mask[:, env_ids].float() * active_spawn_float).sum()
+            crash_too_low_count_total = (self._crash_too_low_done_mask[:, env_ids].float() * active_spawn_float).sum()
+            crash_too_far_count_total = (self._crash_too_far_done_mask[:, env_ids].float() * active_spawn_float).sum()
+            crash_bad_tilt_count_total = (self._crash_bad_tilt_done_mask[:, env_ids].float() * active_spawn_float).sum()
+            collision_count_total = (self._collision_done_mask[:, env_ids].float() * active_spawn_float).sum()
+            lane_center_touch_count_total = (lane_center_touch_by_agent[:, env_ids].float() * active_spawn_float).sum()
+            lane_forbidden_done_count_total = (self._lane_forbidden_done_mask[:, env_ids].float() * active_spawn_float).sum()
             aggregate_log["Metrics/success_rate"] = (
-                ((self._goal_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                success_count_total / spawned_denom
             ).item()
             all_goals_reached = torch.all(self._goal_done_mask[:, env_ids] | (~world_active_mask), dim=0)
+            aggregate_log["Metrics/all_goals_reached_count"] = float(torch.count_nonzero(all_goals_reached).item())
             aggregate_log["Metrics/all_goals_reached_rate"] = torch.mean(all_goals_reached.float()).item()
             aggregate_log["Metrics/crash_rate"] = (
-                ((self._crash_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                crash_count_total / spawned_denom
+            ).item()
+            aggregate_log["Metrics/crash_too_low_count"] = float(crash_too_low_count_total.item())
+            aggregate_log["Metrics/crash_too_far_count"] = float(crash_too_far_count_total.item())
+            aggregate_log["Metrics/crash_bad_tilt_count"] = float(crash_bad_tilt_count_total.item())
+            aggregate_log["Metrics/crash_too_low_rate"] = (
+                crash_too_low_count_total / spawned_denom
+            ).item()
+            aggregate_log["Metrics/crash_too_far_rate"] = (
+                crash_too_far_count_total / spawned_denom
+            ).item()
+            aggregate_log["Metrics/crash_bad_tilt_rate"] = (
+                crash_bad_tilt_count_total / spawned_denom
             ).item()
             aggregate_log["Metrics/collision_rate"] = (
-                ((self._collision_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                collision_count_total / spawned_denom
             ).item()
-            aggregate_log["Metrics/collision_count"] = (
-                torch.count_nonzero(self._collision_done_mask[:, env_ids] & world_active_mask, dim=1).to(torch.float32).mean().item()
-            )
+            aggregate_log["Metrics/collision_count"] = float(collision_count_total.item())
             aggregate_log["Metrics/max_collision_force_n"] = (
-                ((collision_force_by_agent[:, env_ids] * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                (collision_force_by_agent[:, env_ids] * active_spawn_float).sum() / spawned_denom
             ).item()
             aggregate_log["Metrics/lane_center_touch_rate"] = (
-                ((lane_center_touch_by_agent[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                lane_center_touch_count_total / spawned_denom
             ).item()
-            aggregate_log["Metrics/lane_forbidden_done_count"] = (
-                torch.count_nonzero(self._lane_forbidden_done_mask[:, env_ids] & world_active_mask, dim=1)
-                .to(torch.float32)
-                .mean()
-                .item()
-            )
+            aggregate_log["Metrics/lane_center_touch_count"] = float(lane_center_touch_count_total.item())
+            aggregate_log["Metrics/lane_forbidden_done_count"] = float(lane_forbidden_done_count_total.item())
             aggregate_log["Metrics/lane_forbidden_done_rate"] = (
-                ((self._lane_forbidden_done_mask[:, env_ids].float() * active_spawn_float).sum(dim=1) / active_spawn_count).mean()
+                lane_forbidden_done_count_total / spawned_denom
             ).item()
+            aggregate_log["Metrics/controlled_spawn_count"] = float(total_spawned_count.item())
+
+            self._lifetime_controlled_spawn_count += float(total_spawned_count.item())
+            self._lifetime_success_count += float(success_count_total.item())
+            self._lifetime_all_goals_reached_count += float(torch.count_nonzero(all_goals_reached).item())
+            self._lifetime_crash_count += float(crash_count_total.item())
+            self._lifetime_crash_too_low_count += float(crash_too_low_count_total.item())
+            self._lifetime_crash_too_far_count += float(crash_too_far_count_total.item())
+            self._lifetime_crash_bad_tilt_count += float(crash_bad_tilt_count_total.item())
+            self._lifetime_collision_count += float(collision_count_total.item())
+            self._lifetime_lane_center_touch_count += float(lane_center_touch_count_total.item())
+            self._lifetime_lane_forbidden_count += float(lane_forbidden_done_count_total.item())
+
+            lifetime_spawned_denom = max(1.0, float(self._lifetime_controlled_spawn_count))
+            aggregate_log["LifetimeMetrics/controlled_spawn_count"] = float(self._lifetime_controlled_spawn_count)
+            aggregate_log["LifetimeMetrics/success_count"] = float(self._lifetime_success_count)
+            aggregate_log["LifetimeMetrics/all_goals_reached_count"] = float(self._lifetime_all_goals_reached_count)
+            aggregate_log["LifetimeMetrics/crash_count"] = float(self._lifetime_crash_count)
+            aggregate_log["LifetimeMetrics/crash_too_low_count"] = float(self._lifetime_crash_too_low_count)
+            aggregate_log["LifetimeMetrics/crash_too_far_count"] = float(self._lifetime_crash_too_far_count)
+            aggregate_log["LifetimeMetrics/crash_bad_tilt_count"] = float(self._lifetime_crash_bad_tilt_count)
+            aggregate_log["LifetimeMetrics/collision_count"] = float(self._lifetime_collision_count)
+            aggregate_log["LifetimeMetrics/lane_center_touch_count"] = float(self._lifetime_lane_center_touch_count)
+            aggregate_log["LifetimeMetrics/lane_forbidden_done_count"] = float(self._lifetime_lane_forbidden_count)
+            aggregate_log["LifetimeMetrics/success_rate"] = float(self._lifetime_success_count / lifetime_spawned_denom)
+            aggregate_log["LifetimeMetrics/crash_rate"] = float(self._lifetime_crash_count / lifetime_spawned_denom)
+            aggregate_log["LifetimeMetrics/crash_too_low_rate"] = float(
+                self._lifetime_crash_too_low_count / lifetime_spawned_denom
+            )
+            aggregate_log["LifetimeMetrics/crash_too_far_rate"] = float(
+                self._lifetime_crash_too_far_count / lifetime_spawned_denom
+            )
+            aggregate_log["LifetimeMetrics/crash_bad_tilt_rate"] = float(
+                self._lifetime_crash_bad_tilt_count / lifetime_spawned_denom
+            )
+            aggregate_log["LifetimeMetrics/collision_rate"] = float(self._lifetime_collision_count / lifetime_spawned_denom)
+            aggregate_log["LifetimeMetrics/lane_center_touch_rate"] = float(
+                self._lifetime_lane_center_touch_count / lifetime_spawned_denom
+            )
+            aggregate_log["LifetimeMetrics/lane_forbidden_done_rate"] = float(
+                self._lifetime_lane_forbidden_count / lifetime_spawned_denom
+            )
             self.extras[self._agent_ids[0]]["log"].update(aggregate_log)
 
         if self._agent_ids:
             world_spawned_mask = self._spawned_agent_mask[:, env_ids]
             world_spawned_count = world_spawned_mask.sum(dim=0).to(dtype=torch.float32)
             world_success_mask = self._goal_done_mask[:, env_ids] & world_spawned_mask
-            world_collision_mask = self._collision_done_mask[:, env_ids] & world_spawned_mask & (~world_success_mask)
-            world_lane_forbidden_mask = (
-                self._lane_forbidden_done_mask[:, env_ids]
-                & world_spawned_mask
-                & (~world_success_mask)
-                & (~world_collision_mask)
-            )
-            world_crash_mask = (
-                self._crash_done_mask[:, env_ids]
-                & world_spawned_mask
-                & (~world_success_mask)
-                & (~world_collision_mask)
-                & (~world_lane_forbidden_mask)
-            )
+            if self._invincible_mode_enabled():
+                world_collision_mask = self._collision_done_mask[:, env_ids] & world_spawned_mask
+                world_lane_forbidden_mask = self._lane_forbidden_done_mask[:, env_ids] & world_spawned_mask
+                world_crash_mask = self._crash_done_mask[:, env_ids] & world_spawned_mask
+            else:
+                world_collision_mask = self._collision_done_mask[:, env_ids] & world_spawned_mask & (~world_success_mask)
+                world_lane_forbidden_mask = (
+                    self._lane_forbidden_done_mask[:, env_ids]
+                    & world_spawned_mask
+                    & (~world_success_mask)
+                    & (~world_collision_mask)
+                )
+                world_crash_mask = (
+                    self._crash_done_mask[:, env_ids]
+                    & world_spawned_mask
+                    & (~world_success_mask)
+                    & (~world_collision_mask)
+                    & (~world_lane_forbidden_mask)
+                )
             world_success_count = world_success_mask.sum(dim=0).to(dtype=torch.float32)
             world_collision_count = world_collision_mask.sum(dim=0).to(dtype=torch.float32)
             world_lane_forbidden_count = world_lane_forbidden_mask.sum(dim=0).to(dtype=torch.float32)
             world_crash_count = world_crash_mask.sum(dim=0).to(dtype=torch.float32)
-            world_active_not_done_count = (
-                world_spawned_count
-                - world_success_count
-                - world_collision_count
-                - world_lane_forbidden_count
-                - world_crash_count
-            ).clamp_min(0.0)
-            spawned_denom = torch.clamp(world_spawned_count, min=1.0)
+            world_crash_too_low_count = (self._crash_too_low_done_mask[:, env_ids] & world_spawned_mask).sum(dim=0).to(dtype=torch.float32)
+            world_crash_too_far_count = (self._crash_too_far_done_mask[:, env_ids] & world_spawned_mask).sum(dim=0).to(dtype=torch.float32)
+            world_crash_bad_tilt_count = (self._crash_bad_tilt_done_mask[:, env_ids] & world_spawned_mask).sum(dim=0).to(dtype=torch.float32)
+            if self._invincible_mode_enabled():
+                world_active_not_done_count = (world_spawned_count - world_success_count).clamp_min(0.0)
+            else:
+                world_active_not_done_count = (
+                    world_spawned_count
+                    - world_success_count
+                    - world_collision_count
+                    - world_lane_forbidden_count
+                    - world_crash_count
+                ).clamp_min(0.0)
+            world_final_distance = torch.where(
+                world_spawned_count > 0.0,
+                (final_distance * active_spawn_float).sum(dim=0) / torch.clamp(world_spawned_count, min=1.0),
+                torch.zeros_like(world_spawned_count),
+            )
+            total_world_spawned_count = world_spawned_count.sum()
+            world_spawned_denom = torch.clamp(total_world_spawned_count, min=1.0)
             world_log = self.extras[self._agent_ids[0]]["log"]
-            world_log["WorldEpisode/spawned_count"] = world_spawned_count
-            world_log["WorldEpisode/success_count"] = world_success_count
-            world_log["WorldEpisode/collision_count"] = world_collision_count
-            world_log["WorldEpisode/lane_forbidden_count"] = world_lane_forbidden_count
-            world_log["WorldEpisode/crash_count"] = world_crash_count
-            world_log["WorldEpisode/active_not_done_count"] = world_active_not_done_count
-            world_log["WorldEpisode/success_rate"] = world_success_count / spawned_denom
-            world_log["WorldEpisode/collision_rate"] = world_collision_count / spawned_denom
-            world_log["WorldEpisode/lane_forbidden_rate"] = world_lane_forbidden_count / spawned_denom
-            world_log["WorldEpisode/crash_rate"] = world_crash_count / spawned_denom
+            world_log["WorldEpisode/spawned_count"] = float(total_world_spawned_count.item())
+            world_log["WorldEpisode/success_count"] = float(world_success_count.sum().item())
+            world_log["WorldEpisode/collision_count"] = float(world_collision_count.sum().item())
+            world_log["WorldEpisode/lane_forbidden_count"] = float(world_lane_forbidden_count.sum().item())
+            world_log["WorldEpisode/crash_count"] = float(world_crash_count.sum().item())
+            world_log["WorldEpisode/crash_too_low_count"] = float(world_crash_too_low_count.sum().item())
+            world_log["WorldEpisode/crash_too_far_count"] = float(world_crash_too_far_count.sum().item())
+            world_log["WorldEpisode/crash_bad_tilt_count"] = float(world_crash_bad_tilt_count.sum().item())
+            world_log["WorldEpisode/active_not_done_count"] = float(world_active_not_done_count.sum().item())
+            world_log["WorldEpisode/success_rate"] = float((world_success_count.sum() / world_spawned_denom).item())
+            world_log["WorldEpisode/collision_rate"] = float((world_collision_count.sum() / world_spawned_denom).item())
+            world_log["WorldEpisode/lane_forbidden_rate"] = float((world_lane_forbidden_count.sum() / world_spawned_denom).item())
+            world_log["WorldEpisode/crash_rate"] = float((world_crash_count.sum() / world_spawned_denom).item())
+            world_log["WorldEpisode/crash_too_low_rate"] = float((world_crash_too_low_count.sum() / world_spawned_denom).item())
+            world_log["WorldEpisode/crash_too_far_rate"] = float((world_crash_too_far_count.sum() / world_spawned_denom).item())
+            world_log["WorldEpisode/crash_bad_tilt_rate"] = float((world_crash_bad_tilt_count.sum() / world_spawned_denom).item())
+            world_log["LifetimeEpisode/spawned_count"] = float(self._lifetime_controlled_spawn_count)
+            world_log["LifetimeEpisode/success_count"] = float(self._lifetime_success_count)
+            world_log["LifetimeEpisode/collision_count"] = float(self._lifetime_collision_count)
+            world_log["LifetimeEpisode/lane_forbidden_count"] = float(self._lifetime_lane_forbidden_count)
+            world_log["LifetimeEpisode/crash_count"] = float(self._lifetime_crash_count)
+            world_log["LifetimeEpisode/crash_too_low_count"] = float(self._lifetime_crash_too_low_count)
+            world_log["LifetimeEpisode/crash_too_far_count"] = float(self._lifetime_crash_too_far_count)
+            world_log["LifetimeEpisode/crash_bad_tilt_count"] = float(self._lifetime_crash_bad_tilt_count)
+            world_log["LifetimeEpisode/success_rate"] = float(self._lifetime_success_count / lifetime_spawned_denom)
+            world_log["LifetimeEpisode/collision_rate"] = float(self._lifetime_collision_count / lifetime_spawned_denom)
+            world_log["LifetimeEpisode/lane_forbidden_rate"] = float(self._lifetime_lane_forbidden_count / lifetime_spawned_denom)
+            world_log["LifetimeEpisode/crash_rate"] = float(self._lifetime_crash_count / lifetime_spawned_denom)
+            world_log["LifetimeEpisode/crash_too_low_rate"] = float(self._lifetime_crash_too_low_count / lifetime_spawned_denom)
+            world_log["LifetimeEpisode/crash_too_far_rate"] = float(self._lifetime_crash_too_far_count / lifetime_spawned_denom)
+            world_log["LifetimeEpisode/crash_bad_tilt_rate"] = float(self._lifetime_crash_bad_tilt_count / lifetime_spawned_denom)
+
+            env_id_list = [int(v) for v in env_ids.detach().cpu().tolist()]
+            world_episode_length_steps = self.episode_length_buf[env_ids].detach().to(dtype=torch.long).cpu().tolist()
+            for local_idx, env_id in enumerate(env_id_list):
+                scene_json_path = ""
+                scene_json_name = ""
+                world_index = int(env_id)
+                if self._scene_factory_scene_json_paths_by_env is not None and env_id < len(self._scene_factory_scene_json_paths_by_env):
+                    scene_json_path = str(self._scene_factory_scene_json_paths_by_env[env_id])
+                    scene_json_name = Path(scene_json_path).name
+                if self._scene_factory_specs_by_env is not None and env_id < len(self._scene_factory_specs_by_env):
+                    world_index = int(self._scene_factory_specs_by_env[env_id].world_index)
+                spawned_count = float(world_spawned_count[local_idx].item())
+                denom = max(1.0, spawned_count)
+                self._last_reset_world_episode_summaries.append(
+                    {
+                        "env_index": int(env_id),
+                        "world_index": int(world_index),
+                        "scene_json_path": scene_json_path,
+                        "scene_json_name": scene_json_name,
+                        "episode_length_steps": int(world_episode_length_steps[local_idx]),
+                        "spawned_count": spawned_count,
+                        "success_count": float(world_success_count[local_idx].item()),
+                        "collision_count": float(world_collision_count[local_idx].item()),
+                        "lane_forbidden_count": float(world_lane_forbidden_count[local_idx].item()),
+                        "crash_count": float(world_crash_count[local_idx].item()),
+                        "crash_too_low_count": float(world_crash_too_low_count[local_idx].item()),
+                        "crash_too_far_count": float(world_crash_too_far_count[local_idx].item()),
+                        "crash_bad_tilt_count": float(world_crash_bad_tilt_count[local_idx].item()),
+                        "active_not_done_count": float(world_active_not_done_count[local_idx].item()),
+                        "success_rate": float(world_success_count[local_idx].item() / denom),
+                        "collision_rate": float(world_collision_count[local_idx].item() / denom),
+                        "lane_forbidden_rate": float(world_lane_forbidden_count[local_idx].item() / denom),
+                        "crash_rate": float(world_crash_count[local_idx].item() / denom),
+                        "mean_final_distance_to_goal": float(world_final_distance[local_idx].item()),
+                    }
+                )
         self._sync_timing_device()
         self._step_timing_last_ms["reset_log_ms"] = (perf_counter() - reset_log_start) * 1000.0
 
@@ -2798,10 +3035,16 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._goal_done_mask[agent_idx, env_ids] = False
             self._collision_done_mask[agent_idx, env_ids] = False
             self._crash_done_mask[agent_idx, env_ids] = False
+            self._crash_too_low_done_mask[agent_idx, env_ids] = False
+            self._crash_too_far_done_mask[agent_idx, env_ids] = False
+            self._crash_bad_tilt_done_mask[agent_idx, env_ids] = False
             self._lane_forbidden_done_mask[agent_idx, env_ids] = False
             self._pending_goal_done_mask[agent_idx, env_ids] = False
             self._pending_collision_done_mask[agent_idx, env_ids] = False
             self._pending_crash_done_mask[agent_idx, env_ids] = False
+            self._pending_crash_too_low_mask[agent_idx, env_ids] = False
+            self._pending_crash_too_far_mask[agent_idx, env_ids] = False
+            self._pending_crash_bad_tilt_mask[agent_idx, env_ids] = False
             self._pending_lane_forbidden_done_mask[agent_idx, env_ids] = False
             self._joint_effort_targets[agent_idx][env_ids] = 0.0
             self._external_forces[agent_idx][env_ids] = 0.0
@@ -2852,11 +3095,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     goal_local_xyz = self._scene_factory_spawn_goal_local[env_ids[valid_rows], agent_idx]
                     root_pose[valid_rows, 0] = env_origins[valid_rows, 0] + start_local_xyz[:, 0] + spawn_jitter[:, 0]
                     root_pose[valid_rows, 1] = env_origins[valid_rows, 1] + start_local_xyz[:, 1] + spawn_jitter[:, 1]
-                    root_pose[valid_rows, 2] = (
-                        env_origins[valid_rows, 2]
-                        + float(self.cfg.spawn_height_m)
-                        + start_local_xyz[:, 2]
-                    )
+                    root_pose[valid_rows, 2] = env_origins[valid_rows, 2] + float(self.cfg.spawn_height_m)
+                    if not bool(self._scene_factory_ignore_dataset_spawn_z):
+                        root_pose[valid_rows, 2] += start_local_xyz[:, 2]
                     yaw[valid_rows] = start_yaw + sample_uniform(
                         -float(self.cfg.spawn_yaw_noise_rad),
                         float(self.cfg.spawn_yaw_noise_rad),
@@ -2864,10 +3105,18 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                         self.device,
                     )
                     goal_local = goal_local_xyz.clone()
-                    goal_local[:, 2] = torch.maximum(
-                        goal_local[:, 2],
-                        torch.full((int(valid_rows.numel()),), float(self.cfg.goal_height_m), dtype=torch.float32, device=self.device),
-                    )
+                    if bool(self._scene_factory_ignore_dataset_spawn_z):
+                        goal_local[:, 2] = float(self.cfg.goal_height_m)
+                    else:
+                        goal_local[:, 2] = torch.maximum(
+                            goal_local[:, 2],
+                            torch.full(
+                                (int(valid_rows.numel()),),
+                                float(self.cfg.goal_height_m),
+                                dtype=torch.float32,
+                                device=self.device,
+                            ),
+                        )
                     goal_pos_w[valid_rows] = env_origins[valid_rows] + goal_local
             else:
                 formation_angle = phase + (2.0 * math.pi * agent_idx / max(1, self._num_agents))
@@ -2928,6 +3177,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 dim=1,
             )
             self._current_goal_distance[agent_idx, env_ids] = self._previous_goal_distance[agent_idx, env_ids]
+            self._previous_root_pos_xy[agent_idx, env_ids] = root_pose[:, :2] - env_origins[:, :2]
             self._sync_timing_device()
             reset_pose_goal_ms += (perf_counter() - reset_pose_goal_start) * 1000.0
 
@@ -2937,6 +3187,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 inactive_env_ids = env_ids[~spawned_mask]
                 self._previous_goal_distance[agent_idx, inactive_env_ids] = 0.0
                 self._current_goal_distance[agent_idx, inactive_env_ids] = 0.0
+                self._previous_root_pos_xy[agent_idx, inactive_env_ids] = 0.0
                 self._agent_done_mask[agent_idx, inactive_env_ids] = True
             self._sync_timing_device()
             reset_pose_inactive_ms += (perf_counter() - reset_pose_inactive_start) * 1000.0
@@ -3054,6 +3305,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     f"reward_shared_ms={self._step_timing_last_ms['reward_shared_ms']:.2f} "
                     f"reward_goal_ms={self._step_timing_last_ms['reward_goal_ms']:.2f} "
                     f"reward_geom_ms={self._step_timing_last_ms['reward_geom_ms']:.2f} "
+                    f"reward_route_progress_ms={self._step_timing_last_ms['reward_route_progress_ms']:.2f} "
                     f"reward_ttc_ms={self._step_timing_last_ms['reward_ttc_ms']:.2f} "
                     f"reward_road_edge_ttc_ms={self._step_timing_last_ms['reward_road_edge_ttc_ms']:.2f} "
                     f"reward_finalize_ms={self._step_timing_last_ms['reward_finalize_ms']:.2f} "

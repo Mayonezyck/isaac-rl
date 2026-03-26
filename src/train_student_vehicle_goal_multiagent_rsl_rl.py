@@ -238,6 +238,7 @@ parser.add_argument("--reward_choco_geom_lane_per_step", type=float, default=flo
 parser.add_argument("--reward_choco_geom_lane_tolerance_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_tolerance_m", 1.75)))
 parser.add_argument("--reward_choco_geom_lane_heading_weight", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_heading_weight", 0.8)))
 parser.add_argument("--reward_choco_geom_lane_min_alignment", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_min_alignment", 0.35)))
+parser.add_argument("--reward_choco_geom_route_progress_weight", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_route_progress_weight", 0.0)))
 parser.add_argument("--reward_choco_geom_offroad_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_geom_offroad_enable", True)))
 parser.add_argument("--reward_choco_geom_offroad_lateral_threshold_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_offroad_lateral_threshold_m", 3.25)))
 parser.add_argument("--reward_choco_geom_offroad_distance_threshold_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_offroad_distance_threshold_m", 6.0)))
@@ -258,6 +259,12 @@ parser.add_argument(
     help="Path to the tuned student config JSON. Empty uses the environment default.",
 )
 parser.add_argument("--spawn_height_m", type=float, default=float(_cfg_value(file_cfg, "env", "spawn_height_m", 1.6)), help="Vehicle spawn height above each env origin.")
+parser.add_argument(
+    "--spawn_yaw_noise_rad",
+    type=float,
+    default=float(_cfg_value(file_cfg, "env", "spawn_yaw_noise_rad", 0.5)),
+    help="Uniform random yaw perturbation added at spawn.",
+)
 parser.add_argument(
     "--decimation",
     type=int,
@@ -314,15 +321,40 @@ parser.add_argument(
 )
 parser.add_argument(
     "--test_mode",
-    choices=("none", "collision_test", "scene_factory_collision_test", "scene_factory_multiworld_random_steer_test"),
+    choices=(
+        "none",
+        "collision_test",
+        "scene_factory_collision_test",
+        "scene_factory_multiworld_random_steer_test",
+        "scene_factory_policy_eval",
+    ),
     default=str(_cfg_value(file_cfg, "test", "mode", "none")),
     help=(
         "Optional deterministic debug rollout mode. "
         "'collision_test' runs a flat-world head-on crash. "
         "'scene_factory_collision_test' runs the same head-on crash with SceneFactory roads enabled. "
         "'scene_factory_multiworld_random_steer_test' runs multiple SceneFactory worlds with full throttle and "
-        "random steering."
+        "random steering. "
+        "'scene_factory_policy_eval' loads a trained checkpoint and runs one deterministic episode per world."
     ),
+)
+parser.add_argument(
+    "--checkpoint_path",
+    type=str,
+    default=str(_cfg_value(file_cfg, "test", "checkpoint_path", "")),
+    help="Checkpoint path used by scene_factory_policy_eval.",
+)
+parser.add_argument(
+    "--eval_max_steps",
+    type=int,
+    default=int(_cfg_value(file_cfg, "test", "max_steps", 0)),
+    help="Optional hard cap on evaluation steps. 0 uses one full episode horizon.",
+)
+parser.add_argument(
+    "--invincible",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "test", "invincible", False)),
+    help="If enabled, crash/collision/forbidden-lane events do not mark vehicles done or clear them out.",
 )
 parser.add_argument("--env_spacing", type=float, default=float(_cfg_value(file_cfg, "env", "env_spacing", 18.0)), help="Spacing between vectorized environments.")
 parser.add_argument("--start_radius_m", type=float, default=float(_cfg_value(file_cfg, "env", "start_radius_m", 0.5)), help="Shared per-world spawn offset radius.")
@@ -346,6 +378,18 @@ parser.add_argument(
     type=float,
     default=float(_cfg_value(file_cfg, "env", "goal_reached_threshold_m", 0.85)),
     help="Distance threshold for goal completion.",
+)
+parser.add_argument(
+    "--fall_height_threshold_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "env", "fall_height_threshold_m", 0.18)),
+    help="Crash threshold on root height relative to env origin.",
+)
+parser.add_argument(
+    "--bad_tilt_gravity_threshold",
+    type=float,
+    default=float(_cfg_value(file_cfg, "env", "bad_tilt_gravity_threshold", -0.15)),
+    help="Crash threshold on projected gravity z in body frame.",
 )
 parser.add_argument(
     "--max_distance_from_origin_m",
@@ -401,6 +445,8 @@ parser.add_argument("--num_mini_batches", type=int, default=int(_cfg_value(file_
 parser.add_argument("--entropy_coef", type=float, default=float(_cfg_value(file_cfg, "runner", "entropy_coef", 0.01)), help="PPO entropy coefficient.")
 parser.add_argument("--clip_param", type=float, default=float(_cfg_value(file_cfg, "runner", "clip_param", 0.2)), help="PPO clip parameter.")
 parser.add_argument("--desired_kl", type=float, default=float(_cfg_value(file_cfg, "runner", "desired_kl", 0.01)), help="Target KL for adaptive LR schedule.")
+parser.add_argument("--gamma", type=float, default=float(_cfg_value(file_cfg, "runner", "gamma", 0.99)), help="PPO discount factor.")
+parser.add_argument("--gae_lambda", type=float, default=float(_cfg_value(file_cfg, "runner", "gae_lambda", 0.95)), help="PPO GAE lambda.")
 parser.add_argument("--experiment_name", type=str, default=str(_cfg_value(file_cfg, "runner", "experiment_name", "student_vehicle_goal_multiagent")), help="Experiment name.")
 parser.add_argument("--run_name", type=str, default=str(_cfg_value(file_cfg, "runner", "run_name", "smoke")), help="Optional run-name suffix.")
 parser.add_argument(
@@ -615,6 +661,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.viewer.eye = (max(20.0, viewer_extent), max(20.0, viewer_extent), max(16.0, 0.8 * viewer_extent))
     cfg.viewer.lookat = (0.0, 0.0, 0.0)
     cfg.spawn_height_m = float(args_cli.spawn_height_m)
+    cfg.spawn_yaw_noise_rad = float(args_cli.spawn_yaw_noise_rad)
     cfg.ground_mode = str(args_cli.ground_mode)
     cfg.use_scene_factory_roads = bool(args_cli.use_scene_factory_roads)
     cfg.scene_factory_config_path = str(Path(args_cli.scene_factory_config).expanduser().resolve())
@@ -649,6 +696,8 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.goal_radius_min_m = float(args_cli.goal_radius_min_m)
     cfg.goal_radius_max_m = float(args_cli.goal_radius_max_m)
     cfg.goal_reached_threshold_m = float(args_cli.goal_reached_threshold_m)
+    cfg.fall_height_threshold_m = float(args_cli.fall_height_threshold_m)
+    cfg.bad_tilt_gravity_threshold = float(args_cli.bad_tilt_gravity_threshold)
     cfg.max_distance_from_origin_m = float(args_cli.max_distance_from_origin_m)
     cfg.agent_neighbor_obs_scale_m = float(args_cli.agent_neighbor_obs_scale_m)
     cfg.agent_collision_warmup_steps = int(args_cli.agent_collision_warmup_steps)
@@ -690,6 +739,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.reward_choco_geom_lane_tolerance_m = float(args_cli.reward_choco_geom_lane_tolerance_m)
     cfg.reward_choco_geom_lane_heading_weight = float(args_cli.reward_choco_geom_lane_heading_weight)
     cfg.reward_choco_geom_lane_min_alignment = float(args_cli.reward_choco_geom_lane_min_alignment)
+    cfg.reward_choco_geom_route_progress_weight = float(args_cli.reward_choco_geom_route_progress_weight)
     cfg.reward_choco_geom_offroad_enable = bool(args_cli.reward_choco_geom_offroad_enable)
     cfg.reward_choco_geom_offroad_lateral_threshold_m = float(args_cli.reward_choco_geom_offroad_lateral_threshold_m)
     cfg.reward_choco_geom_offroad_distance_threshold_m = float(args_cli.reward_choco_geom_offroad_distance_threshold_m)
@@ -704,6 +754,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.reward_choco_road_edge_ttc_hard_min_ttc = float(args_cli.reward_choco_road_edge_ttc_hard_min_ttc)
     cfg.reward_choco_road_edge_ttc_radius_m = float(args_cli.reward_choco_road_edge_ttc_radius_m)
     cfg.test_mode = str(args_cli.test_mode).strip().lower()
+    cfg.invincible = bool(args_cli.invincible)
     cfg.collision_test_post_collision_steps = int(_cfg_value(file_cfg, "test", "post_collision_steps", 120))
     cfg.collision_test_post_collision_throttle = float(
         _cfg_value(file_cfg, "test", "post_collision_throttle", 0.0)
@@ -767,6 +818,10 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
                 "for headless vehicle video capture."
             )
         cfg.sim.use_fabric = True if bool(args_cli.video) else bool(args_cli.use_fabric)
+    elif cfg.test_mode == "scene_factory_policy_eval":
+        if not cfg.use_scene_factory_roads:
+            print("[INFO][SceneFactory] scene_factory_policy_eval enables SceneFactory roads.")
+        cfg.use_scene_factory_roads = True
     configure_multi_agent_spaces(cfg, int(args_cli.num_agents_per_env))
     return cfg
 
@@ -804,8 +859,8 @@ def _build_runner_cfg(sim_device: str) -> RslRlOnPolicyRunnerCfg:
             num_mini_batches=int(args_cli.num_mini_batches),
             learning_rate=float(args_cli.learning_rate),
             schedule="adaptive",
-            gamma=0.99,
-            lam=0.95,
+            gamma=float(args_cli.gamma),
+            lam=float(args_cli.gae_lambda),
             desired_kl=float(args_cli.desired_kl),
             max_grad_norm=1.0,
         ),
@@ -934,6 +989,7 @@ def _build_resolved_config(
             "choco_geom_lane_tolerance_m": float(env_cfg.reward_choco_geom_lane_tolerance_m),
             "choco_geom_lane_heading_weight": float(env_cfg.reward_choco_geom_lane_heading_weight),
             "choco_geom_lane_min_alignment": float(env_cfg.reward_choco_geom_lane_min_alignment),
+            "choco_geom_route_progress_weight": float(env_cfg.reward_choco_geom_route_progress_weight),
             "choco_geom_offroad_enable": bool(env_cfg.reward_choco_geom_offroad_enable),
             "choco_geom_offroad_lateral_threshold_m": float(env_cfg.reward_choco_geom_offroad_lateral_threshold_m),
             "choco_geom_offroad_distance_threshold_m": float(env_cfg.reward_choco_geom_offroad_distance_threshold_m),
@@ -951,6 +1007,9 @@ def _build_resolved_config(
         "policy": policy_cfg,
         "test": {
             "mode": str(env_cfg.test_mode),
+            "checkpoint_path": str(Path(args_cli.checkpoint_path).expanduser().resolve()) if str(args_cli.checkpoint_path).strip() else "",
+            "max_steps": int(args_cli.eval_max_steps),
+            "invincible": bool(args_cli.invincible),
             "collision_force_threshold_n": float(env_cfg.agent_collision_force_threshold_n),
             "post_collision_steps": int(env_cfg.collision_test_post_collision_steps),
             "post_collision_throttle": float(env_cfg.collision_test_post_collision_throttle),
@@ -984,6 +1043,8 @@ def _build_resolved_config(
             "entropy_coef": float(runner_cfg.algorithm.entropy_coef),
             "clip_param": float(runner_cfg.algorithm.clip_param),
             "desired_kl": float(runner_cfg.algorithm.desired_kl),
+            "gamma": float(runner_cfg.algorithm.gamma),
+            "gae_lambda": float(runner_cfg.algorithm.lam),
         },
         "video": {
             "enabled": bool(args_cli.video),
@@ -1035,6 +1096,9 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "scene_factory_world_selection_mode": env_cfg.scene_factory_world_selection_mode,
             "scene_factory_random_world_seed": env_cfg.scene_factory_random_world_seed,
             "test_mode": env_cfg.test_mode,
+            "checkpoint_path": str(Path(args_cli.checkpoint_path).expanduser().resolve()) if str(args_cli.checkpoint_path).strip() else "",
+            "eval_max_steps": int(args_cli.eval_max_steps),
+            "invincible": bool(args_cli.invincible),
             "collision_test_post_collision_steps": env_cfg.collision_test_post_collision_steps,
             "collision_test_post_collision_throttle": env_cfg.collision_test_post_collision_throttle,
             "collision_test_post_collision_steering": env_cfg.collision_test_post_collision_steering,
@@ -1424,6 +1488,13 @@ class AgentSlotSharedPolicyVecEnv(VecEnv):
         )
         wrapper_total_ms = (perf_counter() - step_start) * 1000.0
         wrapper_aggregate_ms = (perf_counter() - extras_agg_start) * 1000.0
+        controlled_agent_count = float(
+            self.env._spawned_agent_mask.sum().item()
+            if hasattr(self.env, "_spawned_agent_mask")
+            else self.num_envs
+        )
+        env_steps_per_s = 1000.0 / max(wrapper_total_ms, 1.0e-6)
+        controlled_agent_steps_per_s = controlled_agent_count * env_steps_per_s
         if bool(getattr(self.env.cfg, "step_timing_log_enable", False)):
             log = merged_extras.get("log") if isinstance(merged_extras, dict) else None
             if not isinstance(log, dict):
@@ -1433,6 +1504,10 @@ class AgentSlotSharedPolicyVecEnv(VecEnv):
                 merged_extras["log"] = log
             log["Perf/wrapper_step_total_ms"] = float(wrapper_total_ms)
             log["Perf/wrapper_aggregate_extras_ms"] = float(wrapper_aggregate_ms)
+            log["Perf/controlled_agent_count"] = float(controlled_agent_count)
+            log["Perf/env_steps_per_s"] = float(env_steps_per_s)
+            log["Perf/controlled_agent_steps_per_s"] = float(controlled_agent_steps_per_s)
+            log["Perf/CASPS"] = float(controlled_agent_steps_per_s)
         if not bool(getattr(self.env.cfg, "is_finite_horizon", True)):
             merged_extras["time_outs"] = flat_truncated
 
@@ -1825,6 +1900,185 @@ def _run_scene_factory_multiworld_random_steer_test(env: StudentVehicleMultiAgen
     )
 
 
+def _run_scene_factory_policy_eval(
+    base_env: StudentVehicleMultiAgentGoalEnv,
+    env,
+    runner: OnPolicyRunner,
+    run_dir: Path,
+) -> None:
+    import imageio.v2 as imageio
+
+    checkpoint_path_raw = str(args_cli.checkpoint_path).strip()
+    if not checkpoint_path_raw:
+        raise ValueError(
+            "scene_factory_policy_eval requires --checkpoint_path or test.checkpoint_path in the config."
+        )
+    checkpoint_path = Path(checkpoint_path_raw).expanduser().resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    test_mode_name = str(base_env.cfg.test_mode).strip().lower() or "scene_factory_policy_eval"
+    steps_path = run_dir / f"{test_mode_name}_steps.jsonl"
+    worlds_path = run_dir / f"{test_mode_name}_worlds.jsonl"
+    summary_path = run_dir / f"{test_mode_name}_summary.json"
+    video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_writer = None
+    if bool(args_cli.video):
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+
+    def _write_frame() -> None:
+        if video_writer is None:
+            return
+        frame = base_env.capture_fixed_camera_frame()
+        if frame is not None:
+            video_writer.append_data(frame)
+
+    print(
+        f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout from checkpoint {checkpoint_path}.",
+        flush=True,
+    )
+    if bool(getattr(base_env.cfg, "invincible", False)):
+        print(
+            "[INFO][SceneFactory] scene_factory_policy_eval invincible=true: "
+            "collision/crash/forbidden-lane events are logged but do not terminate or clear vehicles.",
+            flush=True,
+        )
+
+    runner.load(str(checkpoint_path), load_optimizer=False, map_location=str(runner.device))
+    inference_policy = runner.get_inference_policy(device=str(runner.device))
+
+    base_env.consume_last_reset_world_episode_summaries()
+    obs, extras = env.reset()
+    base_env.consume_last_reset_world_episode_summaries()
+    base_env.episode_length_buf.zero_()
+    if hasattr(base_env, "_steps_since_reset_buf"):
+        base_env._steps_since_reset_buf.zero_()
+    if hasattr(env, "_slot_episode_length_buf"):
+        env._slot_episode_length_buf.zero_()
+    if hasattr(env, "_slot_dead_mask") and hasattr(env, "_flatten_agent_done_mask"):
+        env._slot_dead_mask = env._flatten_agent_done_mask()
+
+    completed_worlds: dict[int, dict[str, Any]] = {}
+    max_steps = int(args_cli.eval_max_steps)
+    if max_steps <= 0:
+        max_steps = int(base_env.max_episode_length) + 1
+    frames_written = 0
+    _write_frame()
+    if bool(args_cli.video):
+        frames_written += 1
+
+    with steps_path.open("w", encoding="utf-8") as steps_handle, worlds_path.open("w", encoding="utf-8") as worlds_handle:
+        with torch.inference_mode():
+            for step in range(max_steps):
+                actions = inference_policy(obs)
+                step_output = env.step(actions)
+                if len(step_output) == 4:
+                    obs, rewards, dones, extras = step_output
+                else:
+                    raise RuntimeError(
+                        f"Unexpected env.step output length for {test_mode_name}: {len(step_output)}"
+                    )
+
+                _write_frame()
+                if bool(args_cli.video):
+                    frames_written += 1
+
+                new_world_summaries = base_env.consume_last_reset_world_episode_summaries()
+                new_completed_envs: list[int] = []
+                for world_summary in new_world_summaries:
+                    env_index = int(world_summary.get("env_index", -1))
+                    if env_index < 0 or env_index in completed_worlds:
+                        continue
+                    completed_worlds[env_index] = dict(world_summary)
+                    new_completed_envs.append(env_index)
+                    worlds_handle.write(json.dumps(world_summary) + "\n")
+
+                if isinstance(rewards, torch.Tensor):
+                    mean_reward = float(rewards.detach().float().mean().item())
+                else:
+                    mean_reward = float(torch.as_tensor(rewards, dtype=torch.float32).mean().item())
+                if isinstance(dones, torch.Tensor):
+                    done_count = int(dones.detach().to(dtype=torch.int64).sum().item())
+                else:
+                    done_count = int(torch.as_tensor(dones, dtype=torch.int64).sum().item())
+
+                step_record = {
+                    "step": int(step),
+                    "mean_slot_reward": float(mean_reward),
+                    "done_slot_count": int(done_count),
+                    "completed_world_count": int(len(completed_worlds)),
+                    "new_completed_env_indices": [int(v) for v in sorted(new_completed_envs)],
+                }
+                steps_handle.write(json.dumps(step_record) + "\n")
+
+                if len(completed_worlds) >= int(base_env.num_envs):
+                    break
+
+    if video_writer is not None:
+        video_writer.close()
+
+    completed_items = [completed_worlds[idx] for idx in sorted(completed_worlds.keys())]
+    total_spawned = float(sum(float(item.get("spawned_count", 0.0)) for item in completed_items))
+    total_success = float(sum(float(item.get("success_count", 0.0)) for item in completed_items))
+    total_collision = float(sum(float(item.get("collision_count", 0.0)) for item in completed_items))
+    total_lane_forbidden = float(sum(float(item.get("lane_forbidden_count", 0.0)) for item in completed_items))
+    total_crash = float(sum(float(item.get("crash_count", 0.0)) for item in completed_items))
+    total_crash_too_low = float(sum(float(item.get("crash_too_low_count", 0.0)) for item in completed_items))
+    total_crash_too_far = float(sum(float(item.get("crash_too_far_count", 0.0)) for item in completed_items))
+    total_crash_bad_tilt = float(sum(float(item.get("crash_bad_tilt_count", 0.0)) for item in completed_items))
+    total_active_not_done = float(sum(float(item.get("active_not_done_count", 0.0)) for item in completed_items))
+    total_spawned_denom = max(1.0, total_spawned)
+    mean_final_distance_to_goal = (
+        float(sum(float(item.get("mean_final_distance_to_goal", 0.0)) for item in completed_items) / max(1, len(completed_items)))
+        if completed_items
+        else 0.0
+    )
+    summary = {
+        "test_mode": test_mode_name,
+        "checkpoint_path": str(checkpoint_path),
+        "config_path": str(Path(args_cli.config).expanduser().resolve()),
+        "invincible": bool(getattr(base_env.cfg, "invincible", False)),
+        "max_steps": int(max_steps),
+        "completed_world_count": int(len(completed_items)),
+        "expected_world_count": int(base_env.num_envs),
+        "all_worlds_completed": bool(len(completed_items) >= int(base_env.num_envs)),
+        "total_spawned_count": float(total_spawned),
+        "total_success_count": float(total_success),
+        "total_collision_count": float(total_collision),
+        "total_lane_forbidden_count": float(total_lane_forbidden),
+        "total_crash_count": float(total_crash),
+        "total_crash_too_low_count": float(total_crash_too_low),
+        "total_crash_too_far_count": float(total_crash_too_far),
+        "total_crash_bad_tilt_count": float(total_crash_bad_tilt),
+        "total_active_not_done_count": float(total_active_not_done),
+        "success_rate": float(total_success / total_spawned_denom),
+        "collision_rate": float(total_collision / total_spawned_denom),
+        "lane_forbidden_rate": float(total_lane_forbidden / total_spawned_denom),
+        "crash_rate": float(total_crash / total_spawned_denom),
+        "crash_too_low_rate": float(total_crash_too_low / total_spawned_denom),
+        "crash_too_far_rate": float(total_crash_too_far / total_spawned_denom),
+        "crash_bad_tilt_rate": float(total_crash_bad_tilt / total_spawned_denom),
+        "mean_final_distance_to_goal": float(mean_final_distance_to_goal),
+        "steps_path": str(steps_path),
+        "worlds_path": str(worlds_path),
+        "video_path": str(video_path) if bool(args_cli.video) else "",
+        "frames_written": int(frames_written),
+        "video_fps": int(args_cli.video_fps) if bool(args_cli.video) else 0,
+        "video_duration_s": float(frames_written / max(1, int(args_cli.video_fps))) if bool(args_cli.video) else 0.0,
+    }
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[INFO][SceneFactory] {test_mode_name} finished. "
+        f"completed_worlds={summary['completed_world_count']}/{summary['expected_world_count']} "
+        f"success_rate={summary['success_rate']:.3f} "
+        f"collision_rate={summary['collision_rate']:.3f} "
+        f"lane_forbidden_rate={summary['lane_forbidden_rate']:.3f} "
+        f"crash_rate={summary['crash_rate']:.3f}",
+        flush=True,
+    )
+
+
 def main():
     env_cfg = _build_env_cfg()
     runner_cfg = _build_runner_cfg(env_cfg.sim.device)
@@ -1863,7 +2117,10 @@ def main():
             env = multi_agent_to_single_agent(env)
             _patch_single_agent_marl_observation_bridge(env)
         env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
-    env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
+
+    eval_test_mode = str(args_cli.test_mode).strip().lower() == "scene_factory_policy_eval"
+    if not eval_test_mode:
+        env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
 
     train_cfg = runner_cfg.to_dict()
     policy_type = str(_cfg_value(file_cfg, "policy", "type", "mlp")).strip().lower().replace("-", "_")
@@ -1880,10 +2137,16 @@ def main():
     runner = OnPolicyRunner(env, train_cfg, log_dir=str(run_dir), device=str(runner_cfg.device))
     runner.git_status_repos = [__file__]
     try:
-        runner.learn(num_learning_iterations=int(runner_cfg.max_iterations), init_at_random_ep_len=True)
+        if eval_test_mode:
+            _run_scene_factory_policy_eval(base_env, env, runner, run_dir)
+        else:
+            runner.learn(num_learning_iterations=int(runner_cfg.max_iterations), init_at_random_ep_len=True)
     finally:
         env.close()
-        print(f"[INFO] Training finished in {time.time() - start_time:.2f}s")
+        if eval_test_mode:
+            print(f"[INFO] Policy eval finished in {time.time() - start_time:.2f}s")
+        else:
+            print(f"[INFO] Training finished in {time.time() - start_time:.2f}s")
 
 
 if __name__ == "__main__":
