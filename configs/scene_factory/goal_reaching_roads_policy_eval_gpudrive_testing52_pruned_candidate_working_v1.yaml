@@ -1,8 +1,8 @@
 env:
-  num_envs: 32
+  num_envs: 52
   num_agents_per_env: 4
   observation_mode: "choco_reference"
-  env_spacing: 400.0
+  env_spacing: 320.0
   spawn_height_m: 1.0
   spawn_yaw_noise_rad: 0.0
   ground_mode: "plane"
@@ -24,7 +24,7 @@ env:
   clone_in_fabric: "false"
 
 scene_factory:
-  config_path: "configs/scene_factory/multiworld_scene_eval_unseen_32.yaml"
+  config_path: "configs/scene_factory/multiworld_scene_gpudrive_testing_52_pruned.yaml"
   world_index: 0
   world_selection_mode: "random_envs"
   random_world_seed: 42
@@ -103,7 +103,7 @@ runner:
   log_dir: "logs/rsl_rl"
   seed: 42
   experiment_name: "scene_factory_goal_reaching_eval"
-  run_name: "policy_eval_unseen32_candidate_working_v1"
+  run_name: "policy_eval_gpudrive_testing52_pruned_candidate_working_v1"
   shared_policy_mode: "agent_slots"
   max_iterations: 1
   num_steps_per_env: 128
@@ -127,7 +127,7 @@ video:
   enabled: false
   interval: 2500
   length: 300
-  name_prefix: "eval"
+  name_prefix: "eval_gpudrive_testing52_pruned"
   width: 960
   height: 540
   fps: 15

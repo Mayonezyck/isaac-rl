@@ -502,6 +502,12 @@ parser.add_argument(
     help="Output fps for saved training clips.",
 )
 parser.add_argument(
+    "--video_step_stride",
+    type=int,
+    default=int(_cfg_value(file_cfg, "video", "step_stride", 1)),
+    help="Capture one video frame every N environment steps while recording.",
+)
+parser.add_argument(
     "--video_view_mode",
     choices=("whole_grid", "single_env"),
     default=str(_cfg_value(file_cfg, "video", "view_mode", "whole_grid")),
@@ -512,6 +518,18 @@ parser.add_argument(
     type=int,
     default=int(_cfg_value(file_cfg, "video", "env_index", 0)),
     help="Environment index to focus when video_view_mode=single_env.",
+)
+parser.add_argument(
+    "--video_vehicle_proxy_markers",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "video", "vehicle_proxy_markers", False)),
+    help="Draw color-coded root-pose proxy boxes over vehicles in debug/video renders.",
+)
+parser.add_argument(
+    "--video_vehicle_proxy_z_offset_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "video", "vehicle_proxy_z_offset_m", 0.35)),
+    help="Vertical offset for the vehicle proxy boxes in debug/video renders.",
 )
 parser.add_argument(
     "--save_stage_usd",
@@ -776,6 +794,8 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.capture_camera_height = int(args_cli.video_height)
     cfg.capture_camera_view_mode = str(args_cli.video_view_mode)
     cfg.capture_camera_env_index = int(args_cli.video_env_index)
+    cfg.vehicle_proxy_marker_enable = bool(args_cli.video_vehicle_proxy_markers)
+    cfg.vehicle_proxy_marker_z_offset_m = float(args_cli.video_vehicle_proxy_z_offset_m)
     cfg.student_usd_path = str(Path(args_cli.student_usd or DEFAULT_STUDENT_VEHICLE_USD).expanduser().resolve())
     if str(args_cli.tunable_config_json):
         cfg.tunable_config_json = str(Path(args_cli.tunable_config_json).expanduser().resolve())
@@ -1054,8 +1074,11 @@ def _build_resolved_config(
             "width": int(args_cli.video_width),
             "height": int(args_cli.video_height),
             "fps": int(args_cli.video_fps),
+            "step_stride": int(args_cli.video_step_stride),
             "view_mode": str(args_cli.video_view_mode),
             "env_index": int(args_cli.video_env_index),
+            "vehicle_proxy_markers": bool(args_cli.video_vehicle_proxy_markers),
+            "vehicle_proxy_z_offset_m": float(args_cli.video_vehicle_proxy_z_offset_m),
         },
         "app": {
             "device": str(env_cfg.sim.device),
@@ -1191,8 +1214,11 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "width": int(args_cli.video_width),
             "height": int(args_cli.video_height),
             "fps": int(args_cli.video_fps),
+            "step_stride": int(args_cli.video_step_stride),
             "view_mode": str(args_cli.video_view_mode),
             "env_index": int(args_cli.video_env_index),
+            "vehicle_proxy_markers": bool(args_cli.video_vehicle_proxy_markers),
+            "vehicle_proxy_z_offset_m": float(args_cli.video_vehicle_proxy_z_offset_m),
         },
         "app_cfg": {
             "silence_runtime_warnings": bool(getattr(args_cli, "silence_runtime_warnings", False)),
@@ -1533,20 +1559,27 @@ class SensorVideoRecorderWrapper(gym.Wrapper):
         self._interval = max(1, int(args_cli.video_interval))
         self._length = max(1, int(args_cli.video_length))
         self._fps = max(1, int(args_cli.video_fps))
+        self._step_stride = max(1, int(args_cli.video_step_stride))
         self._name_prefix = str(args_cli.video_name_prefix)
         self._global_step = 0
         self._clip_index = 0
         self._recording = False
+        self._recording_step_index = 0
         self._frames: list = []
 
     def _start_clip(self) -> None:
         if self._recording:
             return
         self._recording = True
+        self._recording_step_index = 0
         self._frames = []
 
-    def _capture_frame(self) -> None:
+    def _capture_frame(self, *, force: bool = False) -> None:
         if not self._recording:
+            return
+        should_capture = force or (self._recording_step_index % self._step_stride == 0)
+        self._recording_step_index += 1
+        if not should_capture:
             return
         frame = self._capture_env.capture_fixed_camera_frame()
         if frame is not None:
@@ -1574,7 +1607,7 @@ class SensorVideoRecorderWrapper(gym.Wrapper):
         output = self.env.reset(**kwargs)
         if self._global_step % self._interval == 0:
             self._start_clip()
-        self._capture_frame()
+        self._capture_frame(force=True)
         return output
 
     def step(self, action):
@@ -1636,21 +1669,30 @@ def _run_collision_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> 
     metrics_path = run_dir / f"{test_mode_name}_metrics.jsonl"
     summary_path = run_dir / f"{test_mode_name}_summary.json"
     video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_step_stride = max(1, int(args_cli.video_step_stride))
     video_writer = None
     if bool(args_cli.video):
         video_path.parent.mkdir(parents=True, exist_ok=True)
         video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+    video_capture_step_index = 0
+    frames_written = 0
 
-    def _write_frame() -> None:
+    def _write_frame(*, force: bool = False) -> None:
+        nonlocal video_capture_step_index, frames_written
         if video_writer is None:
+            return
+        should_capture = force or (video_capture_step_index % video_step_stride == 0)
+        video_capture_step_index += 1
+        if not should_capture:
             return
         frame = env.capture_fixed_camera_frame()
         if frame is not None:
             video_writer.append_data(frame)
+            frames_written += 1
 
     print(f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout.", flush=True)
     obs, extras = env.reset()
-    _write_frame()
+    _write_frame(force=True)
     collision_step: int | None = None
     max_collision_force_n = 0.0
     raw_max_collision_force_n = 0.0
@@ -1660,7 +1702,6 @@ def _run_collision_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> 
         + env.cfg.collision_test_drive_steps
         + env.cfg.collision_test_post_collision_steps
     )
-    frames_written = 1
     post_collision_steps_remaining = int(env.cfg.collision_test_post_collision_steps)
 
     with metrics_path.open("w", encoding="utf-8") as handle:
@@ -1684,7 +1725,6 @@ def _run_collision_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> 
 
             obs, rewards, terminated, time_outs, extras = env.step(action_dict)
             _write_frame()
-            frames_written += 1
 
             collision_force_by_agent = env.collision_force_by_agent_n()
             collision_world_force = env.collision_world_force_n()
@@ -1747,6 +1787,7 @@ def _run_collision_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> 
         "max_collision_force_n": max_collision_force_n,
         "raw_max_collision_force_n": raw_max_collision_force_n,
         "frames_written": int(frames_written),
+        "video_step_stride": int(video_step_stride),
         "video_fps": int(args_cli.video_fps) if bool(args_cli.video) else 0,
         "video_duration_s": float(frames_written / max(1, int(args_cli.video_fps))) if bool(args_cli.video) else 0.0,
         "metrics_path": str(metrics_path),
@@ -1768,28 +1809,36 @@ def _run_scene_factory_multiworld_random_steer_test(env: StudentVehicleMultiAgen
     metrics_path = run_dir / f"{test_mode_name}_metrics.jsonl"
     summary_path = run_dir / f"{test_mode_name}_summary.json"
     video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_step_stride = max(1, int(args_cli.video_step_stride))
     video_writer = None
     if bool(args_cli.video):
         video_path.parent.mkdir(parents=True, exist_ok=True)
         video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+    video_capture_step_index = 0
+    frames_written = 0
 
-    def _write_frame() -> None:
+    def _write_frame(*, force: bool = False) -> None:
+        nonlocal video_capture_step_index, frames_written
         if video_writer is None:
+            return
+        should_capture = force or (video_capture_step_index % video_step_stride == 0)
+        video_capture_step_index += 1
+        if not should_capture:
             return
         frame = env.capture_fixed_camera_frame()
         if frame is not None:
             video_writer.append_data(frame)
+            frames_written += 1
 
     print(f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout.", flush=True)
     obs, extras = env.reset()
-    _write_frame()
+    _write_frame(force=True)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(env.cfg.random_steer_test_seed))
     total_steps = int(env.cfg.random_steer_test_settle_steps + env.cfg.random_steer_test_drive_steps)
     hold_steps = max(1, int(env.cfg.random_steer_test_steering_hold_steps))
     steering_min = float(env.cfg.random_steer_test_steering_min)
     steering_max = float(env.cfg.random_steer_test_steering_max)
-    frames_written = 1
     max_collision_force_n = 0.0
     collision_step_count = 0
     worlds_with_collision: set[int] = set()
@@ -1826,7 +1875,6 @@ def _run_scene_factory_multiworld_random_steer_test(env: StudentVehicleMultiAgen
             action_dict = _action_dict_from_components(env, throttle_by_agent, steering_by_agent, brake_by_agent)
             obs, rewards, terminated, time_outs, extras = env.step(action_dict)
             _write_frame()
-            frames_written += 1
 
             collision_force_by_agent = env.collision_force_by_agent_n()
             collision_world_force = env.collision_world_force_n()
@@ -1884,6 +1932,7 @@ def _run_scene_factory_multiworld_random_steer_test(env: StudentVehicleMultiAgen
         "max_collision_force_n": float(max_collision_force_n),
         "lane_types_touched_global": sorted(int(x) for x in lane_types_touched_global),
         "frames_written": int(frames_written),
+        "video_step_stride": int(video_step_stride),
         "video_fps": int(args_cli.video_fps) if bool(args_cli.video) else 0,
         "video_duration_s": float(frames_written / max(1, int(args_cli.video_fps))) if bool(args_cli.video) else 0.0,
         "metrics_path": str(metrics_path),
@@ -1922,17 +1971,25 @@ def _run_scene_factory_policy_eval(
     worlds_path = run_dir / f"{test_mode_name}_worlds.jsonl"
     summary_path = run_dir / f"{test_mode_name}_summary.json"
     video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_step_stride = max(1, int(args_cli.video_step_stride))
     video_writer = None
     if bool(args_cli.video):
         video_path.parent.mkdir(parents=True, exist_ok=True)
         video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+    video_capture_step_index = 0
 
-    def _write_frame() -> None:
+    def _write_frame(*, force: bool = False) -> None:
+        nonlocal video_capture_step_index, frames_written
         if video_writer is None:
+            return
+        should_capture = force or (video_capture_step_index % video_step_stride == 0)
+        video_capture_step_index += 1
+        if not should_capture:
             return
         frame = base_env.capture_fixed_camera_frame()
         if frame is not None:
             video_writer.append_data(frame)
+            frames_written += 1
 
     print(
         f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout from checkpoint {checkpoint_path}.",
@@ -1964,9 +2021,7 @@ def _run_scene_factory_policy_eval(
     if max_steps <= 0:
         max_steps = int(base_env.max_episode_length) + 1
     frames_written = 0
-    _write_frame()
-    if bool(args_cli.video):
-        frames_written += 1
+    _write_frame(force=True)
 
     with steps_path.open("w", encoding="utf-8") as steps_handle, worlds_path.open("w", encoding="utf-8") as worlds_handle:
         with torch.inference_mode():
@@ -1981,8 +2036,6 @@ def _run_scene_factory_policy_eval(
                     )
 
                 _write_frame()
-                if bool(args_cli.video):
-                    frames_written += 1
 
                 new_world_summaries = base_env.consume_last_reset_world_episode_summaries()
                 new_completed_envs: list[int] = []
@@ -2034,6 +2087,37 @@ def _run_scene_factory_policy_eval(
         if completed_items
         else 0.0
     )
+    per_world_summary_sorted = sorted(
+        [
+            {
+                "env_index": int(item.get("env_index", -1)),
+                "world_index": int(item.get("world_index", -1)),
+                "scene_json_name": str(item.get("scene_json_name", "")),
+                "spawned_count": float(item.get("spawned_count", 0.0)),
+                "success_count": float(item.get("success_count", 0.0)),
+                "collision_count": float(item.get("collision_count", 0.0)),
+                "lane_forbidden_count": float(item.get("lane_forbidden_count", 0.0)),
+                "crash_count": float(item.get("crash_count", 0.0)),
+                "active_not_done_count": float(item.get("active_not_done_count", 0.0)),
+                "success_rate": float(item.get("success_rate", 0.0)),
+                "collision_rate": float(item.get("collision_rate", 0.0)),
+                "lane_forbidden_rate": float(item.get("lane_forbidden_rate", 0.0)),
+                "crash_rate": float(item.get("crash_rate", 0.0)),
+                "mean_final_distance_to_goal": float(item.get("mean_final_distance_to_goal", 0.0)),
+                "episode_length_steps": int(item.get("episode_length_steps", 0)),
+            }
+            for item in completed_items
+        ],
+        key=lambda item: (
+            float(item["success_rate"]),
+            float(item["success_count"]),
+            -float(item["mean_final_distance_to_goal"]),
+            -float(item["lane_forbidden_rate"]),
+            -float(item["collision_rate"]),
+            -float(item["crash_rate"]),
+            int(item["env_index"]),
+        ),
+    )
     summary = {
         "test_mode": test_mode_name,
         "checkpoint_path": str(checkpoint_path),
@@ -2064,8 +2148,10 @@ def _run_scene_factory_policy_eval(
         "worlds_path": str(worlds_path),
         "video_path": str(video_path) if bool(args_cli.video) else "",
         "frames_written": int(frames_written),
+        "video_step_stride": int(video_step_stride),
         "video_fps": int(args_cli.video_fps) if bool(args_cli.video) else 0,
         "video_duration_s": float(frames_written / max(1, int(args_cli.video_fps))) if bool(args_cli.video) else 0.0,
+        "per_world_summary_sorted_by_least_success": per_world_summary_sorted,
     }
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(
@@ -2077,6 +2163,23 @@ def _run_scene_factory_policy_eval(
         f"crash_rate={summary['crash_rate']:.3f}",
         flush=True,
     )
+    if per_world_summary_sorted:
+        print("[INFO][SceneFactory] Per-world summary (least successful first):", flush=True)
+        for item in per_world_summary_sorted:
+            print(
+                "[INFO][SceneFactory] "
+                f"env={item['env_index']:02d} "
+                f"scene={item['scene_json_name']} "
+                f"spawned={item['spawned_count']:.0f} "
+                f"success={item['success_count']:.0f} ({item['success_rate']:.2f}) "
+                f"collision={item['collision_count']:.0f} ({item['collision_rate']:.2f}) "
+                f"lane_forbidden={item['lane_forbidden_count']:.0f} ({item['lane_forbidden_rate']:.2f}) "
+                f"crash={item['crash_count']:.0f} ({item['crash_rate']:.2f}) "
+                f"active={item['active_not_done_count']:.0f} "
+                f"final_dist={item['mean_final_distance_to_goal']:.2f}m "
+                f"steps={item['episode_length_steps']}",
+                flush=True,
+            )
 
 
 def main():

@@ -1,0 +1,175 @@
+io:
+  scene_json_dir: "/home/yz8733/Github/isaac-rl/runs/gpudrive_converted/testing"
+
+world:
+  root_container: "/World/SceneFactoryWorlds"
+  world_count: 52
+  grid_cols: 8
+  rows: 7
+  world_size_m: [200.0, 200.0]
+  padding_m: 100.0
+  base_z_m: 0.0
+  bounds_size_m: 200.0
+  origin_mode: "center"
+  origin_center_mode: "mean"
+  assignments:
+    - scene_json: "tfrecord-00122-of-00150_294.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00084-of-00150_109.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00043-of-00150_312.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00145-of-00150_85.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00028-of-00150_218.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00124-of-00150_30.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00111-of-00150_61.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00079-of-00150_219.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00084-of-00150_142.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00140-of-00150_88.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00067-of-00150_37.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00127-of-00150_170.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00102-of-00150_47.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00127-of-00150_96.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00015-of-00150_236.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00122-of-00150_173.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00118-of-00150_166.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00117-of-00150_264.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00092-of-00150_236.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00008-of-00150_27.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00012-of-00150_65.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00029-of-00150_82.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00123-of-00150_308.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00037-of-00150_78.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00013-of-00150_221.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00054-of-00150_258.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00109-of-00150_101.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00052-of-00150_86.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00037-of-00150_229.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00080-of-00150_175.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00043-of-00150_158.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00058-of-00150_202.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00002-of-00150_31.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00088-of-00150_206.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00101-of-00150_96.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00069-of-00150_156.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00033-of-00150_206.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00128-of-00150_141.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00132-of-00150_152.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00124-of-00150_16.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00142-of-00150_221.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00041-of-00150_32.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00079-of-00150_28.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00109-of-00150_104.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00141-of-00150_54.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00073-of-00150_144.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00082-of-00150_218.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00057-of-00150_153.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00095-of-00150_217.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00036-of-00150_134.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00064-of-00150_292.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+    - scene_json: "tfrecord-00130-of-00150_128.json"
+      friction: {road_type: "AC", precip_type: "clear", precip_intensity_mmph: 0.0, water_film_mm: 0.0}
+
+road:
+  render_mode: "explicit_prims"
+  jump_break_m: 3.0
+  seg_width: 0.10
+  seg_height: 0.01
+  z_lift: 0.02
+  flatten_road_z: true
+  road_z_m: 0.0
+  polyline_reduction_area: 0.0
+  min_points_for_reduction: 10
+  enable_segment_collision: false
+  trigger_enable: false
+
+ground:
+  enable: true
+  mode: "per_world"
+  size_m: [200.0, 200.0]
+  thickness_m: 0.2
+  z_m: 0.0
+  invisible: true
+  friction_values: [0.50]
+  friction_pipeline:
+    enable: true
+    defaults:
+      tire_model_id: "zhao2024_modified_all_default"
+      v_ref_mps: 13.89
+      s_ref_static: 0.15
+      s_ref_dynamic: 0.8
+      mu_eff_mode: "static"
+
+vehicles:
+  student_usd: "artifacts/student_vehicle_assets/vehicle_only_smoke/student_fwd_vehicle.usd"
+  tunable_config_json: "artifacts/student_vehicle_sysid/fwd_v1_staged_cem_anchor_overnight/best_config.json"
+  max_controllable_per_world: 16
+  spawn_height_m: 1.2
+  require_goal_in_bounds: true
+  skip_if_start_in_goal: true
+  goal_radius_m: 3.0
+  start_goal_thresh_m: 5.0
+
+goal_markers:
+  enable: true
+  radius_m: 1.0
+  height_m: 0.12
+
+viewer:
+  eye: [420.0, 220.0, 260.0]
+  lookat: [180.0, 180.0, 0.0]
+  light_path: "/World/Light"
+  light_intensity: 3200.0
+  light_color: [0.78, 0.78, 0.78]
+
+sim:
+  dt: 0.008333333333333333
+  steps: 0

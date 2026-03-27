@@ -228,6 +228,41 @@ def _reference_vehicle_feat_dim(include_ttc: bool, include_index: bool) -> int:
     return dim
 
 
+def _build_vehicle_proxy_marker(
+    prim_path: str,
+    *,
+    num_agent_prototypes: int,
+    vehicle_length_m: float,
+    vehicle_width_m: float,
+    vehicle_height_m: float = 0.55,
+) -> VisualizationMarkers:
+    palette = (
+        (0.95, 0.20, 0.20),
+        (0.10, 0.82, 0.92),
+        (0.96, 0.78, 0.10),
+        (0.35, 0.92, 0.26),
+        (0.96, 0.42, 0.12),
+        (0.62, 0.32, 0.96),
+        (0.95, 0.30, 0.72),
+        (0.65, 0.85, 0.18),
+    )
+    marker_cfg = CUBOID_MARKER_CFG.copy()
+    marker_cfg.prim_path = str(prim_path)
+    marker_cfg.markers = {}
+    for agent_idx in range(max(1, int(num_agent_prototypes))):
+        color = palette[agent_idx % len(palette)]
+        marker_cfg.markers[f"vehicle_{agent_idx}"] = sim_utils.CuboidCfg(
+            size=(float(vehicle_length_m), float(vehicle_width_m), float(vehicle_height_m)),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=color,
+                emissive_color=tuple(0.22 * channel for channel in color),
+                roughness=0.22,
+                metallic=0.0,
+            ),
+        )
+    return VisualizationMarkers(marker_cfg)
+
+
 def _reference_observation_dim(cfg: "StudentVehicleMultiAgentGoalEnvCfg") -> int:
     dim = 7
     if bool(cfg.obs_weather_context_enable):
@@ -574,6 +609,8 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     capture_camera_height_scale: float = 1.6
     capture_camera_view_mode: str = "whole_grid"
     capture_camera_env_index: int = 0
+    vehicle_proxy_marker_enable: bool = False
+    vehicle_proxy_marker_z_offset_m: float = 0.35
 
 
 class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
@@ -581,6 +618,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def __init__(self, cfg: StudentVehicleMultiAgentGoalEnvCfg, render_mode: str | None = None, **kwargs):
         self._capture_camera: Camera | None = None
+        self._vehicle_proxy_marker: VisualizationMarkers | None = None
         self._scenario_spawns: list | None = None
         self._scenario_spawns_by_env: list[list] | None = None
         self._scene_factory_spawn_start_local = None
@@ -3441,6 +3479,15 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             if not hasattr(self, "_goal_marker"):
                 self._goal_marker = build_goal_beacon_marker("/Visuals/MultiGoalMarker")
             self._goal_marker.set_visibility(True)
+            if bool(self.cfg.vehicle_proxy_marker_enable):
+                if self._vehicle_proxy_marker is None:
+                    self._vehicle_proxy_marker = _build_vehicle_proxy_marker(
+                        "/Visuals/VehicleProxyMarkers",
+                        num_agent_prototypes=self._num_agents,
+                        vehicle_length_m=float(self._vehicle_length_m),
+                        vehicle_width_m=float(self._vehicle_width_m),
+                    )
+                self._vehicle_proxy_marker.set_visibility(True)
             if bool(self.cfg.collision_test_debug_markers) and str(self.cfg.test_mode).strip().lower() in {
                 "collision_test",
                 "scene_factory_collision_test",
@@ -3453,6 +3500,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         else:
             if hasattr(self, "_goal_marker"):
                 self._goal_marker.set_visibility(False)
+            if self._vehicle_proxy_marker is not None:
+                self._vehicle_proxy_marker.set_visibility(False)
             if hasattr(self, "_collision_test_vehicle_marker"):
                 self._collision_test_vehicle_marker.set_visibility(False)
 
@@ -3463,6 +3512,24 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             goal_positions = self._goal_pos_w.permute(1, 0, 2).reshape(-1, 3)
             marker_positions, marker_indices = goal_beacon_visualization(goal_positions)
             self._goal_marker.visualize(marker_positions, marker_indices=marker_indices)
+        if self._vehicle_proxy_marker is not None:
+            positions = []
+            orientations = []
+            indices = []
+            z_offset = float(self.cfg.vehicle_proxy_marker_z_offset_m)
+            for agent_idx, vehicle in enumerate(self._vehicles):
+                pos_w = vehicle.data.root_pos_w.clone()
+                pos_w[:, 2] += z_offset
+                positions.append(pos_w)
+                orientations.append(vehicle.data.root_quat_w.clone())
+                indices.append(
+                    torch.full((self.num_envs,), agent_idx, dtype=torch.int32, device=self.device)
+                )
+            self._vehicle_proxy_marker.visualize(
+                translations=torch.cat(positions, dim=0),
+                orientations=torch.cat(orientations, dim=0),
+                marker_indices=torch.cat(indices, dim=0),
+            )
         if hasattr(self, "_collision_test_vehicle_marker"):
             positions = []
             indices = []
@@ -3489,4 +3556,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if self._capture_camera is not None:
             del self._capture_camera
             self._capture_camera = None
+        if self._vehicle_proxy_marker is not None:
+            del self._vehicle_proxy_marker
+            self._vehicle_proxy_marker = None
         super().close()

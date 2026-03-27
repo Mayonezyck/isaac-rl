@@ -1,9 +1,12 @@
+# Generated runnable training preset paired with:
+#   configs/scene_factory/generated/scene_factory_64scene_curated_0326_train.yaml
+
 env:
-  num_envs: 32
-  num_agents_per_env: 4
+  num_envs: 64
+  num_agents_per_env: 16
   observation_mode: "choco_reference"
   env_spacing: 400.0
-  spawn_height_m: 1.0
+  spawn_height_m: 1.2
   spawn_yaw_noise_rad: 0.0
   ground_mode: "plane"
   use_scene_factory_roads: true
@@ -24,7 +27,7 @@ env:
   clone_in_fabric: "false"
 
 scene_factory:
-  config_path: "configs/scene_factory/multiworld_scene_eval_unseen_32.yaml"
+  config_path: "configs/scene_factory/generated/scene_factory_64scene_curated_0326_train.yaml"
   world_index: 0
   world_selection_mode: "random_envs"
   random_world_seed: 42
@@ -102,12 +105,12 @@ assets:
 runner:
   log_dir: "logs/rsl_rl"
   seed: 42
-  experiment_name: "scene_factory_goal_reaching_eval"
-  run_name: "policy_eval_unseen32_candidate_working_v1"
+  experiment_name: "scene_factory_goal_reaching_roads"
+  run_name: "scene_factory_64scene_curated_0326_train"
   shared_policy_mode: "agent_slots"
-  max_iterations: 1
+  max_iterations: 40000
   num_steps_per_env: 128
-  save_interval: 1
+  save_interval: 25
   learning_rate: 2.0924001030314093e-4
   num_learning_epochs: 5
   num_mini_batches: 16
@@ -116,26 +119,6 @@ runner:
   desired_kl: 0.01
   gamma: 0.99
   gae_lambda: 0.98
-
-test:
-  mode: "scene_factory_policy_eval"
-  checkpoint_path: ""
-  max_steps: 0
-  invincible: false
-
-video:
-  enabled: false
-  interval: 2500
-  length: 300
-  name_prefix: "eval"
-  width: 960
-  height: 540
-  fps: 15
-  step_stride: 2
-  view_mode: "single_env"
-  env_index: 0
-  vehicle_proxy_markers: true
-  vehicle_proxy_z_offset_m: 0.35
 
 app:
   device: "cuda:0"
