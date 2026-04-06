@@ -1,0 +1,101 @@
+% ============================================================
+%  sections/related_work.tex  —  Related Work (merged & cleaned)
+%  Sources: SOC draft + sec/2_related_works.tex (previous writeup)
+% ============================================================
+\section{Related Work}
+\label{sec:related_work}
+
+This work presents a GPU-accelerated, weather-aware, multi-world multi-agent training pipeline for physically grounded, safety-aware driving behavior.
+We review related work in three categories: driving simulators, weather-aware driving behavior research, and GPU-accelerated simulation frameworks.
+
+% ==================================================================
+\subsection{Driving Simulators}
+\label{sec:rw_simulators}
+% ==================================================================
+
+As training robotic agents to drive in the real physical world is expensive and impractical, autonomous driving simulators are essential.
+Multiple open-source platforms have been developed by the community, spanning a range of design trade-offs between physics fidelity, scene diversity, and computational scalability.
+
+CARLA~\cite{Dosovitskiy17} is one of the earliest open-source autonomous driving simulators, built on the widely used Unreal Engine~4.
+It is equipped with PhysX-based vehicle physics and provides multiple well-designed maps with extensive features and customization options.
+However, its design makes it computationally expensive to run and unsuitable for GPU-accelerated workloads, limiting its applicability in tasks such as hardware-accelerated multi-world, multi-agent simulations.
+Moreover, creating maps for CARLA is labor-intensive, as its focus is on highly detailed, handcrafted scenes rather than efficiently leveraging real-world data.
+
+To address these limitations, MetaDrive~\cite{li2022metadrive} was introduced as another open-source simulator.
+It aims to overcome limited scene diversity by allowing users to construct environments from open datasets such as the Waymo Open Motion Dataset~\cite{Kan_2024_icra}, or through procedural generation.
+MetaDrive is backed by the Bullet physics engine (via Panda3D).
+However, it does not support hardware acceleration, and only a single scene can be loaded at a time.
+Although tire friction is reported as a configurable parameter in MetaDrive, its capability to train agents under varying friction conditions has not been demonstrated.
+
+GPUDrive~\cite{kazemkhani_gpudrive_2025}, built on the Madrona game engine~\cite{shacklett_madrona_2023}, achieves impressive throughput for multi-scene, multi-agent training, capable of simulating over a million steps per second.
+However, its vehicle dynamics use simplified collision and bicycle-model representations rather than a full rigid-body physics engine—a distinction that limits its ability to capture realistic tire--road interactions and contact dynamics.
+
+A comparison of driving simulators across key capabilities is shown in Table~\ref{tab:simulators}.
+Most physically realistic simulators lack hardware acceleration, and only a few incorporate realistic pavement friction modeling.
+It is worth noting that simplification of dynamics is a valid design choice for many research tasks; SceneFactory targets the complementary use case of safety-critical evaluation where physics fidelity directly affects the validity of the analysis.
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l X X X X X X X X X}
+\toprule
+\textbf{Simulator} & \textbf{Multi-agent} & \textbf{GPU-Accel} & \textbf{Sensor Sim} & \textbf{Expert Data} & \textbf{Sim-agents} & \textbf{Physics Aware} & \textbf{Weather Aware}& \textbf{Routes / Goals} \\
+\midrule
+TORCS \cite{wymann_torcs_nodate}&  &  & \cmark &  & \cmark & \cmark &  & - \\
+GTA V \cite{martinez_beyond_2017} &  &  & \cmark &  & & \cmark& \cmark & - \\
+CARLA \cite{Dosovitskiy17} &  &  & \cmark &  & \cmark & \cmark & \cmark &Waypoints \\
+Highway-env \cite{highway-env} &  &  &  &  &  & & & - \\
+Sim4CV \cite{muller_sim4cv_2018} &  &  & \cmark &  &  & \cmark & &Directions \\
+SUMMIT \cite{cai_summit_2020} & $\checkmark$ ($\geq 400$) &  & \cmark &  & \cmark & \cmark & \cmark & - \\
+MACAD \cite{palanisamy_multi-agent_2019} & \cmark &  & \cmark &  & \cmark & \cmark & & Goal point \\
+SMARTS \cite{zhou_smarts_2021} & \cmark &  &  &  &  & \cmark & & Waypoints \\
+MADRaS \cite{santara_madras_2021} & $\checkmark$ ($\geq 10$) &  & \cmark &  &   & \cmark & & Goal point \\
+DriverGym \cite{kothari_drivergym_2021} &  &  &  & \cmark & \cmark  & & & - \\
+VISTA \cite{amini_vista_2022}& \cmark &  & \cmark & \cmark &   & & & - \\
+nuPlan \cite{caesar_nuplan_2022} &  &  & \cmark & \cmark & \cmark &  & &Waypoints \\
+Nocturne \cite{vinitsky_nocturne_2022} & $\checkmark$ ($\geq 128$) &  & \cmark & \cmark & \cmark & & & Goal point \\
+MetaDrive \cite{li2022metadrive} & \cmark &  & \cmark & \cmark & \cmark & \cmark & \cmark & - \\
+InterSim \cite{sun_intersim_2022} & \cmark &  &  & \cmark & \cmark &  & &Goal point \\
+TorchDriveSim \cite{lavington_torchdriveenv_2024} & \cmark & \cmark &  &  &  &  & &- \\
+BITS \cite{xu_bits_2022}& \cmark &  &  & \cmark & \cmark &  & &Goal point \\
+Waymax \cite{gulino_waymax_2023} & $\checkmark$ ($\geq 128$) & \cmark &  & \cmark & \cmark &  & &Waypoints \\
+GPUDrive \cite{kazemkhani_gpudrive_2025} & $\checkmark$ ($\geq 128$) & \cmark & \cmark & \cmark & \cmark &  & &Goal point \\
+\textbf{SceneFactory (ours)} & $\checkmark$ ($\geq 128$) & \cmark &  & \cmark & \cmark & \cmark & \cmark &Goal point \\
+\bottomrule
+\end{tabularx}
+\caption{Comparison of driving simulators across key capabilities. SceneFactory is, to our knowledge, the first system that simultaneously provides GPU-accelerated multi-world execution, multi-agent support, full rigid-body physics, and weather-aware friction modeling.}
+\label{tab:simulators}
+\end{table*}
+
+% ==================================================================
+\subsection{Weather-Aware Driving Behavior}
+\label{sec:rw_weather}
+% ==================================================================
+
+The relationship between weather conditions and road surface properties has been studied for decades in transportation research.
+Adverse weather affects both driver visibility and vehicle dynamics: Chen et al.~\cite{chen_influence_2019} showed that drivers' perceived risk increases with worsening weather during car following, Ahmed and Ghasemzadeh~\cite{ahmed_impacts_2018} found that the probability of speed reduction increases by 23--29\% in rain using SHRP2 naturalistic data, and Peng et al.~\cite{peng_examining_2018} demonstrated significant changes in traffic parameters under fog and rain using real-time sensor data.
+
+However, within the autonomous driving community, driving behavior under adverse weather has received comparatively less attention~\cite{gaonkar_enhancing_2025}.
+Most autonomous driving systems have achieved strong performance under the implicit assumption of favorable weather~\cite{li_autonomous_2025}.
+Existing research on adverse weather primarily focuses on perception and sensing—investigating how sensor performance degrades under rain, fog, or snow~\cite{song_weather_2020, li_autonomous_2025, fursa_worsening_2021, rahmati_edge_2025}—while comparatively fewer works explicitly consider how vehicle dynamics change.
+Only recently have studies begun to explore driving behavior in low-friction environments using simulation; for example, Aghdasian et al.~\cite{aghdasian_tackling_2025} trained robust lane-keeping policies under snowy conditions in CARLA.
+
+On the tire--pavement friction modeling side, Zhao et al.~\cite{zhao_tire-pavement_2024} developed a friction model that accounts for pavement texture and water film thickness, providing a physics-based mapping from environmental conditions to effective friction coefficients.
+SceneFactory adopts this model to bridge the gap between weather conditions and vehicle dynamics within the simulation: precipitation and road surface type are converted to friction parameters that are applied directly to the PhysX physics engine, enabling agents to experience and learn from weather-dependent driving dynamics.
+
+% ==================================================================
+\subsection{GPU-Accelerated Simulation Frameworks}
+\label{sec:rw_gpu_frameworks}
+% ==================================================================
+
+The need for large-scale RL training has driven the development of GPU-accelerated simulation engines.
+Madrona~\cite{shacklett_madrona_2023} is a batch entity-component-system (ECS) engine that enables thousands of independent simulation worlds to run in parallel on a single GPU; it serves as the backend for GPUDrive.
+Brax~\cite{freeman_brax_2021} provides a differentiable physics engine in JAX for rigid-body simulation, primarily targeting locomotion tasks.
+MuJoCo~XLA extends the MuJoCo physics engine with JAX-based GPU parallelism but is not designed for vehicle-centric or USD-based scene management.
+
+NVIDIA Isaac Sim and Isaac Lab~\cite{nvidia_isaac_2025, mittal_orbit_2023} take a different approach.
+Isaac Sim provides a full simulation runtime built on the Omniverse platform with PhysX~5 as the rigid-body physics backend and OpenUSD as the scene description format.
+Isaac Lab (evolved from Orbit) adds a vectorized environment framework on top, including the DirectMARLEnv abstraction for multi-agent RL with Fabric-based state cloning across parallel environments.
+This combination—USD scene management, PhysX~5 articulated vehicle dynamics, and a GPU-resident training loop—makes Isaac Lab the natural choice for SceneFactory, where we require both high physics fidelity (articulated vehicles with tire friction, suspension, and contact sensing) and high throughput (hundreds of vehicles across dozens of parallel worlds).
+
+\chattodo{Optionally add a brief paragraph on world models / Cosmos as a downstream application if the scope of the paper includes the video generation pipeline.}

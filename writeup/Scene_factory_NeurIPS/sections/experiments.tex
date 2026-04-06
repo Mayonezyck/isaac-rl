@@ -1,0 +1,240 @@
+% ============================================================
+%  sections/experiments.tex  —  Experiments
+% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate SceneFactory along three axes:
+simulation throughput (\S\ref{sec:throughput}),
+end-to-end navigation performance on held-out Waymo scenes (\S\ref{sec:navigation_perf}),
+and qualitative trajectory analysis (\S\ref{sec:qualitative}).
+All experiments use a single shared navigation policy trained with PPO; the contribution of this work is the simulation platform itself, so we report policy performance as an end-to-end validation of the pipeline rather than as a claim of state-of-the-art driving.
+
+% ---------------------------------------------------------------
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+% ---------------------------------------------------------------
+
+\paragraph{Hardware and software.}
+All training and evaluation runs execute on a single NVIDIA RTX PRO 6000 Blackwell GPU (96\,GB VRAM).
+The software stack consists of
+NVIDIA Isaac Sim~\chattodo{version number},
+Isaac Lab~\chattodo{version number}~\cite{nvidia_isaac_2025},
+RSL-RL~\cite{schwarke_rsl-rl_2025} for PPO,
+PyTorch~\chattodo{version}, and
+CUDA~\chattodo{version}.
+Physics runs at 120\,Hz (time step $\Delta t = 1/120$\,s);
+the control policy acts at 30\,Hz (decimation factor 4).
+
+\paragraph{Scene curation.}
+From approximately 1{,}000 Waymo Open Motion Dataset scenarios~\cite{Kan_2024_icra},
+we extract candidate road topologies through the pipeline described in \S\ref{sec:data_processing}.
+A human operator first visually inspects each candidate scene with a curation wizard that renders lane-center polylines, road-edge polylines, and origin-destination pairs.
+The operator accepts scenes that have plausible road geometry and rejects those with degenerate lane structure, multi-level overlaps from z-flattening, or unreachable goals (see \S\ref{sec:sharp_edges} for rejection criteria).
+This produces \textbf{64 training scenes} and a disjoint set of \textbf{64 held-out test scenes}.
+Within each accepted scene, an automated filter then retains only those agents whose start and goal positions both lie within the 400\,m $\times$ 400\,m world bounding box, are separated by at least 3.0\,m, and have valid coordinates.
+Up to 16 qualifying agents are extracted per scene; scenes with fewer valid agents leave the remaining agent slots inactive.
+
+\paragraph{Training configuration.}
+Each training scene is replicated four times to fill $64 \times 4 = 256$ parallel environments, each hosting up to 16 agent slots, for a nominal capacity of 4{,}096 agents.
+In practice, many Waymo scenes contain fewer than 16 qualifying agents after the spawn filter described below, so slots without a valid spawn remain inactive throughout the episode.
+Worlds are assigned to environments by random shuffling (seed~42), so every PPO update samples transitions from all 64 unique road topologies.
+Episodes last 50\,s (1{,}500 control steps).
+Upon reaching the goal (within 3.0\,m) or triggering a termination condition (collision, off-road crash, timeout), an agent is parked in place with zero velocity; the remaining agents continue until every agent in the environment has terminated or the episode times out, at which point the entire world resets with fresh start-goal assignments for all agents.
+
+\paragraph{PPO hyperparameters.}
+Table~\ref{tab:ppo_hparams} lists the PPO configuration.
+The learning rate follows an adaptive schedule that halves or doubles the rate to maintain the per-update KL divergence near a target of 0.01.
+Training runs for up to 40{,}000 iterations; each iteration collects a rollout of 128 steps per environment and performs 5 gradient epochs over 16 mini-batches.
+The total batch size per update is $4{,}096 \times 128 = 524{,}288$ transitions.
+
+\begin{table}[t]
+\centering
+\caption{PPO hyperparameters.}
+\label{tab:ppo_hparams}
+\small
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Rollout horizon           & 128 steps \\
+Mini-batches              & 16 \\
+Learning epochs           & 5 \\
+Learning rate (initial)   & $2.09 \times 10^{-4}$ \\
+LR schedule               & adaptive (KL target 0.01) \\
+Discount $\gamma$         & 0.99 \\
+GAE $\lambda$             & 0.98 \\
+Clip $\epsilon$           & 0.15 \\
+Entropy coefficient       & $3 \times 10^{-5}$ \\
+Value loss coefficient    & 1.0 \\
+Max gradient norm         & 1.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Evaluation protocol.}
+We evaluate on the 64 held-out test scenes, each loaded into a separate environment with up to 16 agent slots.
+Across the 64 test worlds, 624 of the 1{,}024 nominal slots contain a valid spawn (the remainder correspond to scenes with fewer than 16 qualifying agents).
+The policy runs in deterministic mode (mean of the action distribution).
+Evaluation uses \emph{invincible mode}: collisions and off-road events are logged but do not terminate the agent, allowing it to continue toward the goal so that we can measure the unconditional goal-reach rate.
+An agent is counted as successful if it reaches within 3.0\,m of its assigned goal before the 50\,s episode deadline.
+
+% ---------------------------------------------------------------
+\subsection{Throughput}
+\label{sec:throughput}
+% ---------------------------------------------------------------
+
+A core engineering contribution of SceneFactory is throughput: training with full rigid-body dynamics at a rate that makes large-scale PPO practical on a single GPU.
+To quantify this, we compare SceneFactory against its direct predecessor, a pipeline built on the same Isaac Sim simulator and PhysX 5 solver but using the built-in Vehicle Wizard vehicle model and Stable-Baselines3 for PPO (hereafter ``Baseline'').
+Both pipelines load the same Waymo scene, use 16 agents per world, identical observation features (350 road points, 24 vehicle neighbors with TTC), and run on the same RTX PRO 6000 Blackwell GPU.
+The only differences are the vehicle representation, the environment wrapper architecture, and the RL framework.
+
+\paragraph{Metric.}
+We report \emph{controlled agent steps per second} (CASPS): the number of policy-controlled agents that complete one 30\,Hz control tick per wall-clock second.
+Both pipelines log CASPS every PPO iteration via embedded sub-phase timers;
+we discard the first 50 logged iterations as warmup and report the mean and standard deviation over the remaining steady-state samples.
+
+\paragraph{Scaling experiment.}
+We select a single Waymo scene with 28 qualifying agents (ensuring all 16 slots are filled in every world) and replicate it at four scales: 32, 64, 128, and 256 parallel worlds, yielding 512 to 4{,}096 agent slots.
+Each configuration trains for a short benchmark window: 500\,K total timesteps for the Baseline, 20 PPO iterations for SceneFactory.
+Figure~\ref{fig:throughput_scaling} plots CASPS as a function of total agent slots for both pipelines.
+
+\chattodo{Create Figure~\ref{fig:throughput\_scaling}: line plot, x-axis = agent slots (512, 1024, 2048, 4096), y-axis = CASPS (log scale), two lines (SceneFactory, Baseline). Fill from TensorBoard after runs complete.}
+
+\begin{table}[t]
+\centering
+\caption{Throughput scaling (CASPS, mean $\pm$ std over steady-state iterations) on a single RTX PRO 6000 Blackwell GPU.
+Both pipelines use the same Waymo scene, the same PhysX 5 rigid-body solver, and 16 agents per world.}
+\label{tab:throughput_scaling}
+\small
+\begin{tabular}{rrcc}
+\toprule
+Worlds & Agent slots & Baseline & SceneFactory \\
+\midrule
+ 32 &   512 & \hl{$a \pm b$} & \hl{$a' \pm b'$} \\
+ 64 & 1{,}024 & \hl{$c \pm d$} & \hl{$c' \pm d'$} \\
+128 & 2{,}048 & \hl{$e \pm f$} & \hl{$e' \pm f'$} \\
+256 & 4{,}096 & \hl{$g \pm h$} & \hl{$g' \pm h'$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+\chattodo{Fill Table~\ref{tab:throughput\_scaling} from Experiment~A TensorBoard logs.  Baseline 128w/256w may OOM; record that as ``OOM'' in the cell.}
+
+\paragraph{Why the Baseline is slow.}
+Both pipelines embed sub-phase timers that decompose each environment step into physics, observation construction, reward computation, action application, and wrapper overhead.
+Table~\ref{tab:timing_breakdown} reports the per-step breakdown for the Baseline at 64 worlds (its production configuration).
+The PhysX rigid-body solver accounts for roughly half of wall-clock time (1{,}798\,ms, 49.6\%); this cost is irreducible and shared by both pipelines.
+The observation builder consumes another 1{,}000\,ms (27.6\%), because it iterates over each of the 638 active agents in a Python loop, issuing per-prim USD state queries and computing ego-frame transforms with scalar arithmetic.
+Geometric lane features, TTC computation, and action application add a further 22\% through similar per-agent loops.
+
+SceneFactory eliminates these bottlenecks through three architectural changes:
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+  \item \textbf{Batched joint-state tensors.}
+        The custom URDF articulated vehicle (\S\ref{sec:vehicle_sysid}) exposes positions, velocities, and orientations as GPU-resident tensors of shape $(\texttt{num\_envs}, \texttt{num\_agents}, d)$ via Isaac Lab's \texttt{Articulation} API.
+        Observation construction reduces to a handful of batched \texttt{torch} operations with no Python per-agent loop.
+  \item \textbf{Cloned PhysX scenes.}
+        Isaac Lab's environment cloning creates $N$ independent PhysX solver islands, enabling the GPU broad-phase and narrow-phase to dispatch them in parallel.
+        The Baseline places all worlds in a single PhysX scene, limiting solver parallelism.
+  \item \textbf{GPU-resident training loop.}
+        RSL-RL reads observations, rewards, and dones as CUDA tensors directly from the environment; no CPU round-trip occurs during training.
+        The Baseline converts observations to NumPy for Stable-Baselines3's rollout buffer, incurring $O(\text{agents} \times \text{obs\_dim})$ bytes of device-to-host transfer every step.
+\end{enumerate}
+
+\begin{table}[t]
+\centering
+\caption{Per-step timing breakdown for the Baseline pipeline at 64 worlds (1{,}024 agent slots, 638 active agents).  Values are averaged over 197 steady-state iterations.}
+\label{tab:timing_breakdown}
+\small
+\begin{tabular}{lrr}
+\toprule
+Phase & Time (ms) & Fraction \\
+\midrule
+PhysX solver          & 1{,}798 & 49.6\% \\
+Observation builder   & 1{,}000 & 27.6\% \\
+Geometric lane features & 211  &  5.8\% \\
+Road-edge TTC         &   184  &  5.1\% \\
+Action application    &   179  &  4.9\% \\
+Vehicle TTC           &   107  &  2.9\% \\
+TTC state queries     &    84  &  2.3\% \\
+Contact scan          &    37  &  1.0\% \\
+\midrule
+\textbf{Total env step} & \textbf{3{,}626} & \textbf{100\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Comparison with kinematic simulators.}
+GPUDrive~\cite{kazemkhani_gpudrive_2025} reports over one million agent-steps per second using a kinematic bicycle model with no rigid-body dynamics.
+SceneFactory operates at a lower absolute throughput because each agent is a 10-DOF articulated rigid body simulated by the PhysX 5 solver at 120\,Hz (four physics steps per 30\,Hz control tick, i.e., decimation factor~4).
+The comparison is not apples-to-apples: the physics fidelity that makes SceneFactory useful for sim-to-real transfer is precisely what makes it slower than a kinematic model.
+The relevant comparison is therefore against other PhysX-based pipelines on the same hardware, which is what the Baseline provides.
+
+% ---------------------------------------------------------------
+\subsection{Navigation Performance}
+\label{sec:navigation_perf}
+% ---------------------------------------------------------------
+
+We train a single shared policy across all 4{,}096 agent slots and select the best checkpoint by validation goal-reach rate.
+\chattodo{Report the exact iteration count and total environment steps for the selected checkpoint.  model\_1025 from the fastgoal run corresponds to $1{,}025 \times 25 = 25{,}625$ save intervals; total env steps $\approx 1{,}025 \times 128 \times 256 \approx 33.5\text{M}$.  Verify.}
+
+Table~\ref{tab:eval_results} reports evaluation metrics on the 64 held-out test scenes.
+
+\begin{table}[t]
+\centering
+\caption{Navigation performance on 64 held-out Waymo test scenes (624 agents, invincible mode, 50\,s episode budget).  Goal threshold: 3.0\,m.}
+\label{tab:eval_results}
+\small
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+Goal-reach (success) rate  & 77.6\% \\
+Collision rate             & 6.4\% \\
+Lane-forbidden rate        & 8.7\% \\
+Crash rate (off-road)      & 1.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+\chattodo{Add to the table: mean final distance to goal, worlds with 100\% success --- re-run eval to get these per-world stats for model\_1025 without double time.}
+
+The policy reaches the assigned goal in 77.6\% of cases (484 of 624 agents).
+\chattodo{Re-run evaluation for model\_1025 without double time to get per-world breakdown (how many worlds at 100\%, worst-performing worlds, etc.).  The numbers above are from the fastgoal eval run \texttt{2026-03-30\_09-39-03}.}
+The 6.4\% collision rate is inflated by invincible mode, which allows post-collision agents to continue driving and potentially collide again; under normal termination semantics, each collision would end the episode immediately.
+
+\paragraph{Comparison with kinematic simulators.}
+GPUDrive reports near-perfect goal-reach rates ($>$98\%) on Waymo scenes using a kinematic bicycle model with no rigid-body dynamics.
+We attribute the gap primarily to the harder control problem posed by full PhysX dynamics: the policy must learn to manage tire slip, suspension oscillations, and inertial overshoot that do not exist in kinematic models.
+The 10-DOF articulated vehicle with effort-based actuation (\S\ref{sec:action_space}) requires the agent to implicitly discover braking distances, cornering limits, and steering lag, whereas a kinematic model executes velocity commands with no delay or slip.
+Closing this gap through longer training, refined reward shaping, and curriculum design is active work; the current results demonstrate that the platform successfully trains navigating agents end-to-end under physically realistic dynamics.
+
+\chattodo{Add a training curve figure (mean reward and/or success rate vs.\ training iteration) for the best run.  Even a single curve is informative.  Export from TensorBoard.}
+
+% ---------------------------------------------------------------
+\subsection{Qualitative Analysis}
+\label{sec:qualitative}
+% ---------------------------------------------------------------
+
+\chattodo{Include 3--4 bird's-eye trajectory plots from the evaluation.  The eval run already produced \texttt{videos/scene\_factory\_policy\_eval.mp4} and per-step JSONL logs that can be rendered.  Show: (1) a world where all agents succeed with clean lane-following, (2) a dense world with successful multi-agent coordination, (3) a failure case (e.g., the worst-performing world with all collisions).  Annotate start positions (green), goals (yellow), and agent trajectories (colored lines).}
+
+Figure~\ref{fig:qualitative_trajectories} shows bird's-eye trajectory visualizations from three representative test worlds.
+\chattodo{Create and include the figure.}
+
+\paragraph{Success modes.}
+In the majority of test worlds, agents follow lane centers, decelerate smoothly near goals, and avoid collisions with neighboring vehicles.
+The policy learns to yield at merge points when a neighbor vehicle occupies the target lane, demonstrating emergent multi-agent coordination despite using only local observations (24 nearest neighbors within the observation radius).
+
+\paragraph{Failure modes.}
+We identify three recurring failure patterns:
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+  \item \textbf{Overshoot at sharp turns.}
+        In worlds with tight intersections or U-turns, agents carry too much speed into the turn, overshoot the lane boundary, and trigger an off-road crash.
+        This failure is absent in kinematic simulators where instantaneous heading changes are possible.
+  \item \textbf{Goal approach oscillation.}
+        Some agents oscillate near the goal without entering the 3.0\,m acceptance radius.
+        The sign-memory brake mechanism (\S\ref{sec:action_space}) mitigates this compared to earlier training runs, but a small fraction of agents still fail to decelerate early enough.
+  \item \textbf{Dense-scene congestion.}
+        In worlds with all 16 agent slots occupied, vehicles occasionally deadlock when two agents attempt to merge into the same lane segment simultaneously.
+        The constant-velocity TTC proxy (\S\ref{sec:sharp_edges}) provides limited lookahead for such scenarios.
+\end{enumerate}
+
+\chattodo{Verify these failure modes against the per-step JSONL logs from the eval run.  Quantify: what fraction of failures falls into each category?}

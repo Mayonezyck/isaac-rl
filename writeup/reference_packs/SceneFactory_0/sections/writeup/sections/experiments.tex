@@ -1,0 +1,74 @@
+% ============================================================
+%  sections/experiments.tex  —  Experiments / Simulator Performance
+% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\chatstructure{Rename from ``Simulator Performance'' to ``Experiments'' — it reads more like a standard ML paper.  Structure into: (1) Experimental Setup, (2) Throughput Benchmarks, (3) Navigation Performance, (4) Ablations.  Each experiment should have a clear hypothesis, setup, result, and takeaway.}
+
+% ---------------------------------------------------------------
+% ORIGINAL SOC TEXT — preserved verbatim with annotations
+% ---------------------------------------------------------------
+
+In this section, gpudrive described about their simulator being able to parelleling the world, I need to further design experiments, that compare the training speed in the the Isaacsim, non accleerated baseline, and the real optimized version.
+%
+\chatcomment{Good experiment.  Suggested framing: ``Throughput scaling'' — plot env-steps/sec vs.\ (number of worlds $\times$ agents per world) on a single A100.  If you have a sequential Isaac Sim baseline (1 world, 1 agent), include it.  Even without a formal baseline, reporting absolute throughput numbers (e.g., ``4,200 env-steps/sec with 32 worlds $\times$ 8 agents = 256 vehicles on one A100'') is valuable.}
+
+\begin{chatbox}[Suggested Experiment 1: Throughput Benchmark]
+\textbf{Hypothesis:} GPU-parallel multi-world simulation in Isaac Lab achieves near-linear throughput scaling with the number of parallel worlds.\\
+\textbf{Setup:} Vary $N_\text{worlds} \in \{1, 4, 8, 16, 32\}$ with 8 agents each. Measure env-steps/sec.\\
+\textbf{Baseline:} Sequential single-world Isaac Sim execution (if available), or simply report absolute numbers.\\
+\textbf{Deliverable:} A throughput-vs-worlds plot + a table with wall-clock times.
+\end{chatbox}
+
+Another experiment is going to show the converge speed of policy, by using different number of unique scenes.
+%
+\chatcomment{This is a scene diversity experiment — very interesting.  It answers: ``Does training on more unique Waymo scenarios improve generalization?''  Use a fixed compute budget (same total env-steps) and vary the number of unique training scenes.  Evaluate on a held-out test set of scenes.}
+
+\begin{chatbox}[Suggested Experiment 2: Scene Diversity vs.\ Policy Quality]
+\textbf{Hypothesis:} Training on a larger set of unique Waymo scenarios improves goal-reaching success rate on held-out scenes.\\
+\textbf{Setup:} Train with $\{8, 32, 64, 128, 256\}$ unique scenes, same total training steps.  Evaluate goal-reach rate on 64 held-out scenes.\\
+\textbf{Deliverable:} A success-rate-vs-scene-count plot.
+\end{chatbox}
+
+Although we do have the training methrics for the trained agent's performance after a period of time, the success rate of the vehicles going to the final spot in these experiments are not good enough. Still looking to find why.
+%
+\chatcomment{This is the elephant in the room.  You need to address it directly rather than hide it.  For a \emph{systems paper}, the contribution is the platform, not SOTA driving.  Frame it honestly: ``We demonstrate that the pipeline trains navigating agents end-to-end with physically realistic dynamics; closing the performance gap with kinematic simulators is ongoing work.''}
+\chatrewrite{We hypothesize that the richer vehicle dynamics in SceneFactory (full rigid-body inertia, tire slip, suspension compliance) create a harder control problem than the simplified kinematic models used by GPUDrive.  Consequently, the current policies require longer training horizons and more careful reward shaping to achieve comparable goal-reaching rates.  We present the current results as a baseline for future improvement and analyze the failure modes below.}
+
+What's good now is that the gpu accleration part is actuallly good. Or if we can find a different baseline to compare with, to say our performance is actually not bad? since the gpudrive, yes they can have the performance of navigating unseen scenes to nearly 100 percent  success rate, but their system, vehicle dynamics are so much more simpler than ours. like no inertia. That's my assumption for the reason why the cars are not learning to get to objectives well.
+%
+\chatcomment{This is a valid and important hypothesis.  Turn it into a concrete experiment:}
+
+\begin{chatbox}[Suggested Experiment 3: Physics Fidelity Ablation]
+\textbf{Hypothesis:} Richer vehicle dynamics (PhysX articulated) make the navigation task harder to learn compared to simplified kinematic dynamics.\\
+\textbf{Setup:} If feasible, create a ``kinematic mode'' in SceneFactory (disable inertia / tire slip, use simple position-based motion) and train the same policy architecture with the same reward.  Compare convergence speed and final success rate.\\
+\textbf{Deliverable:} Learning curves (success rate vs.\ training steps) for PhysX-articulated vs.\ kinematic.\\
+\textbf{Why this matters:} If kinematic mode converges faster but produces less realistic behavior (e.g., can execute physically impossible turns), it directly validates the need for physics-based dynamics despite the harder optimization.  This turns your ``weakness'' into a contribution.
+\end{chatbox}
+
+\chatcomment{Even without the kinematic ablation, you can still present a meaningful analysis.  Show: (a) training curves (mean reward, goal-reach rate, collision rate vs.\ training steps) for each curriculum stage; (b) qualitative rollout visualizations (bird's-eye trajectories on example Waymo roads); (c) failure mode analysis — do agents overshoot goals? oscillate? fail to turn? collide at specific road geometries?}
+
+So here is still work in progress
+%
+\chattodo{Before Friday, at minimum: (1) report throughput numbers, (2) show training curves for your best Stage 1 run, (3) show a few qualitative trajectory plots, (4) state the performance gap hypothesis clearly.  This is enough for a workshop or first submission.}
+
+% ---------------------------------------------------------------
+%  Subsection stubs
+% ---------------------------------------------------------------
+
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+\chattodo{Hardware (single A100 80GB), software stack (Isaac Sim 4.x, Isaac Lab 2.x, RSL-RL, PyTorch 2.x, CUDA 12.x).  Hyperparameters: PPO (128 rollout steps, 16 mini-batches, 5 epochs, $\lambda=0.98$, $\gamma=0.99$, adaptive LR targeting KL 0.01).  Training configuration: 32 worlds $\times$ 8 agents.  Waymo scenes used (curated subset — describe curation criteria).}
+
+\subsection{Throughput Benchmarks}
+\label{sec:throughput}
+\chattodo{Report env-steps/sec for your current configuration.  Plot scaling if you have it.}
+
+\subsection{Navigation Performance}
+\label{sec:navigation_perf}
+\chattodo{Training curves, goal-reach success rate, collision rate, per-stage metrics.}
+
+\subsection{Qualitative Analysis}
+\label{sec:qualitative}
+\chattodo{Bird's-eye trajectory plots on 3--4 representative Waymo scenes.  Show both successes and failures.  Annotate failure modes.}

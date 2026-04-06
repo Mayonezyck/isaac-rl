@@ -57,10 +57,6 @@ OBSERVATION_MODE_DIMS = {
 }
 _COLLIDABLE_VEHICLE_BODIES = (
     "base_link",
-    "front_left_wheel_link",
-    "front_right_wheel_link",
-    "rear_left_wheel_link",
-    "rear_right_wheel_link",
 )
 
 
@@ -696,8 +692,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._teleport_only_reset_initialized = False
         self._teleport_only_reset_announced = False
         self._lane_touch_mask_cache_valid = False
-        self._collision_sensor_names_by_agent: list[list[str]] = []
-        self._collision_sensors_by_agent: list[list[ContactSensor]] = []
+        self._collision_sensor_names_by_agent: list[str] = []
+        self._collision_sensors_by_agent: list[ContactSensor | None] = []
         self._collision_force_cache_valid = False
         self._collision_force_cache = torch.zeros((0, 0), dtype=torch.float32)
         self._lane_touch_points_xy_m = torch.zeros((0, 0, 2), dtype=torch.float32)
@@ -767,8 +763,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._lane_touch_circle_centers_xy_b = circle_centers_b[:, :2].contiguous()
         self._lane_touch_circle_radius_m = float(circle_radius_m)
         self._agent_ids = list(cfg.possible_agents)
-        self._collision_sensor_names_by_agent = [[] for _ in self._agent_ids]
-        self._collision_sensors_by_agent = [[] for _ in self._agent_ids]
+        self._collision_sensor_names_by_agent = ["" for _ in self._agent_ids]
+        self._collision_sensors_by_agent = [None for _ in self._agent_ids]
         super().__init__(cfg, render_mode, **kwargs)
         self._configure_capture_camera_pose()
         self._lane_touch_circle_centers_b = self._lane_touch_circle_centers_b.to(self.device)
@@ -1015,18 +1011,18 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             return
         for agent_idx, agent_id in enumerate(self._agent_ids):
             filter_paths = self._vehicle_collision_filter_paths(agent_idx)
-            for body_name in _COLLIDABLE_VEHICLE_BODIES:
-                sensor_name = f"{agent_id}_contact_{body_name}"
-                sensor_cfg = ContactSensorCfg(
-                    prim_path=f"/World/envs/env_.*/Vehicle_{agent_idx}/{body_name}",
-                    update_period=0.0,
-                    debug_vis=False,
-                    filter_prim_paths_expr=filter_paths,
-                )
-                contact_sensor = ContactSensor(sensor_cfg)
-                self.scene.sensors[sensor_name] = contact_sensor
-                self._collision_sensor_names_by_agent[agent_idx].append(sensor_name)
-                self._collision_sensors_by_agent[agent_idx].append(contact_sensor)
+            body_name = _COLLIDABLE_VEHICLE_BODIES[0]
+            sensor_name = f"{agent_id}_contact_{body_name}"
+            sensor_cfg = ContactSensorCfg(
+                prim_path=f"/World/envs/env_.*/Vehicle_{agent_idx}/{body_name}",
+                update_period=0.0,
+                debug_vis=False,
+                filter_prim_paths_expr=filter_paths,
+            )
+            contact_sensor = ContactSensor(sensor_cfg)
+            self.scene.sensors[sensor_name] = contact_sensor
+            self._collision_sensor_names_by_agent[agent_idx] = sensor_name
+            self._collision_sensors_by_agent[agent_idx] = contact_sensor
 
     def _spawn_capture_camera(self) -> None:
         if not bool(self.cfg.capture_camera_enabled):
@@ -1554,16 +1550,14 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             return forces
 
         forces = torch.zeros((self._num_agents, self.num_envs), dtype=torch.float32, device=self.device)
-        for agent_idx, contact_sensors in enumerate(self._collision_sensors_by_agent):
-            force_mats: list[torch.Tensor] = []
-            for contact_sensor in contact_sensors:
-                force_matrix_w = contact_sensor.data.force_matrix_w
-                if force_matrix_w is not None and force_matrix_w.numel() > 0:
-                    force_mats.append(force_matrix_w)
-            if force_mats:
-                stacked_force_mats = torch.stack(force_mats, dim=0)
-                sensor_force = torch.linalg.vector_norm(stacked_force_mats, dim=-1).amax(dim=(-1, -2))
-                forces[agent_idx] = sensor_force.amax(dim=0)
+        for agent_idx, contact_sensor in enumerate(self._collision_sensors_by_agent):
+            if contact_sensor is None:
+                continue
+            force_matrix_w = contact_sensor.data.force_matrix_w
+            if force_matrix_w is None or force_matrix_w.numel() == 0:
+                continue
+            sensor_force = torch.linalg.vector_norm(force_matrix_w, dim=-1).amax(dim=(-1, -2))
+            forces[agent_idx] = sensor_force
         warmup_steps = max(0, int(self.cfg.agent_collision_warmup_steps))
         if warmup_steps > 0:
             warmup_mask = self._steps_since_reset_buf < warmup_steps

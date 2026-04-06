@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import random
 from typing import Any, Mapping, Sequence
 
 from .friction_api import FrictionEstimate, FrictionInput, estimate_friction
@@ -77,6 +78,52 @@ def friction_input_from_mapping(
     return FrictionInput(**merged)
 
 
+def _assignment_fill_mode(world_cfg: Mapping[str, Any]) -> str:
+    raw = world_cfg.get("assignment_fill_mode", world_cfg.get("assignments_fill_mode", "strict"))
+    return str(raw).strip().lower().replace("-", "_")
+
+
+def expand_world_assignments(
+    assignments: Sequence[Any],
+    *,
+    world_count: int,
+    world_cfg: Mapping[str, Any],
+) -> list[Any]:
+    assignment_list = list(assignments)
+    fill_mode = _assignment_fill_mode(world_cfg)
+
+    if fill_mode == "strict":
+        if len(assignment_list) != int(world_count):
+            raise ValueError(
+                "world.assignments must have exactly world_count entries "
+                f"({len(assignment_list)} != {world_count})"
+            )
+        return assignment_list
+
+    if fill_mode != "random_fill":
+        raise ValueError(
+            "Unsupported world.assignment_fill_mode. "
+            f"Expected 'strict' or 'random_fill', got {fill_mode!r}"
+        )
+
+    if not assignment_list:
+        raise ValueError("world.assignments must contain at least one entry when assignment_fill_mode=random_fill")
+
+    rng = random.Random(
+        int(world_cfg.get("assignment_fill_seed", world_cfg.get("assignments_fill_seed", 42)))
+    )
+    expanded: list[Any] = []
+    target_count = int(world_count)
+
+    while len(expanded) < target_count:
+        cycle = list(assignment_list)
+        rng.shuffle(cycle)
+        remaining = target_count - len(expanded)
+        expanded.extend(cycle[:remaining])
+
+    return expanded
+
+
 def prepare_stage_world_specs(cfg: Mapping[str, Any]) -> list[StageWorldSpec]:
     io_cfg = _as_mapping("io", cfg.get("io", {}))
     world_cfg = _as_mapping("world", cfg.get("world", {}))
@@ -98,11 +145,7 @@ def prepare_stage_world_specs(cfg: Mapping[str, Any]) -> list[StageWorldSpec]:
     if assignments:
         if not isinstance(assignments, Sequence) or isinstance(assignments, (str, bytes)):
             raise ValueError("world.assignments must be a sequence of mappings")
-        if len(assignments) != world_count:
-            raise ValueError(
-                "world.assignments must have exactly world_count entries "
-                f"({len(assignments)} != {world_count})"
-            )
+        assignments = expand_world_assignments(assignments, world_count=world_count, world_cfg=world_cfg)
 
         specs: list[StageWorldSpec] = []
         for world_index, entry in enumerate(assignments):

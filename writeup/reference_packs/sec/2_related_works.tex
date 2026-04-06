@@ -1,0 +1,72 @@
+\section{Related Works}
+\label{sec:Related Works}
+This work aims to present a combination for gpu-accelerated, weather aware, multi-world multi-agent training pipeline for physically grounded safety aware driving behavior. The work also presented a weather to friction module that takes the precipation and pavement parameters, and output effective friction factors. An integration of an example downstream task of having a video generating world model generate the traffic regulated video is also presented. Thus, other related researches are mentioned here for readers' reference. The related works are going to be reviewed in three categories. First, we will discuss the recent developments of existing simulators for autonomous driving scenarios. Secondly, safety aware driving behavior learning will be discussed; related researches about vehicle dynamic in different weather conditions will be briefly mentioned as well. Lastly, a review for current video generation world models will be discussed. 
+
+% Since this paper mostly tried to fill tin the gap of world model not being able to generate trustworthy physics and behavior, the related works branch into three parts.
+% \subsection{Driving simulators}
+% As having robotic agents learning how to drive in real physical world is too expensive and unrealistic, autonomous driving simulators are required. There exists multiple open source software in the autonomous driving community, 
+% CARLA \cite{Dosovitskiy17} is one of the first open source autonomous driving simulator which based on a widely used game engine, Unreal. It's equipped with PhysX engine, and packed with multiple well-made maps. There are a lot of supporting features and fields of customization in CARLA. However, the design makes it computationally costly to run, not able to be gpu-accelerated, thus fail in tasks like hardware accelerated multi-world multi-agent scene. What's more, crafting the map that can be used in CARLA is labor intensive, the focus is having a delicately crafted scene, but not easily using real world data. In order to solve that problem, 
+% MetaDrive \cite{li2022metadrive}, another open source simulator. They aim to solve the problem of limited available scenes in CARLA. In MetaDrive, the users can use open dataset like Waymo Motion Dataset \cite{Kan_2024_icra}, or procedurally generate traffic scenes. They branded their scene to be limitless. MetaDrive is also supported by physics engine. However, it's not hardware accelerated, and only one scene can be loaded at the same time. Although tire friction is reported as a configurable object in MetaDrive, the capability of training agents in an environment with different friction is not presented. 
+% The comparison with other driving simulators are shown in Table \ref{tab:simulators}. Most physically enabled simulators cannot achieve hardware acceleration, and even few integrates the capability of having realistic pavement friction simulation. 
+\subsection{Driving simulators}
+As training robotic agents to drive in the real physical world is expensive and impractical, autonomous driving simulators are essential. There exist multiple open-source software platforms in the autonomous driving community.
+
+CARLA \cite{Dosovitskiy17} is one of the earliest open-source autonomous driving simulators, built on the widely used Unreal game engine. It is equipped with the PhysX engine and provides multiple well-designed maps. CARLA offers extensive features and customization options. However, its design makes it computationally expensive to run and not suitable for GPU-accelerated workloads, limiting its applicability in tasks such as hardware-accelerated multi-world, multi-agent simulations. Moreover, creating maps for CARLA is labor-intensive. Its focus is on highly detailed, handcrafted scenes, rather than efficiently leveraging real-world data.
+
+To address these limitations, MetaDrive \cite{li2022metadrive} was introduced as another open-source simulator. It aims to overcome the limited scene diversity in CARLA by allowing users to construct environments from open datasets such as the Waymo Motion Dataset \cite{Kan_2024_icra}, or through procedural generation. MetaDrive promotes its ability to generate virtually unlimited scenes. It is also backed by a physics engine. However, it does not support hardware acceleration, and only a single scene can be loaded at a time. Although tire friction is reported as a configurable parameter in MetaDrive, its capability to train agents under varying friction conditions has not been demonstrated.
+
+GPUDrive \cite{kazemkhani_gpudrive_2025}, built on Madrona, achieves impressive throughput for multi-scene, multi-agent training. However, its simulation is not supported by a physics engine.
+
+A comparison with other driving simulators is shown in Table \ref{tab:simulators}. Most physically realistic simulators lack hardware acceleration, and only a few incorporate realistic pavement friction modeling.
+
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l X X X X X X X X X}
+\toprule
+\textbf{Simulator} & \textbf{Multi-agent} & \textbf{GPU-Accel} & \textbf{Sensor Sim} & \textbf{Expert Data} & \textbf{Sim-agents} & \textbf{Physics Aware} & \textbf{Weather Aware}& \textbf{Routes / Goals} \\
+\midrule
+TORCS \cite{wymann_torcs_nodate}&  &  & \cmark &  & \cmark & \cmark &  & - \\
+GTA V \cite{martinez_beyond_2017} &  &  & \cmark &  & & \cmark& \cmark & - \\
+CARLA \cite{Dosovitskiy17} &  &  & \cmark &  & \cmark & \cmark & \cmark &Waypoints \\
+Highway-env \cite{highway-env} &  &  &  &  &  & & & - \\
+Sim4CV \cite{muller_sim4cv_2018} &  &  & \cmark &  &  & \cmark & &Directions \\
+SUMMIT \cite{cai_summit_2020} & $\checkmark$ ($\geq 400$) &  & \cmark &  & \cmark & \cmark & \cmark & - \\
+MACAD \cite{palanisamy_multi-agent_2019} & \cmark &  & \cmark &  & \cmark & \cmark & & Goal point \\
+SMARTS \cite{zhou_smarts_2021} & \cmark &  &  &  &  & \cmark & & Waypoints \\
+MADRaS \cite{santara_madras_2021} & $\checkmark$ ($\geq 10$) &  & \cmark &  &   & \cmark & & Goal point \\
+DriverGym \cite{kothari_drivergym_2021} &  &  &  & \cmark & \cmark  & & & - \\
+VISTA \cite{amini_vista_2022}& \cmark &  & \cmark & \cmark &   & & & - \\
+nuPlan \cite{caesar_nuplan_2022} &  &  & \cmark & \cmark & \cmark &  & &Waypoints \\
+Nocturne \cite{vinitsky_nocturne_2022} & $\checkmark$ ($\geq 128$) &  & \cmark & \cmark & \cmark & & & Goal point \\
+MetaDrive \cite{li2022metadrive} & \cmark &  & \cmark & \cmark & \cmark & \cmark & \cmark & - (double check) \\
+InterSim \cite{sun_intersim_2022} & \cmark &  &  & \cmark & \cmark &  & &Goal point \\
+TorchDriveSim \cite{lavington_torchdriveenv_2024} & \cmark & \cmark &  &  &  &  & &- \\
+BITS \cite{xu_bits_2022}& \cmark &  &  & \cmark & \cmark &  & &Goal point \\
+Waymax \cite{gulino_waymax_2023} & $\checkmark$ ($\geq 128$) & \cmark &  & \cmark & \cmark &  & &Waypoints \\
+GPUDrive \cite{kazemkhani_gpudrive_2025} & $\checkmark$ ($\geq 128$) & \cmark & \cmark & \cmark & \cmark &  & &Goal point \\
+\textbf{SceneFactory (ours)} & $\checkmark$ ($\geq 128$) & \cmark &  & \cmark & \cmark & \cmark & \cmark &Goal point \\
+\bottomrule
+\end{tabularx}
+\caption{Comparison of driving simulators across key capabilities.}
+\label{tab:simulators}
+\end{table*}
+
+% \subsection{Weather Aware Driving Behavior Research}
+% Researchers in transportation studies have been studying the relationship between weather and road condition for decades. However, in the sector of autonomous driving, the driving behavior in adverse weathers were not the focus of the field \cite{gaonkar_enhancing_2025}. Autonomous driving development has been successful under the assumption of fair weather \cite{li_autonomous_2025}, and most research that focuses on adverse weather, is in the perception/sensor field. Researchers seem to care more about the degraded performance of sensors in adverse weather, \cite{song_weather_2020}\cite{li_autonomous_2025}\cite{fursa_worsening_2021}\cite{rahmati_edge_2025}but ignored the fact that the vehicle dynamic also changes under extreme weathers. Only until recent years, studies conducted in CARLA has been studying the driving behavior in low-friction environments \cite{aghdasian_tackling_2025}
+
+\subsection{Weather-Aware Driving Behavior Research}
+The relationship between weather conditions and road surface properties has been studied for decades in transportation research. However, within the autonomous driving community, driving behavior under adverse weather conditions has received comparatively less attention \cite{gaonkar_enhancing_2025}. Most autonomous driving systems have achieved strong performance under the implicit assumption of favorable weather conditions \cite{li_autonomous_2025}. 
+
+Existing research on adverse weather primarily focuses on perception and sensing, investigating how sensor performance degrades under conditions such as rain, fog, or snow \cite{song_weather_2020, li_autonomous_2025, fursa_worsening_2021, rahmati_edge_2025}. In contrast, comparatively fewer works in the autonomous driving literature explicitly consider how vehicle dynamics and driving behavior change under such conditions, although these aspects have been studied in related fields such as transportation safety and vehicle dynamics\cite{chen_influence_2019}\cite{ahmed_impacts_2018}\cite{peng_examining_2018}.
+
+Only recently have some autonomous studies \cite{aghdasian_tackling_2025} begun to explore driving behavior in low-friction environments using simulation platforms such as CARLA . It is important to incorporate both physical dynamics and behavior adaptation when modeling autonomous driving in adverse weather.
+
+
+
+\subsubsection{note}\cite{zhao_tire-pavement_2024}'s method is used to map tire configs and waterfilm depth to effective friction factor.
+
+
+\subsection{World Models} World models became a hot research topic following the publication of its original paper \cite{ha2018worldmodels}. The world model can be used as a state machine, that takes a current state, and action, and output the state and action for the next state. What also can be referred to as a world model, is the video/world generation model, that emerged in recent years, following the 
+

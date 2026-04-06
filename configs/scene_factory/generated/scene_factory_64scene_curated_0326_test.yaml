@@ -399,7 +399,7 @@ world:
       precip_intensity_mmph: 0.0
       water_film_mm: 0.0
 road:
-  render_mode: explicit_prims
+  render_mode: point_instancer
   jump_break_m: 3.0
   seg_width: 0.1
   seg_height: 0.01

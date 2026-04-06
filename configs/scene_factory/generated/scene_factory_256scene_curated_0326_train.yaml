@@ -2,9 +2,9 @@ io:
   scene_json_dir: /home/yz8733/Github/isaac-rl/data/processed/waymo_scenes_json
 world:
   root_container: /World/SceneFactoryWorlds
-  world_count: 64
-  grid_cols: 8
-  rows: 8
+  world_count: 256
+  grid_cols: 16
+  rows: 16
   world_size_m:
   - 200.0
   - 200.0
@@ -13,6 +13,8 @@ world:
   bounds_size_m: 200.0
   origin_mode: center
   origin_center_mode: mean
+  assignment_fill_mode: random_fill
+  assignment_fill_seed: 42
   assignments:
   - scene_json: scene_000000.json
     friction:

@@ -18,8 +18,10 @@ import yaml
 
 try:
     from . import ROAD_TYPE_ORDER, estimate_friction, friction_input_from_mapping
+    from .world_pipeline import expand_world_assignments
 except ImportError:  # pragma: no cover - supports direct script execution.
     from src.trfc import ROAD_TYPE_ORDER, estimate_friction, friction_input_from_mapping
+    from src.trfc.world_pipeline import expand_world_assignments
 
 
 ROAD_COLOR_MAP = {
@@ -176,11 +178,7 @@ def build_world_report_rows(cfg: Mapping[str, Any]) -> list[WorldReportRow]:
     rows: list[WorldReportRow] = []
 
     if assignments:
-        if len(assignments) != world_count:
-            raise ValueError(
-                "world.assignments must have exactly world_count entries "
-                f"({len(assignments)} != {world_count})"
-            )
+        assignments = expand_world_assignments(assignments, world_count=world_count, world_cfg=world_cfg)
         for world_index, entry in enumerate(assignments):
             entry_mapping = _as_mapping(f"world.assignments[{world_index}]", entry)
             scene_json_name = _coerce_scene_json_name(entry_mapping.get("scene_json"))

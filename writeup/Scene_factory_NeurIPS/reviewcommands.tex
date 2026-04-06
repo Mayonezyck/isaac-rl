@@ -1,0 +1,62 @@
+% ============================================================
+% Review / Advisor Comment Commands for SceneFactory manuscript
+% Usage:  \input{reviewcommands}  in preamble of main.tex
+%
+% NOTE: neurips_2026.sty already loads xcolor, so we do NOT
+%       reload it here.  We also skip loading marginnote since
+%       NeurIPS geometry is tight.
+% ============================================================
+
+% ---- extra packages for review annotations ----
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+% ---- colour palette -----------------------------------------------------
+\definecolor{chatBlue}{HTML}{1565C0}
+\definecolor{chatGreen}{HTML}{2E7D32}
+\definecolor{chatOrange}{HTML}{E65100}
+\definecolor{chatRed}{HTML}{C62828}
+\definecolor{chatPurple}{HTML}{6A1B9A}
+\definecolor{chatTeal}{HTML}{00838F}
+\newcommand{\yicheng}[1]{\textcolor{brown}{#1}}
+
+% ---- inline commands ----------------------------------------------------
+
+\newcommand{\chatcomment}[1]{%
+  {\color{chatBlue}\sffamily\bfseries [Comment:\ #1]}%
+}
+\newcommand{\chatrewrite}[1]{%
+  {\color{chatGreen}\sffamily\bfseries [Rewrite:\ #1]}%
+}
+\newcommand{\chatcite}[1]{%
+  {\color{chatOrange}\sffamily\bfseries [Cite:\ #1]}%
+}
+\newcommand{\chatfactcheck}[1]{%
+  {\color{chatRed}\sffamily\bfseries [Fact-check:\ #1]}%
+}
+\newcommand{\chatstructure}[1]{%
+  {\color{chatPurple}\sffamily\bfseries [Structure:\ #1]}%
+}
+\newcommand{\chattodo}[1]{%
+  {\color{chatTeal}\sffamily\bfseries [TODO:\ #1]}%
+}
+
+% ---- block-level box for longer advisor notes ---------------------------
+\newtcolorbox{chatbox}[1][Advisor Note]{%
+  colback=chatBlue!5!white,
+  colframe=chatBlue!70!black,
+  fonttitle=\sffamily\bfseries,
+  title={#1},
+  breakable,
+  left=4pt, right=4pt, top=4pt, bottom=4pt,
+}
+
+% ---- toggle: uncomment ALL lines below to hide review markup -----------
+% \renewcommand{\chatcomment}[1]{}
+% \renewcommand{\chatrewrite}[1]{}
+% \renewcommand{\chatcite}[1]{}
+% \renewcommand{\chatfactcheck}[1]{}
+% \renewcommand{\chatstructure}[1]{}
+% \renewcommand{\chattodo}[1]{}
+% \renewcommand{\yicheng}[1]{#1}
+% \newtcolorbox{chatbox}[1][]{blank, breakable, before skip=0pt, after skip=0pt}

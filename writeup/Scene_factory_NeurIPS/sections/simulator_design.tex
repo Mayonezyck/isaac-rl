@@ -1,0 +1,595 @@
+% ============================================================
+%  sections/simulator_design.tex  —  Simulator Design (Methodology)
+% ============================================================
+\section{Simulator Design}
+\label{sec:simulator_design}
+
+\chatstructure{This is the core technical section.  I recommend splitting it into the following subsections:
+\begin{enumerate}
+  \item \textbf{System Overview} — one-paragraph + architecture figure showing the full pipeline (Waymo $\to$ JSON $\to$ USD $\to$ Isaac Sim multi-world stage $\to$ RL training loop).
+  \item \textbf{Data Processing \& Procedural Scene Construction} — the Waymo-to-USD pipeline, world layout, road prim generation (PointInstancer vs.\ explicit mesh), metadata baking.
+  \item \textbf{Vehicle Asset Generation \& System Identification} — USD articulated vehicle, PhysX joint setup, CEM-based parameter fitting.
+  \item \textbf{Weather-to-Friction Module} — Zhao et al.\ model, API design, PhysX material property updates.
+  \item \textbf{Observation Space} — ego state, road geometry (KNN), neighbor vehicles, weather context.
+  \item \textbf{Action Space} — throttle, steering, brake $\to$ PhysX joint targets.
+  \item \textbf{Reward Design} — goal bonus, route progress, lane-keeping, collision/TTC penalties, off-road penalties.
+  \item \textbf{Training Curriculum} — curriculum design (stages TBD).
+\end{enumerate}
+This mirrors the GPUDrive structure you mentioned, which is appropriate.}
+
+As discussed in Section~\ref{sec:related_work}, physically realistic driving simulators such as CARLA and MetaDrive cannot execute multiple independent worlds in parallel, while batched simulators such as Waymax and GPUDrive simplify vehicle dynamics to bicycle or kinematic models.
+SceneFactory bridges this gap.
+We build on NVIDIA Isaac Sim and Isaac Lab~\cite{nvidia_isaac_2025, mittal_orbit_2023} and adopt elements of the observation and network design from GPUDrive~\cite{kazemkhani_gpudrive_2025}, specifically the $k$-nearest-neighbor road-point encoding and per-entity MLP with max-pool aggregation.
+Our new contributions include procedural USD scene construction from Waymo data, articulated PhysX vehicle dynamics with system identification, and a physics-based weather-to-friction module.
+This section describes each component.
+
+% ==================================================================
+\subsection{System Overview}
+\label{sec:system_overview}
+% ==================================================================
+
+\paragraph{Platform choice.}
+SceneFactory requires a simulation backend that can run a full physics engine across many independent worlds simultaneously.
+NVIDIA Isaac Sim meets both requirements.
+It is built on the Omniverse platform with PhysX~5 as the dynamics solver and OpenUSD as the scene description format, allowing vehicles to be modeled as articulated rigid bodies with suspension, steering, and wheel-spin joints.
+Isaac Lab~\cite{mittal_orbit_2023} extends Isaac Sim with a vectorized reinforcement learning environment layer, including the \texttt{DirectMARLEnv} abstraction for multi-agent tasks.
+Isaac Lab's cloning mechanism replicates a template scene across $N$ parallel environments on the GPU.
+Its Fabric-based state management keeps the entire training loop (physics stepping, observation computation, reward evaluation, and policy inference) on-device, eliminating host-device data transfers in the inner loop.
+
+\paragraph{Pipeline overview.}
+The SceneFactory pipeline consists of four stages, illustrated in Figure~\ref{fig:architecture}:
+
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+  \item \textbf{Data ingestion.}
+  Raw Waymo Open Motion Dataset~\cite{Kan_2024_icra} TFRecord files are converted offline into per-scenario JSON files.
+  Each JSON encodes the road topology (typed polylines for lane centers, road edges, and road lines) and agent metadata (vehicle start poses, goal positions, and trajectory data).
+
+  \item \textbf{Procedural scene construction.}
+  A scene builder reads the JSON manifests and constructs USD road geometry for each scenario.
+  Multiple scenarios are arranged in a 2D grid layout (configurable spacing, typically 200\,m between world centers) to form a single composite stage.
+  Road geometry metadata (polyline coordinates, directions, lane types, and half-widths) is baked into USD \texttt{customData} attributes on each world's root prim for constant-time runtime access.
+  Vehicle start and goal positions are extracted, centered, and filtered per scenario.
+
+  \item \textbf{Environment instantiation.}
+  Isaac Lab clones the template environment $N$ times.
+  After cloning, SceneFactory builds road geometry independently inside each environment, so every parallel world can host a different Waymo-derived scenario.
+  Procedurally generated vehicle assets (four-wheel suspension, front-wheel steering, front-wheel drive) are spawned at scenario-specified start poses, with up to $M$ agents per world.
+  The weather-to-friction module (Section~\ref{sec:weather_friction}) computes per-world friction coefficients that are encoded into the policy's observation; per-world physics material variation is planned but not yet active (see Section~\ref{sec:weather_friction} for details).
+
+
+
+  \item \textbf{Training loop.}
+  The multi-agent environment is wrapped into a shared-policy vectorized interface that exposes one rollout slot per agent, yielding $N \times M$ total slots.
+  A PPO policy~\cite{schulman_proximal_2017}, trained via the RSL-RL framework~\cite{schwarke_rsl-rl_2025}, consumes structured observations (ego state, road geometry context, neighbor vehicles, and optional weather context) and produces continuous throttle, steering, and brake commands decoded into joint targets.
+  All inference, advantage estimation, and gradient updates remain on-device.
+\end{enumerate}
+
+\chattodo{\textbf{ACTION ITEM — FIGURE:} Create the architecture / pipeline diagram (Figure~\ref{fig:architecture}).  Suggested content: Waymo TFRecord $\to$ JSON $\to$ USD multi-world stage $\to$ Isaac Lab DirectMARLEnv $\to$ PPO training via RSL-RL.  This is arguably the most important figure in the paper.  Consider a horizontal flow with callout boxes for the weather-to-friction module and the vehicle sysid module feeding into the environment instantiation stage.}
+\chattodo{\textbf{ACTION ITEM — LABEL:} Define \texttt{fig:architecture} once the figure file is added to \texttt{figures/}.}
+
+\paragraph{Design principles.}
+Three principles guided SceneFactory's design.
+First, \emph{physics fidelity}: vehicles are articulated bodies with suspension, tire forces, and contact events resolved by the physics engine, rather than kinematic proxies.
+Second, \emph{scene diversity}: any Waymo scenario can be loaded without recompilation; adding a scenario requires only a JSON file and a configuration entry.
+Third, \emph{throughput}: the entire training loop stays on-device, allowing a shared navigation policy to be trained across thousands of agents in diverse road environments on a single GPU.
+The following subsections detail each component.
+
+\subsection{Data Processing and Procedural Scene Construction}
+\label{sec:scene_construction}
+\chattodo{Describe: (1) Waymo TFRecord to JSON conversion — what fields are extracted (road polylines, agent trajectories, start-goal pairs); (2) world layout — grid arrangement with 200m spacing; (3) road prim generation — PointInstancer mode vs.\ explicit-prim mode; (4) metadata baking into USD custom data attributes for constant-time runtime access.  This is a genuine engineering contribution — GPUDrive compiles scenarios into C++ at build time, your approach via USD is more flexible.}
+\chatcite{Ettinger et al., 2021 (Waymo Open Motion Dataset).}
+
+
+SceneFactory consumes driving scenarios from the Waymo Open Motion Dataset~\cite{Kan_2024_icra} and constructs physically simulated USD environments through a three-step offline pipeline: data extraction, per-scenario world building, and multi-world grid assembly.
+
+\paragraph{Waymo TFRecord to JSON.}
+Each Waymo TFRecord contains up to 30{,}000 roadgraph sample points and 128 tracked agents across 91 timesteps.
+An offline conversion script extracts two categories of information per scenario.
+First, \emph{road topology}: sample points are grouped by polyline ID, and points within each polyline are PCA-ordered along the dominant XY axis to ensure consistent traversal direction.
+Each polyline retains its Waymo-assigned type code (e.g., lane centers are types 1--2, road edges are types 15--16), per-point 3D coordinates, and per-point direction vectors.
+Second, \emph{agent metadata}: for each valid vehicle track, the script records the start pose (position and yaw at the first observed timestep) and the goal pose (position and yaw at the last observed timestep).
+The output is one JSON file per scenario, containing a \texttt{road.polylines} array and an \texttt{agents.items} array.
+
+\paragraph{Per-scenario world building.}
+Given a scene JSON, a world builder constructs USD road geometry through the following steps:
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Re-centering.}
+  A scene center is computed as the mean of all road polyline points.
+  All coordinates (road and agent) are shifted so that each scenario is locally centered at the origin.
+
+  \item \textbf{Z-flattening.}
+  Waymo road elevation data is collapsed to a constant ground height ($z=0$). Currently this is a simplified design, and future work will extend the driving to include elevation of the terrain as well.
+
+  \item \textbf{Segment generation.}
+  Each consecutive pair of polyline points defines an oriented box segment.
+  The segment is placed at the midpoint, rotated to align with the point-to-point direction, and assigned a configurable width (default 0.10\,m) and height (default 0.10\,m).
+  Segment pairs separated by more than 3.0\,m are treated as discontinuities and skipped.
+  Both endpoints must fall within a bounding box of $\pm B/2$ from the scene center ($B=200$\,m in our experiments) to be included.
+
+  \item \textbf{USD prim creation.}
+  Road segments are grouped by polyline type.
+  Each group is rendered as a \texttt{PointInstancer} with a single unit-cube prototype; per-segment position, orientation, and scale arrays encode the full geometry compactly.
+  Each type group receives a distinct material color for visualization.
+
+  \item \textbf{Metadata baking.}
+  After all segments are created, five arrays are written to the world root prim's USD \texttt{customData}: segment midpoint positions, direction vectors, polyline type codes, half-lengths (half the point-to-point distance), and half-widths.
+  These arrays encode the full road geometry in a flat, GPU-friendly format that can be loaded at runtime without re-parsing the scene JSON or traversing the USD prim hierarchy.
+\end{enumerate}
+
+\paragraph{Agent spawn extraction.}
+Vehicle start and goal positions are parsed from the same scene JSON.
+Coordinates are re-centered using the same scene center as the road geometry.
+Agents whose start position falls outside the bounding box are discarded.
+Agents whose start position is already within the goal radius (default 3.0\,m) are optionally filtered out to avoid trivial episodes.
+The remaining agents are capped at $M$ per world (e.g., $M{=}16$ in training).
+
+\paragraph{Multi-world grid assembly.}
+To populate $N$ parallel environments, SceneFactory arranges worlds in a 2D grid.
+Each world occupies a cell of size $200 \times 200$\,m with configurable padding (typically 200\,m), yielding a pitch of 400\,m between world centers.
+The world root prim receives an XformOp translation to place it at the correct grid position.
+World-to-environment assignment is controlled by the curriculum configuration: in \emph{fixed} mode all environments load the same scenario, while in \emph{random-fill} mode a curated list of scenarios is shuffled and tiled to fill $N$ slots.
+
+\paragraph{Post-clone road injection.}
+Isaac Lab's environment cloning mechanism replicates a single template environment $N$ times.
+However, SceneFactory requires each environment to host a \emph{different} road scenario.
+We solve this by building road geometry \emph{after} Isaac Lab's clone step: the template environment contains only the vehicle articulations and ground plane, and per-environment road prims are injected into the already-cloned USD stage.
+This avoids cloning complex instancer prims (which is unreliable under Fabric) and allows heterogeneous road layouts across all environments.
+
+\paragraph{GPU metadata tensors.}
+At simulation startup, the baked \texttt{customData} arrays are read from each environment's world root prim and loaded into padded GPU tensors of shape $(N, P_{\max}, d)$, where $P_{\max}$ is the maximum segment count across all environments and $d$ is the feature dimension.
+A boolean validity mask distinguishes real segments from padding.
+These tensors support vectorized lane-proximity queries and oriented-box overlap tests at runtime, enabling reward computation and observation encoding without any USD access during training.
+
+
+\chattodo{\textbf{ACTION ITEM --- FIGURE:} Consider adding a small figure showing the JSON-to-USD pipeline for one scenario: raw Waymo polylines $\to$ re-centered segments $\to$ USD instancer prims $\to$ multi-world grid.}
+
+
+\subsection{Vehicle Asset Generation and System Identification}
+\label{sec:vehicle_sysid}
+\chattodo{Describe: (1) how the articulated PhysX vehicle USD asset is constructed (4 wheels, front-wheel steering revolute joints, rear-wheel drive effort joints, contact sensors); (2) CEM-based system identification to fit PhysX parameters (tire friction, suspension damping/stiffness) against reference Waymo trajectory data; (3) report the tracking error from sysid — this quantifies what ``more realistic'' actually means.}
+\chatcomment{The sysid results are critical.  If you claim physics fidelity as a differentiator over GPUDrive, you need numbers showing that your PhysX vehicle tracks reference trajectories better than a bicycle/kinematic model.}
+
+SceneFactory uses a procedurally generated articulated vehicle rather than a hand-authored asset.
+The vehicle is defined by a parametric specification, converted to URDF, imported into Isaac Sim as a USD asset, and then calibrated via system identification.
+
+\paragraph{Articulated vehicle structure.}
+The vehicle is a 10-DOF articulated rigid body.
+The kinematic chain is rooted at a box chassis ($4.0 \times 2.0 \times 1.0$\,m, 1800\,kg) and branches to four corners, each with the following joint chain:
+%
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item A \textbf{prismatic} joint (Z-axis) models the suspension, with travel $\pm0.175$\,m.
+  \item On the two front corners only, a \textbf{revolute} joint (Z-axis) models steering, with limits $\pm32^{\circ}$.
+  \item A \textbf{continuous} joint (Y-axis) models wheel spin.
+\end{itemize}
+%
+Each wheel is a cylinder (radius 0.35\,m, width 0.15\,m, 20\,kg).
+The wheelbase is 2.6\,m and the track width is 2.0\,m.
+Inertia tensors for all links are computed from solid-body formulas (box for chassis and suspension links, cylinder for wheels).
+The URDF is generated programmatically from a frozen dataclass (\texttt{StudentVehicleSpec}) and imported into Isaac Sim via the URDF importer with joint-drive and self-collision settings enabled.
+Post-import processing authors PhysX contact materials (static and dynamic friction $= 1.0$, restitution $= 0.0$, compliant contact) and de-instances mesh prims for compatibility with Fabric.
+
+\paragraph{Action decoding.}
+The policy outputs three continuous actions per agent: throttle $\in [0,1]$, steering $\in [-1,1]$, and brake $\in [0,1]$.
+These are decoded into PhysX joint commands as follows.
+Steering is converted to a position target $\theta_{\mathrm{target}} = \text{steering} \times \theta_{\max}$ and applied via a PD controller:
+\begin{equation}
+\label{eq:steer_pd}
+\tau_{\mathrm{steer}} = \mathrm{clamp}\!\bigl(K_p\,(\theta_{\mathrm{target}} - \theta) - K_d\,\dot{\theta},\;\pm\tau_{\mathrm{steer,max}}\bigr).
+\end{equation}
+Throttle applies a drive torque to the two front wheels (front-wheel drive): $\tau_{\mathrm{drive}} = \text{throttle} \times \tau_{\mathrm{drive,max}}$.
+Brake applies an opposing torque to all four wheels, with sign determined by wheel angular velocity (and a sign-memory mechanism to handle zero-velocity transitions).
+An external wrench on the chassis provides two stabilization terms: a lateral velocity damping force $F_{\mathrm{lat}} = -\lambda_{\mathrm{lat}} \cdot f_{\mathrm{lat}} \cdot v_{\mathrm{lat}}$ and a yaw damping torque $\tau_z = -\lambda_{\mathrm{yaw}} \cdot f_{\mathrm{lat}} \cdot \omega_z$, where $f_{\mathrm{lat}}$ is the sysid-tuned lateral friction scale for the active surface type.
+The concrete PD gains and torque limits are listed in Table~\ref{tab:action_params} (\S\ref{sec:actions}).
+
+% \chattodo{Report the final PD gains ($K_p$, $K_d$) and torque limits from the sysid result used in experiments.}
+
+\paragraph{System identification.}
+The vehicle model has 20 tunable dynamics parameters: drive, brake (front/rear), and steering torques; steering PD gains and limits; suspension stiffness and damping; wheel mass and inertia scale; chassis center-of-mass offset; lateral and yaw damping coefficients; and per-surface friction scales for three surface types (dry, wet, gravel).
+We fit these parameters using the cross-entropy method (CEM).
+
+\emph{Reference data.}
+A PhysX ``teacher'' vehicle (the Isaac Sim built-in PhysX vehicle model, not our articulated URDF vehicle) executes seven scripted maneuvers on a multi-surface patch track: straight-line acceleration and braking, left and right step-steer inputs, constant-radius turns, sinusoidal steering, and an S-curve surface transition across dry asphalt ($\mu_s{=}1.0$), wet asphalt ($\mu_s{=}0.75$), and gravel ($\mu_s{=}0.60$).
+Each rollout records per-frame chassis position, yaw, speed, yaw rate, wheel angular velocities, and steer angles at 60\,Hz.
+
+\emph{Loss function.}
+Let $x^{\mathrm{ref}}_{k,t}$ denote the teacher's value for channel $k$ at frame $t$, and $x^{\mathrm{stu}}_{k,t}$ the corresponding student value under a candidate parameter vector.
+Each rollout has $T$ frames recorded at 60\,Hz.
+The per-channel mean squared error is $\mathrm{MSE}_k = \tfrac{1}{T}\sum_{t=1}^{T}(x^{\mathrm{stu}}_{k,t} - x^{\mathrm{ref}}_{k,t})^2$.
+The full objective adds two terminal-frame penalties that emphasize end-of-maneuver accuracy:
+\begin{equation}
+\label{eq:sysid_loss}
+\mathcal{L} = \sum_{k \in \mathcal{K}} w_k \cdot \mathrm{MSE}_k
+  + w_{\mathrm{pos,final}} \cdot \|\mathbf{p}^{\mathrm{stu}}_T - \mathbf{p}^{\mathrm{ref}}_T\|^2
+  + w_{\mathrm{spd,final}} \cdot (s^{\mathrm{stu}}_T - s^{\mathrm{ref}}_T)^2,
+\end{equation}
+where $\mathcal{K} = \{\text{position}_{xy}, \text{yaw}, \text{speed}, \text{yaw rate}, \text{wheel speed}, \text{steer angle}\}$ with weights $w_k = (1.0, 0.4, 0.35, 0.25, 0.05, 0.05)$ respectively.
+The vectors $\mathbf{p}^{\mathrm{stu}}_T, \mathbf{p}^{\mathrm{ref}}_T \in \mathbb{R}^2$ are the student and teacher XY positions at the final frame, and $s^{\mathrm{stu}}_T, s^{\mathrm{ref}}_T$ are the corresponding speeds.
+The terminal weights are $w_{\mathrm{pos,final}} = 1.5$ and $w_{\mathrm{spd,final}} = 0.75$.
+
+
+\emph{Multi-stage search.}
+The CEM search is divided into five stages to manage the 20-dimensional space:
+(1)~\emph{longitudinal}: tunes drive/brake torques and wheel parameters on the straight-line rollout;
+(2)~\emph{steering}: tunes steering gains, suspension, and damping on the turning rollouts;
+(3)~\emph{surface}: tunes per-surface friction scales on the transition rollout;
+(4)~\emph{refinement}: tunes all 20 parameters jointly on all rollouts with a narrowed search window (18\% of the full range);
+(5)~\emph{brake preservation}: re-tunes longitudinal parameters with a tight window (10\%) to prevent regression.
+Each stage inherits the best configuration from the previous stage.
+The CEM uses a population of 16 candidates, an elite fraction of 25\%, and an initial standard deviation of 25\% of each parameter's range.
+
+\chattodo{\textbf{ACTION ITEM --- TABLE:} Add a table reporting per-stage sysid loss (total, position MSE, speed MSE, yaw MSE, yaw-rate MSE) from the final sysid run.  The numbers from the \texttt{fwd\_v1\_staged\_cem\_anchor\_overnight} run are: Stage~1 total=0.39, Stage~4 (refinement) total=9.35.  Consider also reporting a comparison against the default (untuned) vehicle.}
+\chattodo{\textbf{ACTION ITEM --- FIGURE:} Consider a trajectory overlay figure showing teacher vs.\ student vehicle on one or two maneuvers (e.g., step-steer left and surface transition).}
+
+\subsection{Weather-to-Friction Module}
+\label{sec:weather_friction}
+\chattodo{Describe the Zhao et al.\ (2024) friction model: inputs (water film thickness $h$, road surface type), output (effective friction coefficient $\mu$).  Show the API: user sets precipitation level $\to$ module computes $h$ $\to$ Zhao model gives $\mu$ $\to$ $\mu$ written to PhysX material properties per world.  Include the formula or at least a qualitative plot of $\mu$ vs.\ $h$ for different surface types.}
+
+
+Wet-road friction is a first-order factor in vehicle dynamics, yet most driving simulators either ignore it or expose only a single user-specified friction scalar.
+SceneFactory integrates a physics-based tire-pavement friction model that maps weather conditions to per-world friction coefficients, enabling the policy to train across a realistic range of road-surface conditions.
+
+\paragraph{Friction model.}
+We implement the modified Average Lumped LuGre (ALL) model of Zhao et al.~\cite{zhao_tire-pavement_2024}, which extends the LuGre bristle-deflection framework to account for pavement texture and water film thickness.
+The model evolves the average bristle deflection $\bar{z}$ via the ODE
+\begin{equation}
+\label{eq:bristle_ode}
+\frac{d\bar{z}}{dt} = v_r - \theta \, Y_R \left[\frac{\sigma_0 \lvert v_r \rvert}{g(v_r)}\,\bar{z} + K \lvert \omega_r \rvert\,\bar{z}\right],
+\end{equation}
+where $v_r$ is the relative (slip) speed between the tire contact patch and the road, $\omega_r$ is the wheel circumferential speed, $\sigma_0$ is the bristle stiffness, $K = 7/(6L)$ is the ALL approximation constant with $L$ the contact patch length, $\theta$ is a texture influence coefficient (per road surface type), and $Y_R \in [0,1]$ is the contact patch length ratio under hydrodynamic lift.
+The Stribeck steady-state function $g(v_r) = \mu_c + (\mu_s - \mu_c)\exp\bigl(-\lvert v_r / v_s \rvert^\alpha\bigr)$ captures the transition from static friction $\mu_s$ to Coulomb friction $\mu_c$.
+The Stribeck speed depends on the water film thickness $h_w$ (in meters) via
+\begin{equation}
+\label{eq:stribeck_speed}
+v_s(h_w) = b_1 \exp(1000\,b_2\,h_w + b_3) + b_4,
+\end{equation}
+where $b_1 = 4.8916$, $b_2 = -7.91$, $b_3 = 3.01$, and $b_4 = 3.40$ are calibrated constants from~\cite{zhao_tire-pavement_2024}.
+Because $b_2 < 0$, $v_s$ decreases with water film thickness: thicker water films cause the friction drop-off to onset at lower slip speeds.
+
+Given the steady-state solution $\bar{z}^*$, the effective friction coefficient is
+\begin{equation}
+\label{eq:mu_all}
+\mu = \max\!\bigl(\theta\,Y_R - Y_F,\; 0\bigr) \cdot \bigl(\theta\,Y_R\,\sigma_0\,\bar{z}^* + \sigma_1\,\dot{\bar{z}} + \sigma_2\,v_r\bigr),
+\end{equation}
+where $Y_F \in [0,1]$ is the hydrodynamic force ratio and $\sigma_1$, $\sigma_2$ are viscous damping coefficients.
+Under the default calibration from~\cite{zhao_tire-pavement_2024}, both $\sigma_1 = 0$ and $\sigma_2 = 0$, so the effective formula reduces to $\mu = \max(\theta\,Y_R - Y_F,\,0)\cdot\theta\,Y_R\,\sigma_0\,\bar{z}^*$.
+Both $Y_R$ and $Y_F$ depend on vehicle speed, water film thickness, tire geometry (contact patch dimensions, tread radius, wheel radius), and physical constants (water density and viscosity).
+When the contact factor $\theta\,Y_R - Y_F$ drops to zero, the model predicts full hydroplaning.
+Our implementation numerically integrates Equation~\ref{eq:bristle_ode} to steady state using exponential integration ($\Delta t = 10^{-3}$\,s, convergence threshold $\epsilon = 10^{-7}$), matching the paper's calibrated parameters (Table~4 and Table~5 in~\cite{zhao_tire-pavement_2024}).
+
+\paragraph{Road surface presets.}
+The texture influence coefficient $\theta$ and the texture amplitude $T_d$ vary by pavement type.
+We provide three presets calibrated to the values in~\cite{zhao_tire-pavement_2024}:
+\emph{Asphalt Concrete} (AC, $\theta{=}1.00$, $T_d{=}0.65$\,mm),
+\emph{Stone Mastic Asphalt} (SMA, $\theta{=}1.09$, $T_d{=}0.80$\,mm), and
+\emph{Open-Graded Friction Course} (OGFC, $\theta{=}1.21$, $T_d{=}1.08$\,mm).
+OGFC, designed for drainage, retains higher friction under wet conditions; AC, the most common pavement, serves as the baseline.
+
+\paragraph{Pipeline.}
+Each world in the training stage is assigned a friction configuration specifying the road surface type and the water film thickness $h_w$ (in mm).
+At environment construction time, the pipeline feeds these values into the modified ALL model (Equation~\ref{eq:mu_all}) at a reference speed of 13.89\,m/s ($\approx$50\,km/h) and two slip ratios (0.15 for static, 0.80 for dynamic) to produce per-world static and dynamic friction coefficients $\mu_s$ and $\mu_d$.
+The effective coefficient $\mu_{\mathrm{eff}}$ (static by default) is used downstream as follows.
+
+The ground-plane material uses the sysid-tuned friction scale for the dry-asphalt surface type (Section~\ref{sec:vehicle_sysid}), with static friction $\mu^{\mathrm{ground}}_s = \min(1.0,\; f_{\mathrm{surface}} \cdot \sqrt{f_{\mathrm{lon}} \cdot f_{\mathrm{lat}}})$ and dynamic friction $\mu^{\mathrm{ground}}_d = 0.95\,\mu^{\mathrm{ground}}_s$.
+PhysX resolves contact friction using the minimum of the ground and tire material values (combine mode \texttt{min}).
+Because all cloned environments share a single global ground plane, this material is uniform across worlds.
+Per-world friction variation is currently communicated to the policy only through the observation: the weather conditions are encoded into a 4-dimensional vector appended to the ego state:
+\begin{equation}
+\label{eq:weather_obs}
+\mathbf{o}_{\mathrm{weather}} = \bigl[\, h_w / h_{\mathrm{norm}},\; \mathbb{1}_{\mathrm{AC}},\; \mathbb{1}_{\mathrm{SMA}},\; \mathbb{1}_{\mathrm{OGFC}} \,\bigr] \in \mathbb{R}^4,
+\end{equation}
+where $h_{\mathrm{norm}} = 1.0$\,mm is a normalization constant and $\mathbb{1}_{\{\cdot\}}$ is a one-hot encoding of the road surface type.
+This allows the policy to condition its driving behavior on surface conditions, but the physics solver does not yet enforce different contact friction across worlds.
+
+\chattodo{\textbf{ACTION ITEM --- PER-WORLD FRICTION:} The current implementation does not apply per-world friction to the physics.  The ground plane is a single global prim shared across all environments, making per-world ground materials infeasible under Isaac Lab's cloning.  A viable alternative is to assign per-vehicle wheel materials at spawn time: since each vehicle's wheel collision meshes live inside their own \texttt{/World/envs/env\_X/} scope, their PhysX contact materials can be set independently.  Under the \texttt{min} friction combine mode, lowering the wheel material friction to $\mu_{\mathrm{eff}}$ would produce the correct tire-ground friction.  Implement this before camera-ready.}
+
+\chattodo{\textbf{ACTION ITEM --- FIGURE:} Consider a plot of $\mu_{\mathrm{eff}}$ vs.\ $h_w$ (0--1.0\,mm) for the three surface presets (AC, SMA, OGFC) at $v{=}$13.89\,m/s.  The \texttt{python -m src.trfc --demo} CLI produces a sweep that can generate this data.}
+
+\chatcite{Zhao et al., 2024 \checkmark{}.}
+
+\subsection{Observation Space and Network Architecture}
+\label{sec:observations}
+\chattodo{Detail the 1,929-dim observation: ego state (7-dim), road geometry context (350 points $\times$ 5-dim = 1,750-dim), neighbor vehicles (24 $\times$ 7-dim = 168-dim), weather context (4-dim).  Describe the late-fusion architecture: per-group encoder MLPs, max-pool aggregation for variable-size sets, fusion trunk.}
+\chatcomment{A figure showing the observation encoding and network architecture would be very helpful here.}
+
+Each agent receives a 1{,}929-dimensional observation vector assembled from four groups: ego state, weather context, road geometry context, and neighbor vehicles.
+All spatial quantities are expressed in the agent's body frame via a 2D rotation by $-\psi$ (ego heading), so the policy sees an ego-centric view of the world.
+The groups are processed by a late-fusion actor-critic network with per-modality encoders and max-pool set aggregation, following the design of GPUDrive~\cite{kazemkhani_gpudrive_2025}.
+
+\paragraph{Ego state (7-dim).}
+The ego state encodes the agent's goal and velocity in body-frame coordinates:
+%
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item Goal position $(g_x^b, g_y^b)$, each divided by the scene bounding-box half-size ($B/2 = 100$\,m).
+  \item Heading error to the goal, encoded as $(\sin\Delta\psi,\,\cos\Delta\psi)$.
+  \item Euclidean goal distance $\|g^b_{xy}\|$, divided by $B/2$.
+  \item Body-frame velocity $(v_x^b, v_y^b)$, each divided by 10\,m/s.
+\end{enumerate}
+%
+When the weather-to-friction module is active, the 4-dim weather context (Equation~\ref{eq:weather_obs}) is appended to the ego group, yielding an 11-dim input to the ego encoder.
+
+\paragraph{Road geometry context ($K_r \times 5 = 1{,}750$-dim).}
+Each agent selects $K_r = 350$ road-segment midpoints from the pre-loaded GPU metadata tensors (Section~\ref{sec:scene_construction}).
+The selection operates in two steps: first, all road points within a radius $r = 10$\,m of the ego position are identified via a squared-distance threshold; second, these candidate points are sorted by their original polyline index to preserve road topology, and the first $K_r$ are taken.
+If fewer than $K_r$ points fall within the radius, the remaining slots are zero-padded.
+Each selected point contributes five features:
+%
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item Relative position $(\Delta x^b, \Delta y^b)$ in ego body frame, each divided by $r$.
+  \item Polyline type code, divided by a normalizer ($= 20$).
+  \item Road direction unit vector $(d_x^b, d_y^b)$ in ego body frame.
+\end{enumerate}
+
+\paragraph{Neighbor vehicles ($K_v \times 7 = 168$-dim).}
+The $K_v = 24$ nearest alive agents (by Euclidean distance in world XY) are selected per ego agent.
+Self-distance and dead-agent distances are set to infinity before the argsort.
+Each neighbor contributes seven features:
+%
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item Relative position $(\Delta x^b, \Delta y^b)$ in ego body frame, each divided by $B/2$.
+  \item Chassis length and width, each divided by $B/2$.
+  \item Relative heading $\Delta\psi$, divided by $\pi$.
+  \item Speed $\|v_{xy}\|$, divided by 10\,m/s.
+  \item Pairwise time-to-collision (TTC), computed via a swept-circle test.
+    Each vehicle is approximated by three equal-radius circles placed along the longitudinal axis at offsets $\{-d,\, 0,\, +d\}$ from the chassis centre, where $r = \max(0.45,\; 0.55\, W)$ and $d = \min\!\bigl(\tfrac{\mathit{WB}}{2},\; \max(0,\; \tfrac{L}{2} - 0.8\,r)\bigr)$.
+    For the default vehicle ($L{=}4.0$\,m, $W{=}2.0$\,m, $\mathit{WB}{=}2.6$\,m) this gives $r \approx 1.10$\,m and $d \approx 1.12$\,m.
+    The test solves a quadratic closest-approach equation for every pair among the $3 \times 3 = 9$ circle combinations and takes the minimum.
+    The resulting TTC is clamped to $[0,\, \tau_{\max}]$ and divided by $\tau_{\max} = 10$\,s.
+    Neighbors behind the ego or with no collision trajectory receive $\mathrm{TTC}/\tau_{\max} = 1$.
+\end{enumerate}
+%
+Slots beyond the number of alive neighbors are zero-padded.
+
+\paragraph{Late-fusion actor-critic.}
+We adopt the per-entity encoder with max-pool aggregation architecture introduced by GPUDrive~\citep{kazemkhani_gpudrive_2025}, with two modifications: (i)~we use \emph{masked} max-pool (zero-padded slots are filled with $-\infty$ before the $\max$) rather than a plain pool, and (ii)~we replace their Tanh activations with ELU.
+The flat observation is split into its three groups and processed by separate encoder MLPs, one set for the actor and one for the critic (no weight sharing).
+%
+%
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Ego encoder}: $11 \to 64 \to 64$ (two hidden layers, ELU activations).
+  \item \textbf{Road encoder}: $5 \to 96 \to 96$, applied independently to each of the $K_r$ points; the $K_r$ output vectors are aggregated via \emph{masked max-pool}, where zero-padded points are filled with $-\infty$ before the $\max$ operation.
+  \item \textbf{Vehicle encoder}: $7 \to 96 \to 96$, applied independently to each of the $K_v$ neighbors; aggregated via masked max-pool in the same way.
+\end{itemize}
+%
+The three embeddings (64 + 96 + 96 = 256) are concatenated and passed through a shared trunk MLP ($256 \to 128 \to 64$, ELU).
+The actor head projects to a 3-dim mean vector $\boldsymbol{\mu}$ (one per action), paired with a state-independent learnable log-standard-deviation $\log\boldsymbol{\sigma}$ to form a diagonal Gaussian policy.
+The critic head projects to a scalar state-value estimate.
+No empirical observation normalization (running mean/std) is used; all features are manually scaled at assembly time as described above.
+
+\chattodo{\textbf{ACTION ITEM --- FIGURE:} Create a network architecture diagram showing the three encoder branches, max-pool aggregation, fusion trunk, and actor/critic heads.  This is the second most important figure after the pipeline diagram.}
+\chatcite{Kazemkhani et al., 2025 \checkmark{} — for the KNN road-point encoding and per-entity MLP + max-pool design.}
+
+
+\subsection{Action Space}
+\label{sec:actions}
+\chattodo{Three continuous actions: throttle $\in [0,1]$, steering $\in [-1,1]$, brake $\in [0,1]$.  Decoded into PhysX joint position targets (steering) and effort targets (drive/brake).  Keep this brief.}
+
+
+Each agent outputs a three-dimensional continuous action $\mathbf{a} = (a_{\mathrm{thr}},\, a_{\mathrm{str}},\, a_{\mathrm{brk}})$.
+The policy produces values in $[-1,1]^3$; throttle and brake are rectified to $[0,1]$ before decoding, so a zero-mean Gaussian policy naturally idles.
+All three channels are decoded into PhysX \emph{effort targets} (no position or velocity targets are used at runtime); the steering PD loop described in Eq.\ref{eq:steer_pd} is computed in software at every physics substep.
+
+\paragraph{Control frequency.}
+Physics runs at $1/\Delta t_{\mathrm{phys}} = 120$\,Hz.
+Actions are held constant over a decimation window of 4 substeps, yielding a control frequency of 30\,Hz.
+Within each substep the steering PD reads the current joint state, so the effective PD loop rate is 120\,Hz.
+
+\paragraph{Brake sign memory.}
+Brake torque must oppose wheel rotation, so its sign is $-\mathrm{sign}(\dot{q}_{\mathrm{wheel}})$.
+When $|\dot{q}_{\mathrm{wheel}}| < 10^{-4}$\,rad/s the sign becomes unreliable; we therefore latch the last observed sign and continue applying it until rotation resumes.
+This prevents torque chatter near zero velocity.
+
+\paragraph{Actuation parameters.}
+Table~\ref{tab:action_params} lists the sysid-tuned values used in all experiments.
+Drive torque is applied to the two front wheels only (FWD); brake torque is applied to all four wheels with separate front/rear magnitudes.
+Both drive and brake torques are further scaled by a shared longitudinal scale $s_{\mathrm{long}} = 0.9273$, which is one of the 20 sysid parameters (\S\ref{sec:vehicle_sysid}).
+
+\begin{table}[h]
+  \centering\small
+  \caption{Action-decoding parameters (sysid-tuned values).}
+  \label{tab:action_params}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    Parameter & Symbol & Value \\
+    \midrule
+    Max steer angle        & $\theta_{\max}$               & $0.5585$\,rad ($\approx 32^{\circ}$) \\
+    Steering PD $K_p$      & $K_p$                          & $1600$\,N$\cdot$m/rad \\
+    Steering PD $K_d$      & $K_d$                          & $160$\,N$\cdot$m$\cdot$s/rad \\
+    Steering effort clamp  & $\tau_{\mathrm{steer,max}}$   & $1200$\,N$\cdot$m \\
+    Drive torque           & $\tau_{\mathrm{drive,max}}$   & $619.8$\,N$\cdot$m \\
+    Brake torque (front)   & $\tau_{\mathrm{brk,F}}$      & $1292.1$\,N$\cdot$m \\
+    Brake torque (rear)    & $\tau_{\mathrm{brk,R}}$      & $638.5$\,N$\cdot$m \\
+    Longitudinal scale     & $s_{\mathrm{long}}$           & $0.9273$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+\subsection{Reward Design}
+\label{sec:rewards}
+\chattodo{Document the full reward signal: goal-reach bonus (sparse), route progress (dense), lane-keeping (geometric), collision penalty, road-edge TTC penalty, off-road penalty, idling penalty, TTC-based proximity penalty.  A reward component table with weight values would be ideal.  Mention that getting these weights right required extensive iteration — this is honest and useful.}
+\chatcomment{Consider showing an ablation: what happens if you remove individual reward terms?  Even a small table showing ``full reward vs.\ no-TTC vs.\ no-route-progress'' would strengthen the paper.}
+
+
+The per-step reward is the sum of ten terms: four sparse event rewards that also trigger agent termination, and six dense shaping rewards applied at every active step.
+Table~\ref{tab:reward_terms} lists each component with its weight and key thresholds.
+Tuning these weights required extensive iteration; the values reported here correspond to the configuration used in all experiments.
+
+\paragraph{Sparse event rewards.}
+Four mutually exclusive events terminate an agent and deliver a one-shot reward:
+%
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Goal reach} ($+45.0$).
+  Awarded when the ego position is within $d_{\mathrm{goal}} = 3.0$\,m of the goal in XY.
+
+  \item \textbf{Collision} ($-6.0$).
+  Triggered when the maximum contact-sensor force exceeds 25\,N.
+  A warm-up window of 24 steps after spawn suppresses false positives from initial settling.
+
+  \item \textbf{Crash} ($-10.0$).
+  Triggered when the vehicle falls below the ground plane ($z_{\mathrm{rel}} < 0$), drifts more than 100\,m from its start position, or tilts beyond a gravity-vector threshold ($g^b_z > -0.15$, indicating a rollover or severe pitch).
+
+  \item \textbf{Lane-forbidden} ($-20.0$).
+  Triggered when any of the vehicle's three bounding circles (the same proxy used for TTC, Section~\ref{sec:observations}) overlaps a road-edge segment (Waymo types 15--16), detected via an oriented-bounding-box overlap test.
+\end{enumerate}
+%
+After termination, the agent is teleported off-stage and all subsequent dense rewards are masked to zero.
+
+\paragraph{Dense shaping rewards.}
+Six terms provide per-step signal for active agents:
+%
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Route progress} (weight $w = 2.0$).
+  The displacement between consecutive steps is projected onto the tangent of the nearest driving-lane segment (Waymo types 1--2), oriented toward the goal:
+  $r_{\mathrm{prog}} = \mathrm{clamp}\bigl((\mathbf{p}_t - \mathbf{p}_{t-1}) \cdot \hat{\mathbf{t}}_{\mathrm{lane}},\; -2,\; +2\bigr) \cdot w$.
+  This rewards forward progress along the route and penalizes backwards motion.
+
+  \item \textbf{Geometric lane-keeping} (weight $w = 0.08$).
+  A continuous quality score combines lateral offset and heading alignment with the nearest driving lane:
+  \[
+    q = \exp\!\bigl(-(\ell / \sigma)^2\bigr) \cdot \bigl[(1 - w_h) + w_h \cdot \max(0,\, \cos(\psi - \psi_{\mathrm{lane}}))\bigr],
+  \]
+  where $\ell$ is the signed lateral offset, $\sigma = 1.75$\,m is the tolerance, and $w_h = 0.8$ is the heading weight.
+  The reward is $r_{\mathrm{lane}} = q \cdot w$.
+
+  \item \textbf{Off-road penalty} (weight $w = -0.5$).
+  Applied when the vehicle's lateral offset exceeds 3.25\,m or its distance to the nearest lane exceeds 6.0\,m.
+
+  \item \textbf{Idle penalty} (weight $w = -0.05$).
+  Applied when the vehicle speed drops below 1.0\,m/s, discouraging the policy from learning to stop and wait.
+
+  \item \textbf{Inter-vehicle TTC penalty.}
+  The minimum pairwise TTC across all neighbors (using the swept-circle test from Section~\ref{sec:observations}) is converted to a penalty:
+  \[
+    p(\tau) = \min\!\bigl(\alpha_v / \max(\tau,\, \tau_{\mathrm{floor}}),\; p_{\mathrm{max},v}\bigr),
+  \]
+  with $\alpha_v = 0.10$, $p_{\mathrm{max},v} = 0.35$, and $\tau_{\mathrm{floor}} = 0.5$\,s.
+  The reward is $r_{\mathrm{ttc}} = -p(\tau)$.
+
+  \item \textbf{Road-edge TTC penalty.}
+  The same $\alpha/\tau$ penalty form is applied to the closest road-edge segment within 40\,m ahead:
+  $\alpha_e = 0.07$, $p_{\mathrm{max},e} = 0.40$, $\tau_{\mathrm{floor}} = 0.5$\,s.
+  This encourages the policy to slow down when approaching road boundaries.
+\end{enumerate}
+
+\begin{table}[t]
+  \centering\small
+  \caption{Reward components used in all experiments.  Sparse rewards are delivered once and trigger agent termination; dense rewards are applied at every active step.}
+  \label{tab:reward_terms}
+  \begin{tabular}{@{}llrll@{}}
+    \toprule
+    Term & Type & Weight & Sign & Key threshold \\
+    \midrule
+    Goal reach         & Sparse & $45.0$  & $+$ & dist $\le 3.0$\,m \\
+    Collision          & Sparse & $6.0$   & $-$ & force $\ge 25$\,N, 24-step warmup \\
+    Crash              & Sparse & $10.0$  & $-$ & fall / drift $> 100$\,m / tilt \\
+    Lane-forbidden     & Sparse & $20.0$  & $-$ & road-edge OBB overlap \\
+    \midrule
+    Route progress     & Dense  & $2.0$   & $\pm$ & clamp $[-2,+2]$\,m/step \\
+    Lane-keeping       & Dense  & $0.08$  & $+$ & $\sigma{=}1.75$\,m, $w_h{=}0.8$ \\
+    Off-road           & Dense  & $0.5$   & $-$ & lat $> 3.25$\,m or dist $> 6.0$\,m \\
+    Idle               & Dense  & $0.05$  & $-$ & speed $< 1.0$\,m/s \\
+    Inter-vehicle TTC  & Dense  & $\alpha{=}0.10$ & $-$ & max $= 0.35$, floor $= 0.5$\,s \\
+    Road-edge TTC      & Dense  & $\alpha{=}0.07$ & $-$ & max $= 0.40$, floor $= 0.5$\,s \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Termination and time-out.}
+An agent terminates upon any sparse event (goal, collision, crash, or lane-forbidden).
+If no event occurs, the episode ends at $T_{\mathrm{max}} = 50$\,s (1{,}500 steps at 30\,Hz).
+Terminated agents are teleported to an off-stage location ($x = 1{,}000$\,m) and excluded from subsequent reward and observation computation.
+
+\chattodo{\textbf{ACTION ITEM --- ABLATION:} Consider a small ablation table showing goal-reach rate under the full reward vs.\ removing individual terms (e.g., no TTC penalty, no route progress).  Even three rows would strengthen the paper.}
+
+
+% \subsection{Training Curriculum}
+% \label{sec:curriculum}
+% \chattodo{Describe the curriculum design used in training.  Document which reward terms are active in each stage and which checkpoints warm-start later stages.  Explain \emph{why} a curriculum is helpful: training with the full reward from scratch may fail because penalty signals dominate before the agent experiences any goal-reaching success.  The number and content of stages is still TBD; update once experiments are finalized.}
+% \chatcite{Schulman et al., 2017 (PPO); Rudin et al., 2022 (RSL-RL / massively parallel RL).}
+
+\subsection{Simulator Limitations and Sharp Edges}
+%currenlty, if the scene has  roades crossing over each other, for example, overlapping road lane because of a bridge or ramp (i will include a image of that, ) the logic will break, as we compress the space into z=0. Secondly, as GPUdrive stated, in waymo dataset, the entrance of parking lot is labeled road edge. There exists cars that crossing the road edge to enter such area, so the Origin and destination points happen to appear on different sides of the road edge. These cases are going to introduce inconsistaenies and confusions in the training, as the collision with the road edge is unavoidable on the way , and the car is designed to get hard penalized for this behavior. In order sovle this, we coded a little tool to visualize and build the training scenes from a set of scenses, so the research can cherry pick out the scenes with such crossing. (specify this somewhere? ) This function is inclucded in a config wizard which helps you build a triaing configuration from scratch, accodring to the need. 
+\label{sec:sharp_edges}
+\chattodo{Document known issues: PhysX substep trade-offs, vehicle spawn filtering edge cases, any Isaac Lab quirks, scenarios where the physics breaks down, etc.  This section builds credibility.}
+
+
+Transparency about simulator assumptions is essential for interpreting the results that follow.
+Below we catalogue the most consequential simplifications, known failure modes, and practical workarounds in SceneFactory, organized by subsystem.
+
+\paragraph{Z-flattening.}
+The Waymo Open Motion Dataset provides full 3D polyline coordinates, including road elevation changes across bridges, ramps, overpasses, and multi-level interchanges.
+SceneFactory collapses all road geometry to a constant ground height ($z{=}0$), because vehicles drive on a single flat PhysX ground plane per world.
+This design decision has two consequences.
+First, scenes with elevated structures (bridges, highway overpasses) produce visually overlapping road segments at ground level, which can confuse the $k$-nearest-road-point observation by presenting the agent with road points from an overhead or underpass road that it cannot physically reach.
+Second, ramp grades and banked curves are lost, removing a class of driving challenges (hill starts, crest reactions) that affect real-world vehicle dynamics.
+We mitigate the first issue through scene curation (see below) and by filtering road points whose original Waymo $z$ coordinate deviates significantly from the ground plane, but the fundamental limitation remains: SceneFactory is a 2.5D simulator operating on 3D data.
+
+\paragraph{Scene curation.}
+Not all Waymo scenarios are suitable for flat-ground training.
+We developed an interactive \emph{Config Wizard} tool (\texttt{scene\_factory\_config\_wizard.py}) that presents each candidate scene as a bird's-eye plot showing lane-center polylines (Waymo types 1--2, blue), road-edge polylines (types 15--16, red), and valid start--goal pairs connected by origin--destination lines.
+A human reviewer accepts or rejects each scene via keyboard input (y/n/b/q), with undo support.
+The tool supports both a lightweight Matplotlib mode for rapid triage and an Isaac Sim preview mode that renders the full USD road geometry with 3D start/goal markers.
+
+From a pool of ${\sim}100$ converted Waymo scenarios, we curated 64 training scenes and 64 held-out evaluation scenes, rejecting 23 training candidates and 49 evaluation candidates.
+Common rejection reasons include: (i)~multi-level interchanges where z-flattening produces overlapping geometry that would poison the road-point observation, (ii)~scenes where origin--destination pairs straddle a road-edge polyline (see below), making the lane-forbidden penalty unavoidable, and (iii)~scenes with fewer than two valid controllable agents after spawn filtering.
+The wizard produces a complete training configuration (scene list, environment count, reward weights, and curriculum stage) from scratch, so a researcher can go from raw Waymo data to a reproducible training run with minimal manual editing.
+The curated 64-scene training set is tiled with random fill (seed 42) to populate all 256 parallel environments, so each scene appears in approximately four environments.
+
+\paragraph{Waymo road-edge labeling.}
+SceneFactory treats Waymo polyline types 15 and 16 as forbidden road edges for both the lane-forbidden termination event and the road-edge TTC penalty.
+In practice, these labels are not uniformly reliable across the dataset.
+As noted by Kazemkhani et al.~\cite{kazemkhani_gpudrive_2025}, the Waymo dataset labels parking-lot entrances as road edges.
+Some tracked vehicles in these scenarios have their origin on the main road and their destination inside the parking area (or vice versa), so the recorded trajectory necessarily crosses a road-edge polyline.
+When such a scenario is used for training, the agent faces an impossible conflict: reaching the goal requires crossing a boundary that triggers the lane-forbidden penalty ($-20.0$) and immediate termination.
+These cases inject contradictory supervision into the training signal, degrading both goal-reach rate and lane-safety metrics.
+Other scenarios lack road-edge annotations entirely where a physical curb or barrier clearly exists, creating blind spots in the lane-safety reward.
+Scene curation (described above) removes the worst cases, but residual label noise remains and likely contributes to the modest lane-forbidden violation rates observed in evaluation.
+
+\paragraph{Moving-only agent assumption.}
+The spawn filter retains only Waymo agents whose start and goal positions are separated by more than 3.0\,m (the goal-reached threshold).
+Agents below this threshold are treated as ``already at goal'' and excluded entirely.
+Because the Waymo dataset records start and end positions from the logged trajectory, vehicles that remain parked, idle, or nearly stationary throughout the 9.1\,s recording window have near-zero start--goal displacement and are filtered out.
+As a result, \emph{parked vehicles do not exist in the simulation}: a scene in which a moving vehicle must navigate past a row of curbside-parked cars will contain only the moving vehicle.
+This simplification removes an entire class of realistic interactions (door-zone avoidance, double-parked obstacle negotiation, parallel parking maneuvers) and inflates the effective lane width available to the agent.
+A future extension could retain filtered agents as static rigid-body obstacles rather than discarding them.
+
+\paragraph{PointInstancer instability under Fabric.}
+Road segments are rendered as USD \texttt{PointInstancer} prims for compactness (one instancer per road type per world, with per-instance position, orientation, and scale arrays).
+We discovered that PointInstancer prims interact poorly with Isaac Lab's Fabric state management layer: visibility updates and prototype-table initialization are unreliable, producing intermittent rendering artifacts (invisible or misplaced road segments) that do not affect physics but corrupt visual debugging and video captures.
+An explicit-prim fallback mode is provided (one \texttt{UsdGeom.Cube} per road segment) for diagnostic and stage-export workflows.
+Production training disables Fabric entirely (\texttt{use\_fabric: false}) to avoid related issues with road metadata access, at a modest throughput cost.
+
+\paragraph{Collision-sensor warmup.}
+When vehicles are spawned or teleported to their start poses, PhysX requires several substeps to settle the suspension and establish stable wheel--ground contact.
+During this transient, contact sensors report large spurious forces as the chassis drops onto the ground plane.
+Without mitigation, these forces trigger false collision terminations at the start of every episode.
+We suppress collision detection for the first 24 environment steps (${\approx}0.8$\,s) after each spawn, which is sufficient for the suspension to settle.
+This warmup window introduces a brief period at episode start during which actual inter-vehicle collisions are unpenalized, though in practice vehicles are spawned with sufficient separation that early collisions are rare.
+
+\paragraph{Teleport-only reset.}
+Isaac Lab's default environment reset tears down and reconstructs PhysX actors, which is prohibitively expensive for multi-agent scenes with per-environment road geometry.
+SceneFactory uses a \emph{teleport-only} reset strategy: after a single full initialization reset, subsequent episode resets reposition vehicles by writing directly to root-state tensors (position, orientation, linear and angular velocity) without rebuilding the physics scene.
+This is ${\sim}10{\times}$ faster but has a subtle limitation: accumulated PhysX internal state (joint impulse caches, contact-pair broadphase data) is not fully cleared.
+In rare cases this causes a vehicle to retain a residual velocity or contact state from the previous episode for one or two substeps after teleport.
+The collision warmup window (above) masks most such artifacts.
+
+\paragraph{Uniform friction surface.}
+As discussed in Section~\ref{sec:weather_friction}, per-world friction is currently observation-only.
+Even once per-vehicle wheel materials are implemented, friction will remain spatially uniform within each world: every wheel contact with the ground plane uses the same coefficient.
+Real roads exhibit local friction variation (wet patches, oil spills, transitions between asphalt and concrete), and scenarios such as a slippery lane adjacent to a dry lane cannot be represented.
+Modeling local friction would require either a segmented ground mesh with per-face materials or runtime material-property writes keyed to vehicle position, neither of which is straightforward under PhysX~5's current contact pipeline.
+
+\paragraph{PhysX substep granularity.}
+Physics runs at 120\,Hz with a decimation factor of 4, yielding 30\,Hz control.
+The 120\,Hz rate is a compromise between simulation fidelity and throughput: higher rates (240\,Hz or 480\,Hz) would improve suspension stability and contact resolution but proportionally reduce training speed.
+Our sysid calibration (Section~\ref{sec:vehicle_sysid}) was performed at this rate, so the fitted parameters absorb any 120\,Hz-specific artifacts; re-calibration would be needed if the substep rate were changed.
+
+\paragraph{Clone-in-Fabric disabled.}
+Isaac Lab's \texttt{clone\_in\_fabric} optimization, which clones environment state entirely in the Fabric layer for maximum GPU throughput, is disabled in SceneFactory because it is incompatible with the post-clone road injection workflow described in Section~\ref{sec:scene_construction}.
+Fabric assumes that all environments are structurally identical after cloning; SceneFactory's per-environment road prims violate this assumption, causing metadata reads to return stale or incorrect values.
+Disabling Fabric increases CPU--GPU synchronization overhead but is necessary for correctness.
+
+\paragraph{Constant-velocity TTC.}
+Both the inter-vehicle and road-edge TTC computations assume constant velocity over the prediction horizon.
+This systematically overestimates collision risk during deceleration (the vehicle is predicted to continue at its current speed toward the obstacle) and underestimates risk during acceleration.
+A quadratic (constant-acceleration) TTC formulation would be more accurate, particularly in approach zones where vehicles are actively braking, but would increase the per-step computational cost of the $K_v{\times}9$ pairwise circle tests.

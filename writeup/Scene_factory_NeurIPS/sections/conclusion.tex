@@ -1,0 +1,43 @@
+% ============================================================
+%  sections/conclusion.tex  —  Conclusion and Future Work
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+% ---------------------------------------------------------------
+% ORIGINAL SOC TEXT — preserved verbatim
+% ---------------------------------------------------------------
+
+A conclusion, which should be good when we have eveyrthing ready.
+
+% ---------------------------------------------------------------
+%  Advisor annotations
+% ---------------------------------------------------------------
+
+\chatstructure{The conclusion should have two parts: (1) a summary of what was accomplished, and (2) future work.  Draft outline below.}
+
+\begin{chatbox}[Suggested Conclusion Outline]
+\textbf{Summary paragraph:}
+\begin{itemize}
+  \item We presented SceneFactory, a GPU-accelerated, physics-enabled, multi-agent driving simulator built on NVIDIA Isaac Sim and Isaac Lab.
+  \item SceneFactory procedurally constructs multi-world training environments from Waymo Open Motion Dataset scenarios, with full PhysX 5 rigid-body dynamics and a weather-to-friction module.
+  \item We demonstrated that the platform achieves [X] env-steps/sec with [Y] parallel vehicles on a single GPU, and that the three-stage curriculum enables end-to-end navigation policy learning.
+  \item Restate the gap filled: first system combining GPU-parallel multi-world execution, multi-agent support, full physics, and weather-aware friction.
+\end{itemize}
+
+\textbf{Limitations paragraph:}
+\begin{itemize}
+  \item Current navigation success rates do not match kinematic-dynamics simulators; we attribute this to the harder control problem posed by full rigid-body dynamics and plan to address it through [specific plans: longer training, improved reward shaping, curriculum refinements].
+  \item Scene diversity is currently limited to a curated Waymo subset; scaling to the full dataset is engineering work in progress.
+\end{itemize}
+
+\textbf{Future work paragraph (keep brief --- 3--4 sentences max):}
+\begin{itemize}
+  \item Adaptive robotic work zone management as a co-trained agent.
+  \item Integration of formal safety metrics (TTC distributions, PET, DRAC).
+  \item Dynamic, spatially varying weather conditions within episodes.
+  \item SceneFactory-to-Cosmos pipeline for photorealistic video generation.
+\end{itemize}
+\end{chatbox}
+
+\chattodo{Write the actual conclusion once experimental results are finalized.  Keep it to $\sim$0.5 pages.}

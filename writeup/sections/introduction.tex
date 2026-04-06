@@ -1,0 +1,71 @@
+% ============================================================
+%  sections/introduction.tex  —  Introduction
+% ============================================================
+\section{Introduction}
+\label{sec:introduction}
+
+\chatstructure{The introduction should follow a funnel: (1) broad motivation — why simulators matter for AV, (2) what current simulators offer and where they fall short, (3) the specific gap SceneFactory fills, (4) a concise contribution list.  Right now the SOC mixes all four.  I have annotated the raw text below; after revising, aim for $\sim$1.5 pages double-column.}
+
+% ---------------------------------------------------------------
+% ORIGINAL SOC TEXT — preserved verbatim with annotations
+% ---------------------------------------------------------------
+
+Autonomous driving is something that people are actively exploring, and there existws a lot of simulators for autonomous vehicles. Why researchers need simulators for AV? Because we surely need a system that is not real world, to try the trained jdriving algorithms, as the real world deployment is costly, it's impossible to try things in scale in the real world.
+%
+\chatcomment{Good starting intuition, but ``impossible to try things at scale in the real world'' is an overclaim.  Waymo alone has logged millions of real-world miles.  Reframe: simulators enable \emph{controlled, reproducible, and safe} evaluation at scale — especially for rare/dangerous scenarios that cannot be ethically staged.}
+\chatcite{For general AV simulation survey: Grigorescu et al., 2020, ``A survey of deep learning techniques for autonomous driving''; also Kalra \& Paddock, 2016, ``Driving to safety'' (RAND report on why simulation is necessary).}
+
+Local transportation departments are going to make a lot of administrative decisions every day, especially for urban areas. I should take some data about how much traffic decisions are made in a day, and there must be researches about the disruptive effect to traffic from those decisions.
+%
+\chattodo{Find a reference for the cost / frequency of traffic management decisions.  Good candidates: FHWA ``Traffic Management Center Operations'' reports; Ullman et al.\ work zone delay cost estimates.}
+\chatcite{Ullman et al., FHWA reports on work zone delay and disruption costs.}
+
+Traffic engineers spent decades to make traffic simulators that work on both microscopic level and macroscopic level. ON one hand, we have SUMO, which is an opensource traffic simulator, that is widely used in digital twin technology. SUMO is a quite macroscope simjulator, which simulates how the traffic system will respond to a certain change to the system, such as road closure, lane closure. However, there are plenty of things that are simplified in SUMO, such as vehicle dynamics.
+%
+\chatcite{Krajzewicz et al., 2012 for SUMO — ``Recent development and applications of SUMO''.}
+\chatcomment{SUMO is usually classified as \emph{microscopic} (it tracks individual vehicles with car-following / lane-changing models), not macroscopic.  Macroscopic simulators model aggregate flow (density, speed, flow).  Correct this to avoid reviewer pushback.}
+
+Differetn weathers will have effects on how cars dynamics change, and how the drivers behaviors change. Those changes cannot be captured by SUMO's modeling of driver model, since SUMO does not take environmental conditions into account.
+%
+\chatfactcheck{SUMO does have limited weather extensions (e.g., adjusting driver parameters for wet conditions), but it does not model tire-pavement friction physics.  Soften to: ``SUMO provides limited support for weather effects and does not model tire–road friction physics.''}
+
+There exists simulators that do count those factors, such as Carla \cite{dosovitskiy_carla_2017} who's built on Unreal engine, the backend is PhysX physics engine. Also metadrive \cite{li_metadrive_2022}, who built their system on bullet physics engine.
+%
+\chatcomment{Good.  Be precise: CARLA uses Unreal Engine 4's vehicle physics plugin (which wraps PhysX), not raw PhysX articulations.  MetaDrive uses Panda3D with Bullet — correct.}
+\chatcite{Dosovitskiy et al., 2017 \checkmark{}; Li et al., 2022 \checkmark{}.}
+
+However, one shared downside of them is that both simulators, although enabled by physics engine, they don't support scaling of scenes, for example, if i would like to evaluate the potentail outcome of a certain configuration of a workzone, I need to sequentially test all of them. This is requiring a lot of time.
+%
+\chatcomment{This is your key pain point — make it crisp.  Suggested phrasing: ``Neither simulator supports \emph{GPU-parallel execution of multiple independent scenes}; evaluating $N$ scenarios requires $N$ sequential simulation runs.''}
+
+There's a gap in current AV siimulators, that that can both be scaled to multiple scene, multiple agents at one time, and also have phyiscs engine enabled.
+%
+\chatcomment{This is the gap statement — the heart of the paper.  State it as a single, clean sentence and consider boxing it or making it a paragraph of its own.}
+\chatrewrite{There exists a gap in the current landscape of AV simulators: no existing system simultaneously provides (i) GPU-parallel execution of multiple independent driving scenes, (ii) multi-agent support within each scene, and (iii) a full rigid-body physics engine governing vehicle dynamics.}
+
+In order to fill this gap, we build on top of Nvidia Isaac Lab\cite{nvidia_isaac_2025}, which is a RL framework that is designed to run with GPU acceleration to speed the training up. IsaacLab is designed for large scale robot RL training. This project is going to be a big project including future work, and it thisis the starting of this project.
+%
+\chatcomment{Remove informal phrasing like ``this is going to be a big project'' for the final manuscript.  Keep the scope statement factual: ``This paper presents the first phase of a larger research program.''}
+\chatcite{Mittal et al., 2023 (Orbit / Isaac Lab); NVIDIA, 2025 (Isaac Sim documentation).}
+
+The purpose of the work is to have the whole pipeline of building multiple world, building multiple agents (wheeled vehicles) within that world, training them to navigate in the map, doing simple driving actions, being able to recognize the correct way to the desitnation, and have sense of safety enabled for those agents, including avoiding collision with other agents, and avoid collision with road edges; on top of that, another feature of our simulator is that we designed a weather module, based on Zhao et al.'s \cite{zhao_tire-pavement_2024}, exposing an API for easy use of setting different weather conditions, and convert those to the scene by adjusting the tyre friction of different vehicle assets within each mini world.
+%
+\chatstructure{This is one very long sentence listing contributions.  Convert to a numbered contribution list for clarity.  Suggested format:}
+\chatrewrite{%
+The contributions of this work are:
+\begin{enumerate}
+  \item \textbf{SceneFactory}, a procedural scene construction pipeline that converts Waymo Open Motion Dataset scenarios into GPU-parallelized, multi-world Isaac Sim stages with full PhysX rigid-body dynamics.
+  \item A \textbf{multi-agent RL training environment} supporting $N$ parallel worlds $\times$ $M$ agents per world, all driven by a shared navigation policy.
+  \item A \textbf{weather-to-friction module} based on Zhao et al.\ that maps precipitation and road surface type to PhysX tire friction coefficients.
+  \item A \textbf{three-stage training curriculum} (navigation $\to$ lane safety $\to$ traffic + weather) that enables stable policy learning under complex, multi-signal rewards.
+\end{enumerate}
+}
+
+The proposed pipeline shows that we can achieve a high throughput of training, and achieve a realitvely good training result on Waymo Open Motion Dataset.
+%
+\chatcomment{Quantify ``high throughput'' (e.g., X env-steps/sec with Y agents on a single A100) and qualify ``relatively good'' (e.g., goal-reach rate of Z\%).  Vague claims will not survive review.}
+\chattodo{Insert concrete throughput and success-rate numbers once experiments are finalized.}
+
+The manuscript is going to be structured in a way that all details of the pipeline is introduced. This section is just introduction;
+%
+\chatcomment{Remove this meta-sentence in the final version.  A brief roadmap paragraph is fine: ``The remainder of this paper is organized as follows\ldots''}

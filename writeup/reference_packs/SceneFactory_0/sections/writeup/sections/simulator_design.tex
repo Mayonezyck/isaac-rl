@@ -1,0 +1,83 @@
+% ============================================================
+%  sections/simulator_design.tex  —  Simulator Design (Methodology)
+% ============================================================
+\section{Simulator Design}
+\label{sec:simulator_design}
+
+\chatstructure{This is the core technical section.  I recommend splitting it into the following subsections:
+\begin{enumerate}
+  \item \textbf{System Overview} — one-paragraph + architecture figure showing the full pipeline (Waymo $\to$ JSON $\to$ USD $\to$ Isaac Sim multi-world stage $\to$ RL training loop).
+  \item \textbf{Data Processing \& Procedural Scene Construction} — the Waymo-to-USD pipeline, world layout, road prim generation (PointInstancer vs.\ explicit mesh), metadata baking.
+  \item \textbf{Vehicle Asset Generation \& System Identification} — USD articulated vehicle, PhysX joint setup, CEM-based parameter fitting.
+  \item \textbf{Weather-to-Friction Module} — Zhao et al.\ model, API design, PhysX material property updates.
+  \item \textbf{Observation Space} — ego state, road geometry (KNN), neighbor vehicles, weather context.
+  \item \textbf{Action Space} — throttle, steering, brake $\to$ PhysX joint targets.
+  \item \textbf{Reward Design} — goal bonus, route progress, lane-keeping, collision/TTC penalties, off-road penalties.
+  \item \textbf{Training Curriculum} — 3-stage warm-start curriculum.
+\end{enumerate}
+This mirrors the GPUDrive structure you mentioned, which is appropriate.}
+
+% ---------------------------------------------------------------
+% ORIGINAL SOC TEXT — preserved verbatim with annotations
+% ---------------------------------------------------------------
+
+There are several elements that presents in my pipeline. The vehicle design, how we fit the vehicle dynamics, how the vehicle is built with the API required by IsaacLab; the weather to friction module; the data used, the training environment building technique, what kind of data did we use, and how did we processed the data. How the driving scenario is modeled. What are the observation space of each vehicle, note that this is  inspried by \cite{kazemkhani_gpudrive_2025}. As they are the predecesor work that enables a huge throughput. There are a lot of things that we take from them (take the idea, but not the things themselves).
+%
+\chatcomment{Be explicit about what you took from GPUDrive (observation structure, KNN road-point encoding, per-entity MLP + max-pool aggregation) vs.\ what is new (PhysX articulated vehicles, USD procedural construction, weather module, 3-stage curriculum).  Reviewers will ask this.}
+
+Thus, the methodology section structure is more or less similar to GPUDRive. Ah yes, this will just simply be the 'simulation design' section.
+
+I will briefly repeat that this work is supposed to be filling the gap between: carla /metadrive, not GPUaccelerated; and waymax, gpudrive, batched but no physics enabled. So talk about why we choose IsaacSim, and why we use IsaacLab as our training framework. What is IsaacSim, WHat is IsaacLab, what's the relationship between them.
+%
+\chatcomment{Good — a brief ``Why Isaac Sim / Isaac Lab?'' paragraph at the top of this section is essential.  Key points: (a) Isaac Sim provides the USD runtime and PhysX 5; (b) Isaac Lab provides DirectMARLEnv for vectorized multi-agent RL; (c) Fabric-based state cloning avoids per-environment overhead; (d) the entire training loop stays GPU-resident (no host-device data movement in the inner loop).}
+
+Then I introduce about simulation features, just like GPUDrive. This includes Waymo Open Motion Dataset ready world builder; precipitation, road material to friction calculator; custom vehicle usd generation module; Agent dynamics (fitting to PhysX vehicle); Reward; Termination conditions; availabel dirivng agents, ; simulator sharp edges just like GPUDrive.
+
+\chatcomment{``Simulator sharp edges'' (like GPUDrive's Section 4.5) is a great idea — documenting known limitations and quirks builds trust with reviewers and helps future users.  Include things like: (a) PhysX substep count trade-off (accuracy vs.\ speed); (b) vehicle spawn filtering and degenerate scenario handling; (c) any Isaac Lab-specific limitations you encountered.}
+
+% ---------------------------------------------------------------
+%  Subsection stubs — fill with technical detail from proposal
+% ---------------------------------------------------------------
+
+\subsection{System Overview}
+\label{sec:system_overview}
+\chattodo{Add an architecture diagram (pipeline figure) here.  Show: Waymo TFRecord $\to$ JSON manifest $\to$ ChocolateBarConstructor $\to$ USD multi-world stage $\to$ Isaac Lab DirectMARLEnv $\to$ PPO training via RSL-RL.  This figure is arguably the most important figure in the paper.}
+
+\subsection{Data Processing and Procedural Scene Construction}
+\label{sec:scene_construction}
+\chattodo{Describe: (1) Waymo TFRecord to JSON conversion — what fields are extracted (road polylines, agent trajectories, start-goal pairs); (2) world layout — grid arrangement with 200m spacing; (3) road prim generation — PointInstancer mode vs.\ explicit-prim mode; (4) metadata baking into USD custom data attributes for constant-time runtime access.  This is a genuine engineering contribution — GPUDrive compiles scenarios into C++ at build time, your approach via USD is more flexible.}
+\chatcite{Ettinger et al., 2021 (Waymo Open Motion Dataset).}
+
+\subsection{Vehicle Asset Generation and System Identification}
+\label{sec:vehicle_sysid}
+\chattodo{Describe: (1) how the articulated PhysX vehicle USD asset is constructed (4 wheels, front-wheel steering revolute joints, rear-wheel drive effort joints, contact sensors); (2) CEM-based system identification to fit PhysX parameters (tire friction, suspension damping/stiffness) against reference Waymo trajectory data; (3) report the tracking error from sysid — this quantifies what ``more realistic'' actually means.}
+\chatcomment{The sysid results are critical.  If you claim physics fidelity as a differentiator over GPUDrive, you need numbers showing that your PhysX vehicle tracks reference trajectories better than a bicycle/kinematic model.}
+
+\subsection{Weather-to-Friction Module}
+\label{sec:weather_friction}
+\chattodo{Describe the Zhao et al.\ (2024) friction model: inputs (water film thickness $h$, road surface type), output (effective friction coefficient $\mu$).  Show the API: user sets precipitation level $\to$ module computes $h$ $\to$ Zhao model gives $\mu$ $\to$ $\mu$ written to PhysX material properties per world.  Include the formula or at least a qualitative plot of $\mu$ vs.\ $h$ for different surface types.}
+\chatcite{Zhao et al., 2024 \checkmark{}.}
+
+\subsection{Observation Space}
+\label{sec:observations}
+\chattodo{Detail the 1,929-dim observation: ego state (7-dim), road geometry context (350 points $\times$ 5-dim = 1,750-dim), neighbor vehicles (24 $\times$ 7-dim = 168-dim), weather context (4-dim).  Describe the late-fusion architecture: per-group encoder MLPs, max-pool aggregation for variable-size sets, fusion trunk.}
+\chatcomment{A figure showing the observation encoding and network architecture would be very helpful here.}
+\chatcite{Kazemkhani et al., 2025 \checkmark{} — for the KNN road-point encoding and per-entity MLP + max-pool design.}
+
+\subsection{Action Space}
+\label{sec:actions}
+\chattodo{Three continuous actions: throttle $\in [0,1]$, steering $\in [-1,1]$, brake $\in [0,1]$.  Decoded into PhysX joint position targets (steering) and effort targets (drive/brake).  Keep this brief.}
+
+\subsection{Reward Design}
+\label{sec:rewards}
+\chattodo{Document the full reward signal: goal-reach bonus (sparse), route progress (dense), lane-keeping (geometric), collision penalty, road-edge TTC penalty, off-road penalty, idling penalty, TTC-based proximity penalty.  A reward component table with weight values would be ideal.  Mention that getting these weights right required extensive iteration — this is honest and useful.}
+\chatcomment{Consider showing an ablation: what happens if you remove individual reward terms?  Even a small table showing ``full reward vs.\ no-TTC vs.\ no-route-progress'' would strengthen the paper.}
+
+\subsection{Training Curriculum}
+\label{sec:curriculum}
+\chattodo{Describe the 3-stage curriculum: Stage 1 (navigation: goal + route + basic lane-keeping, trained from scratch); Stage 2 (lane safety: + road-edge TTC + lane-forbidden penalties, warm-started from Stage 1); Stage 3 (traffic + weather: + multi-agent TTC + weather context + friction variation, warm-started from Stage 2).  Explain \emph{why} the curriculum is necessary — training with the full reward from scratch fails because penalty signals dominate before the agent experiences any goal-reaching success.}
+\chatcite{Schulman et al., 2017 (PPO); Rudin et al., 2022 (RSL-RL / massively parallel RL).}
+
+\subsection{Simulator Limitations and Sharp Edges}
+\label{sec:sharp_edges}
+\chattodo{Document known issues: PhysX substep trade-offs, vehicle spawn filtering edge cases, any Isaac Lab quirks, scenarios where the physics breaks down, etc.  This section builds credibility.}

@@ -1,0 +1,52 @@
+choco_config_path: experiments/experiment_A/baseline_config/curriculum_expA_256w.yaml
+device: cuda:1
+reward_type: weighted_combination
+collision_weight: 0.0
+goal_achieved_weight: 0.0
+off_road_weight: -0.5
+log_distance_weight: 0.0
+policy_type: late_fusion
+late_fusion:
+  ego_dim: 11
+  road_point_dim: 5
+  vehicle_dim: 7
+  ego_layers:
+  - 64
+  - 64
+  road_layers:
+  - 64
+  - 64
+  vehicle_layers:
+  - 64
+  - 64
+  shared_layers:
+  - 128
+  - 64
+  last_layer_dim_pi: 64
+  last_layer_dim_vf: 64
+  act: relu
+  dropout: 0.0
+  pool: max
+seed: 42
+gamma: 0.995
+gae_lambda: 0.95
+clip_range: 0.15
+vf_coef: 0.5
+n_steps: 64
+num_minibatches: 4
+verbose: 1
+total_timesteps: 500000
+ent_coef: 0.0
+lr: 0.00035229989244478754
+n_epochs: 5
+render_every_updates: 99999
+render_rollout_steps: 0
+render_during_training: false
+record_training_video: false
+save_freq: 999999
+save_dir: runs/expA_baseline_256w_checkpoints
+save_prefix: expA_baseline_256w
+resume_from: null
+log_step_metrics: false
+log_detailed_metrics: false
+render_dir: runs/expA_baseline_256w_renders

@@ -1,0 +1,82 @@
+% ============================================================
+% Review / Advisor Comment Commands for SceneFactory manuscript
+% Usage:  \input{reviewcommands}  in preamble of main.tex
+% ============================================================
+
+% ---- required packages --------------------------------------------------
+\usepackage[dvipsnames,svgnames,x11names]{xcolor}
+\usepackage{soul}          % \st{strikethrough}
+\usepackage{marginnote}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+% ---- colour palette -----------------------------------------------------
+\definecolor{chatBlue}{HTML}{1565C0}       % general comments
+\definecolor{chatGreen}{HTML}{2E7D32}      % rewrite suggestions
+\definecolor{chatOrange}{HTML}{E65100}     % citation needed
+\definecolor{chatRed}{HTML}{C62828}        % fact-check / overclaim warning
+\definecolor{chatPurple}{HTML}{6A1B9A}     % structural advice
+\definecolor{chatTeal}{HTML}{00838F}       % todo / action item
+\newcommand{\yicheng}[1]{\textcolor{brown}{#1}}
+
+
+% ---- inline commands ----------------------------------------------------
+
+% General advisor comment (blue)
+%   \chatcomment{This paragraph needs tightening.}
+\newcommand{\chatcomment}[1]{%
+  {\color{chatBlue}\sffamily\bfseries [Comment:\ #1]}%
+}
+
+% Suggested rewrite (green) — shows the proposed replacement text
+%   \chatrewrite{Here is a better way to phrase this sentence.}
+\newcommand{\chatrewrite}[1]{%
+  {\color{chatGreen}\sffamily\bfseries [Rewrite:\ #1]}%
+}
+
+% Citation needed flag (orange)
+%   \chatcite{Krajzewicz et al., 2012 for SUMO}
+\newcommand{\chatcite}[1]{%
+  {\color{chatOrange}\sffamily\bfseries [Cite:\ #1]}%
+}
+
+% Fact-check / overclaim warning (red)
+%   \chatfactcheck{Waymo collects data in SF and Phoenix, not DC.}
+\newcommand{\chatfactcheck}[1]{%
+  {\color{chatRed}\sffamily\bfseries [Fact-check:\ #1]}%
+}
+
+% Structural / organizational advice (purple)
+%   \chatstructure{Consider splitting this into two subsections.}
+\newcommand{\chatstructure}[1]{%
+  {\color{chatPurple}\sffamily\bfseries [Structure:\ #1]}%
+}
+
+% Action item / TODO for the author (teal)
+%   \chattodo{Add throughput numbers here once experiments finish.}
+\newcommand{\chattodo}[1]{%
+  {\color{chatTeal}\sffamily\bfseries [TODO:\ #1]}%
+}
+
+% ---- block-level box for longer advisor notes ---------------------------
+%   \begin{chatbox}{Title of the note}
+%     Longer discussion here …
+%   \end{chatbox}
+\newtcolorbox{chatbox}[1][Advisor Note]{%
+  colback=chatBlue!5!white,
+  colframe=chatBlue!70!black,
+  fonttitle=\sffamily\bfseries,
+  title={#1},
+  breakable,
+  left=4pt, right=4pt, top=4pt, bottom=4pt,
+}
+
+% ---- toggle to hide all review markup for camera-ready -------------------
+% Uncomment the block below to suppress every annotation at once.
+% \renewcommand{\chatcomment}[1]{}
+% \renewcommand{\chatrewrite}[1]{}
+% \renewcommand{\chatcite}[1]{}
+% \renewcommand{\chatfactcheck}[1]{}
+% \renewcommand{\chatstructure}[1]{}
+% \renewcommand{\chattodo}[1]{}
+% \renewenvironment{chatbox}[1][]{\comment}{\endcomment}

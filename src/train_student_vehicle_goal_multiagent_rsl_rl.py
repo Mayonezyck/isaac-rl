@@ -351,6 +351,12 @@ parser.add_argument(
     help="Optional hard cap on evaluation steps. 0 uses one full episode horizon.",
 )
 parser.add_argument(
+    "--double_time_allowance",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "test", "double_time_allowance", False)),
+    help="For test modes, double the per-world episode horizon before timeout.",
+)
+parser.add_argument(
     "--invincible",
     action=argparse.BooleanOptionalAction,
     default=bool(_cfg_value(file_cfg, "test", "invincible", False)),
@@ -773,6 +779,13 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.reward_choco_road_edge_ttc_radius_m = float(args_cli.reward_choco_road_edge_ttc_radius_m)
     cfg.test_mode = str(args_cli.test_mode).strip().lower()
     cfg.invincible = bool(args_cli.invincible)
+    if bool(args_cli.double_time_allowance) and cfg.test_mode != "none":
+        cfg.episode_length_s = float(cfg.episode_length_s) * 2.0
+        print(
+            "[INFO][SceneFactory] double_time_allowance=true: "
+            f"episode_length_s doubled to {cfg.episode_length_s:.2f}s for test mode {cfg.test_mode}.",
+            flush=True,
+        )
     cfg.collision_test_post_collision_steps = int(_cfg_value(file_cfg, "test", "post_collision_steps", 120))
     cfg.collision_test_post_collision_throttle = float(
         _cfg_value(file_cfg, "test", "post_collision_throttle", 0.0)
@@ -1029,6 +1042,7 @@ def _build_resolved_config(
             "mode": str(env_cfg.test_mode),
             "checkpoint_path": str(Path(args_cli.checkpoint_path).expanduser().resolve()) if str(args_cli.checkpoint_path).strip() else "",
             "max_steps": int(args_cli.eval_max_steps),
+            "double_time_allowance": bool(args_cli.double_time_allowance),
             "invincible": bool(args_cli.invincible),
             "collision_force_threshold_n": float(env_cfg.agent_collision_force_threshold_n),
             "post_collision_steps": int(env_cfg.collision_test_post_collision_steps),
@@ -1121,6 +1135,7 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "test_mode": env_cfg.test_mode,
             "checkpoint_path": str(Path(args_cli.checkpoint_path).expanduser().resolve()) if str(args_cli.checkpoint_path).strip() else "",
             "eval_max_steps": int(args_cli.eval_max_steps),
+            "double_time_allowance": bool(args_cli.double_time_allowance),
             "invincible": bool(args_cli.invincible),
             "collision_test_post_collision_steps": env_cfg.collision_test_post_collision_steps,
             "collision_test_post_collision_throttle": env_cfg.collision_test_post_collision_throttle,
@@ -2123,6 +2138,7 @@ def _run_scene_factory_policy_eval(
         "checkpoint_path": str(checkpoint_path),
         "config_path": str(Path(args_cli.config).expanduser().resolve()),
         "invincible": bool(getattr(base_env.cfg, "invincible", False)),
+        "double_time_allowance": bool(args_cli.double_time_allowance),
         "max_steps": int(max_steps),
         "completed_world_count": int(len(completed_items)),
         "expected_world_count": int(base_env.num_envs),
