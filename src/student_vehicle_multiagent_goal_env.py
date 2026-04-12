@@ -518,6 +518,9 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     reward_choco_idle_penalty_enable: bool = True
     reward_choco_idle_penalty_per_step: float = 0.03
     reward_choco_idle_speed_threshold_mps: float = 0.5
+    reward_choco_speed_bonus_enable: bool = False
+    reward_choco_speed_bonus_per_step: float = 0.02
+    reward_choco_speed_bonus_max_mps: float = 10.0
     reward_choco_geom_lane_enable: bool = True
     reward_choco_geom_lane_per_step: float = 0.12
     reward_choco_geom_lane_tolerance_m: float = 1.75
@@ -940,6 +943,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             "lane_forbidden_penalty",
             "offroad_penalty",
             "idle_penalty",
+            "speed_bonus",
             "ttc_penalty",
             "road_edge_ttc_penalty",
             "geom_lane_reward",
@@ -2409,6 +2413,15 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     active_mask & (planar_speed < float(self.cfg.reward_choco_idle_speed_threshold_mps))
                 ).float() * float(self.cfg.reward_choco_idle_penalty_per_step)
 
+            speed_bonus = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            if bool(self.cfg.reward_choco_speed_bonus_enable):
+                max_speed = float(self.cfg.reward_choco_speed_bonus_max_mps)
+                speed_bonus = (
+                    torch.clamp(planar_speed, min=0.0, max=max_speed) / max_speed
+                    * float(self.cfg.reward_choco_speed_bonus_per_step)
+                    * active_float
+                )
+
             lane_quality = lane_quality_all[agent_idx]
             offroad_mask = offroad_mask_all[agent_idx]
             geom_lane_reward = (
@@ -2459,6 +2472,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 + lane_forbidden_penalty
                 + offroad_penalty
                 + idle_penalty
+                + speed_bonus
                 + ttc_penalty
                 + road_edge_ttc_penalty
                 + geom_lane_reward
@@ -2471,6 +2485,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._episode_sums["lane_forbidden_penalty"][agent_idx] += lane_forbidden_penalty
             self._episode_sums["offroad_penalty"][agent_idx] += offroad_penalty
             self._episode_sums["idle_penalty"][agent_idx] += idle_penalty
+            self._episode_sums["speed_bonus"][agent_idx] += speed_bonus
             self._episode_sums["ttc_penalty"][agent_idx] += ttc_penalty
             self._episode_sums["road_edge_ttc_penalty"][agent_idx] += road_edge_ttc_penalty
             self._episode_sums["geom_lane_reward"][agent_idx] += geom_lane_reward

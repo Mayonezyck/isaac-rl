@@ -1,0 +1,24 @@
+# Single-scene config for the WORST performing scene in anticrawl model_1050 eval.
+# scene_000161.json: 0% success rate (0/4 agents, all timed out).
+io:
+  scene_json_dir: /home/yz8733/Github/isaac-rl/data/processed/waymo_scenes_json
+world:
+  root_container: /World/SceneFactoryWorlds
+  world_count: 1
+  grid_cols: 1
+  rows: 1
+  world_size_m:
+  - 200.0
+  - 200.0
+  padding_m: 200.0
+  base_z_m: 0.0
+  bounds_size_m: 200.0
+  origin_mode: center
+  origin_center_mode: mean
+  assignments:
+  - scene_json: scene_000161.json
+    friction:
+      road_type: AC
+      precip_type: clear
+      precip_intensity_mmph: 0.0
+      water_film_mm: 0.0

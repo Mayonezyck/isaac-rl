@@ -4,6 +4,7 @@
 % ============================================================
 \section{Introduction}
 \label{sec:introduction}
+%Autonomous driving is something that people are actively exploring, and there existws a lot of simulators for autonomous vehicles. Why researchers need simulators for AV? Because we surely need a system that is not real world, to try the trained jdriving algorithms, as the real world deployment is costly, it's impossible to try things in scale in the real world. Local transportation departments are going to make a lot of administrative decisions every day, especially for urban areas. I should take some data about how much traffic decisions are made in a day, and there must be researches about the disruptive effect to traffic from those decisions. Traffic engineers spent decades to make traffic simulators that work on both microscopic level and macroscopic level. ON one hand, we have SUMO, which is an opensource traffic simulator, that is widely used in digital twin technology. SUMO is a quite macroscope simjulator, which simulates how the traffic system will respond to a certain change to the system, such as road closure, lane closure. However, there are plenty of things that are simplified in SUMO, such as vehicle dynamics. Differetn weathers will have effects on how cars dynamics change, and how the drivers behaviors change. Those changes cannot be captured by SUMO's modeling of driver model, since SUMO does not take environmental conditions into account. There exists simulators that do count those factors, such as Carla \cite{dosovitskiy_carla_2017}who's built on Unreal engine, the backend is PhysX physics engine. Also metadrive \cite{li_metadrive_2022}, who built their system on bullet physics engine. However, one shared downside of them is that both simulators, although enabled by physics engine, they don't support scaling of scenes, for example, if i would like to evaluate the potentail outcome of a certain configuration of a workzone, I need to sequentially test all of them. This is requiring a lot of time. There's a gap in current AV siimulators, that that can both be scaled to multiple scene, multiple agents at one time, and also have phyiscs engine enabled.
 
 % ------------------------------------------------------------------
 %  P1 — Broad motivation: why simulation matters for AV
@@ -48,8 +49,8 @@ Yet neither supports \emph{GPU-parallel execution of multiple independent scenes
 
 On the other end of the spectrum, GPU-accelerated simulators such as Waymax~\cite{gulino_waymax_2023} and GPUDrive~\cite{kazemkhani_gpudrive_2025} achieve impressive throughput by batching hundreds of scenarios on a single GPU.
 GPUDrive, built on the Madrona game engine, can simulate over a million steps per second for multi-agent training on the Waymo Open Motion Dataset.
-However, these systems achieve scalability by simplifying the underlying dynamics—vehicles follow bicycle or kinematic models with no rigid-body physics engine governing tire forces, suspension, or contact dynamics.
-This simplification is reasonable for many research tasks, but limits applicability to safety-critical analyses where physical fidelity matters—such as evaluating driving under degraded road friction or assessing collision severity.
+However, these systems achieve scalability by simplifying the underlying dynamics. The vehicles follow bicycle or kinematic models with no rigid-body physics engine governing tire forces, suspension, or contact dynamics.
+This simplification is reasonable for many research tasks, but limits applicability to safety-critical analyses where physical fidelity matters.
 
 % ------------------------------------------------------------------
 %  P5 — The gap statement
@@ -82,4 +83,4 @@ The contributions of this work are:
   \item A \textbf{three-stage training curriculum} (navigation $\to$ lane safety $\to$ traffic + weather) that enables stable policy learning under complex, multi-signal rewards.
 \end{enumerate}
 
-\chattodo{Insert concrete throughput and success-rate numbers once experiments are finalized (e.g., ``X env-steps/sec with Y agents on a single A100, Z\% goal-reach rate'').}
+\chattodo{Insert concrete throughput and success-rate numbers once experiments are finalized (e.g., ``X env-steps/sec with Y agents on a single A6000 pro, Z\% goal-reach rate'').}

@@ -4,9 +4,12 @@
 % ============================================================
 \section{Related Work}
 \label{sec:related_work}
+%the next section we are going to introduce what kind urban driving simulators are already released, and we have a table to compare each of them, and by that authors can see that our simulator is the one that enables multiple scene, multiple agents, and have physics engine integrated, so that the agent response is more realistic. Ah forgot to say about it, but somewhere in the intro we might should say, it's reasonable of people to simplify some aspects of the system when building their simulators, but our simulator is more tailored to take care about safety related factors. I mean, surely most of the time, people drive in good weathers, especially waymo, or other autonomuos driving companies, their data collection is from those cities with good weathers, such as (idk idk, DC? California?) NOt sure how biased is their data, but the point is that cities like Madison, WI, or Buffalo, NY, those kinds of cities exists, and things like construction, communiting of civilians, and adverse weather, is unavoidably happening at the same time. In a simulator perspective, those are long tail events, but for traffic administrators, those are high stake scenarios in real life. Thus, simlator realism is one of the most cared aspect in this sense. Traffic administrators need to be able to compare the outcome of a certain decision, under a certain time of a day, and a certain kind of weather, to be able to make a  calculated decision. After introducing of those differnet current simulators, I should talk about what kind of studies in transportation exists about the friction between tyre and ground in different weather conditions. Since this is a work about driving simulator, the simulator related downstream tasks shall also be discussed in the realtaed work section. Inlcuding the use of NVIDIA cosmos transfer base model to generate visually realistic driving scenarios. 
 
-This work presents a GPU-accelerated, weather-aware, multi-world multi-agent training pipeline for physically grounded, safety-aware driving behavior.
-We review related work in three categories: driving simulators, weather-aware driving behavior research, and GPU-accelerated simulation frameworks.
+
+% After the related work section, I need to actually write about methodology. 
+% This work presents a GPU-accelerated, weather-aware, multi-world multi-agent training pipeline for physically grounded, safety-aware driving behavior.
+% We review related work in three categories: driving simulators, weather-aware driving behavior research, and GPU-accelerated simulation frameworks.
 
 % ==================================================================
 \subsection{Driving Simulators}
@@ -60,7 +63,7 @@ TorchDriveSim \cite{lavington_torchdriveenv_2024} & \cmark & \cmark &  &  &  &  
 BITS \cite{xu_bits_2022}& \cmark &  &  & \cmark & \cmark &  & &Goal point \\
 Waymax \cite{gulino_waymax_2023} & $\checkmark$ ($\geq 128$) & \cmark &  & \cmark & \cmark &  & &Waypoints \\
 GPUDrive \cite{kazemkhani_gpudrive_2025} & $\checkmark$ ($\geq 128$) & \cmark & \cmark & \cmark & \cmark &  & &Goal point \\
-\textbf{SceneFactory (ours)} & $\checkmark$ ($\geq 128$) & \cmark &  & \cmark & \cmark & \cmark & \cmark &Goal point \\
+\textbf{SceneFactory (ours)} & $\checkmark$ ($\geq 128$) & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark &Goal point \\
 \bottomrule
 \end{tabularx}
 \caption{Comparison of driving simulators across key capabilities. SceneFactory is, to our knowledge, the first system that simultaneously provides GPU-accelerated multi-world execution, multi-agent support, full rigid-body physics, and weather-aware friction modeling.}

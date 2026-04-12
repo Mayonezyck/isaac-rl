@@ -233,6 +233,9 @@ parser.add_argument("--reward_choco_offroad_penalty", type=float, default=float(
 parser.add_argument("--reward_choco_idle_penalty_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_idle_penalty_enable", True)))
 parser.add_argument("--reward_choco_idle_penalty_per_step", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_idle_penalty_per_step", 0.03)))
 parser.add_argument("--reward_choco_idle_speed_threshold_mps", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_idle_speed_threshold_mps", 0.5)))
+parser.add_argument("--reward_choco_speed_bonus_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_speed_bonus_enable", False)))
+parser.add_argument("--reward_choco_speed_bonus_per_step", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_speed_bonus_per_step", 0.02)))
+parser.add_argument("--reward_choco_speed_bonus_max_mps", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_speed_bonus_max_mps", 10.0)))
 parser.add_argument("--reward_choco_geom_lane_enable", action=argparse.BooleanOptionalAction, default=bool(_cfg_value(file_cfg, "reward", "choco_geom_lane_enable", True)))
 parser.add_argument("--reward_choco_geom_lane_per_step", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_per_step", 0.12)))
 parser.add_argument("--reward_choco_geom_lane_tolerance_m", type=float, default=float(_cfg_value(file_cfg, "reward", "choco_geom_lane_tolerance_m", 1.75)))
@@ -538,6 +541,12 @@ parser.add_argument(
     help="Vertical offset for the vehicle proxy boxes in debug/video renders.",
 )
 parser.add_argument(
+    "--resume_from",
+    type=str,
+    default=str(_cfg_value(file_cfg, "runner", "resume_path", "")),
+    help="Path to a model checkpoint (.pt) to resume training from. Loads weights + optimizer state.",
+)
+parser.add_argument(
     "--save_stage_usd",
     type=str,
     default=str(_cfg_value(file_cfg, "debug", "save_stage_usd", "")),
@@ -550,8 +559,9 @@ parser.add_argument(
     help="Exit immediately after saving the initialized stage debug dump.",
 )
 AppLauncher.add_app_launcher_args(parser)
+_device_from_cfg = _cfg_value(file_cfg, "app", "device", None)
 parser.set_defaults(
-    device=str(_cfg_value(file_cfg, "app", "device", "")),
+    device=str(_device_from_cfg) if _device_from_cfg else "cuda:0",
     enable_cameras=bool(_cfg_value(file_cfg, "video", "enabled", False)),
 )
 args_cli = parser.parse_args()
@@ -758,6 +768,9 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.reward_choco_idle_penalty_enable = bool(args_cli.reward_choco_idle_penalty_enable)
     cfg.reward_choco_idle_penalty_per_step = float(args_cli.reward_choco_idle_penalty_per_step)
     cfg.reward_choco_idle_speed_threshold_mps = float(args_cli.reward_choco_idle_speed_threshold_mps)
+    cfg.reward_choco_speed_bonus_enable = bool(args_cli.reward_choco_speed_bonus_enable)
+    cfg.reward_choco_speed_bonus_per_step = float(args_cli.reward_choco_speed_bonus_per_step)
+    cfg.reward_choco_speed_bonus_max_mps = float(args_cli.reward_choco_speed_bonus_max_mps)
     cfg.reward_choco_geom_lane_enable = bool(args_cli.reward_choco_geom_lane_enable)
     cfg.reward_choco_geom_lane_per_step = float(args_cli.reward_choco_geom_lane_per_step)
     cfg.reward_choco_geom_lane_tolerance_m = float(args_cli.reward_choco_geom_lane_tolerance_m)
@@ -1017,6 +1030,9 @@ def _build_resolved_config(
             "choco_idle_penalty_enable": bool(env_cfg.reward_choco_idle_penalty_enable),
             "choco_idle_penalty_per_step": float(env_cfg.reward_choco_idle_penalty_per_step),
             "choco_idle_speed_threshold_mps": float(env_cfg.reward_choco_idle_speed_threshold_mps),
+            "choco_speed_bonus_enable": bool(env_cfg.reward_choco_speed_bonus_enable),
+            "choco_speed_bonus_per_step": float(env_cfg.reward_choco_speed_bonus_per_step),
+            "choco_speed_bonus_max_mps": float(env_cfg.reward_choco_speed_bonus_max_mps),
             "choco_geom_lane_enable": bool(env_cfg.reward_choco_geom_lane_enable),
             "choco_geom_lane_per_step": float(env_cfg.reward_choco_geom_lane_per_step),
             "choco_geom_lane_tolerance_m": float(env_cfg.reward_choco_geom_lane_tolerance_m),
@@ -1197,6 +1213,9 @@ def _write_run_metadata(run_dir: Path, env_cfg: StudentVehicleMultiAgentGoalEnvC
             "reward_choco_idle_penalty_enable": env_cfg.reward_choco_idle_penalty_enable,
             "reward_choco_idle_penalty_per_step": env_cfg.reward_choco_idle_penalty_per_step,
             "reward_choco_idle_speed_threshold_mps": env_cfg.reward_choco_idle_speed_threshold_mps,
+            "reward_choco_speed_bonus_enable": env_cfg.reward_choco_speed_bonus_enable,
+            "reward_choco_speed_bonus_per_step": env_cfg.reward_choco_speed_bonus_per_step,
+            "reward_choco_speed_bonus_max_mps": env_cfg.reward_choco_speed_bonus_max_mps,
             "reward_choco_geom_lane_enable": env_cfg.reward_choco_geom_lane_enable,
             "reward_choco_geom_lane_per_step": env_cfg.reward_choco_geom_lane_per_step,
             "reward_choco_geom_lane_tolerance_m": env_cfg.reward_choco_geom_lane_tolerance_m,
@@ -2255,6 +2274,16 @@ def main():
 
     runner = OnPolicyRunner(env, train_cfg, log_dir=str(run_dir), device=str(runner_cfg.device))
     runner.git_status_repos = [__file__]
+
+    resume_path_raw = str(getattr(args_cli, "resume_from", "")).strip()
+    if resume_path_raw and not eval_test_mode:
+        resume_path = Path(resume_path_raw).expanduser().resolve()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"--resume_from checkpoint not found: {resume_path}")
+        print(f"[INFO] Resuming training from checkpoint: {resume_path}", flush=True)
+        runner.load(str(resume_path), load_optimizer=True)
+        print(f"[INFO] Resumed at iteration {runner.current_learning_iteration}", flush=True)
+
     try:
         if eval_test_mode:
             _run_scene_factory_policy_eval(base_env, env, runner, run_dir)

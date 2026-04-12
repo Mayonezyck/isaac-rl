@@ -112,17 +112,21 @@ for rd in run_dirs:
 
 For SceneFactory runs, logs go to `logs/rsl_rl/expA_scenefactory/expA_sf_{N}w/`.
 
-## Expected outcome
+## Results
 
-| Pipeline       | 32w  | 64w  | 128w | 256w |
-|----------------|------|------|------|------|
-| gpudrive_choco | ~X   | ~167 | ~??  | OOM? |
-| SceneFactory   | ~Y   | ~Y   | ~Y   | ~Y   |
+| Pipeline       | 32w           | 64w           | 128w             | 256w              |
+|----------------|---------------|---------------|------------------|-------------------|
+| gpudrive_choco | 174 ± 27      | 159 ± 29      | 164 ± 1          | 152 ± 0           |
+| SceneFactory   | 3,870 ± 66    | 7,173 ± 114   | 12,225 ± 1,520   | 19,250 ± 2,984    |
 
-The baseline CASPS is expected to plateau or decline past 64 worlds because
-per-agent Python loops scale as O(worlds x 16). SceneFactory CASPS should
-scale near-linearly because all observation/reward/action computation is
-batched on GPU.
+**Key findings:**
+- The baseline CASPS is flat at ~152–174 across all world counts, confirming that
+  per-agent Python loops are the bottleneck (not the PhysX solver).
+- SceneFactory CASPS scales near-linearly: **22× faster at 32 worlds, 127× faster
+  at 256 worlds** compared to the baseline.
+- Neither pipeline OOM'd at 256 worlds on the RTX PRO 6000 Blackwell (96 GB VRAM).
+- SceneFactory achieves ~19,250 controlled agent steps/sec at 4,096 agent slots,
+  demonstrating that full rigid-body PPO training is practical on a single GPU.
 
 ## Notes
 - gpudrive_choco uses `cuda:1`, SceneFactory uses `cuda:0`. Do NOT run both

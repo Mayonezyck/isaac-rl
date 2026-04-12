@@ -15,6 +15,7 @@
 \usepackage{url}
 \usepackage{booktabs}
 \usepackage{amsfonts}
+\usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{nicefrac}
 \usepackage{microtype}
@@ -66,7 +67,7 @@ Training and evaluating autonomous driving agents at scale requires simulators t
 Existing platforms force a trade-off: physically realistic simulators such as CARLA and MetaDrive run only one scene at a time, while GPU-accelerated systems such as Waymax and GPUDrive achieve massive parallelism by simplifying vehicle dynamics to bicycle or kinematic models.
 We present \textbf{SceneFactory}, a procedural scene construction and multi-agent training platform built on NVIDIA Isaac Sim and Isaac Lab that closes this gap.
 SceneFactory ingests road topologies from the Waymo Open Motion Dataset, procedurally constructs multi-world USD environments, and orchestrates the parallel simulation of hundreds of articulated vehicles—governed by PhysX~5 rigid-body dynamics—across dozens of independent road worlds on a single GPU.
-A weather-to-friction module, grounded in the Zhao et al.\ tire--pavement friction model, maps precipitation and road surface type to effective friction coefficients applied directly to the physics engine.
+A weather-to-friction module maps precipitation and road surface type to effective friction coefficients applied directly to the physics engine.
 We train navigation policies via PPO with a three-stage curriculum (navigation $\to$ lane safety $\to$ traffic + weather) and report throughput and policy performance.
 To our knowledge, SceneFactory is the first system that simultaneously provides GPU-parallel multi-world execution, multi-agent support, full rigid-body physics, and weather-aware friction modeling.
 \end{abstract}
@@ -98,5 +99,10 @@ To our knowledge, SceneFactory is the first system that simultaneously provides 
 %  NeurIPS Paper Checklist  (required — do NOT remove)
 % ============================================================
 \input{checklist}
+
+% ============================================================
+%  Appendix
+% ============================================================
+\input{sections/appendix}
 
 \end{document}

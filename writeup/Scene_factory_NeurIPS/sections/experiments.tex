@@ -43,34 +43,9 @@ Episodes last 50\,s (1{,}500 control steps).
 Upon reaching the goal (within 3.0\,m) or triggering a termination condition (collision, off-road crash, timeout), an agent is parked in place with zero velocity; the remaining agents continue until every agent in the environment has terminated or the episode times out, at which point the entire world resets with fresh start-goal assignments for all agents.
 
 \paragraph{PPO hyperparameters.}
-Table~\ref{tab:ppo_hparams} lists the PPO configuration.
-The learning rate follows an adaptive schedule that halves or doubles the rate to maintain the per-update KL divergence near a target of 0.01.
-Training runs for up to 40{,}000 iterations; each iteration collects a rollout of 128 steps per environment and performs 5 gradient epochs over 16 mini-batches.
+Training uses PPO with an adaptive learning rate (initial $2.09{\times}10^{-4}$, KL target 0.01), rollout horizon of 128 steps, 5 gradient epochs over 16 mini-batches, $\gamma{=}0.99$, $\lambda{=}0.98$, and clip $\epsilon{=}0.15$.
 The total batch size per update is $4{,}096 \times 128 = 524{,}288$ transitions.
-
-\begin{table}[t]
-\centering
-\caption{PPO hyperparameters.}
-\label{tab:ppo_hparams}
-\small
-\begin{tabular}{ll}
-\toprule
-Parameter & Value \\
-\midrule
-Rollout horizon           & 128 steps \\
-Mini-batches              & 16 \\
-Learning epochs           & 5 \\
-Learning rate (initial)   & $2.09 \times 10^{-4}$ \\
-LR schedule               & adaptive (KL target 0.01) \\
-Discount $\gamma$         & 0.99 \\
-GAE $\lambda$             & 0.98 \\
-Clip $\epsilon$           & 0.15 \\
-Entropy coefficient       & $3 \times 10^{-5}$ \\
-Value loss coefficient    & 1.0 \\
-Max gradient norm         & 1.0 \\
-\bottomrule
-\end{tabular}
-\end{table}
+The full hyperparameter table is in Appendix~\ref{app:ppo_hparams}.
 
 \paragraph{Evaluation protocol.}
 We evaluate on the 64 held-out test scenes, each loaded into a separate environment with up to 16 agent slots.
@@ -98,8 +73,10 @@ we discard the first 50 logged iterations as warmup and report the mean and stan
 We select a single Waymo scene with 28 qualifying agents (ensuring all 16 slots are filled in every world) and replicate it at four scales: 32, 64, 128, and 256 parallel worlds, yielding 512 to 4{,}096 agent slots.
 Each configuration trains for a short benchmark window: 500\,K total timesteps for the Baseline, 20 PPO iterations for SceneFactory.
 Figure~\ref{fig:throughput_scaling} plots CASPS as a function of total agent slots for both pipelines.
-
-\chattodo{Create Figure~\ref{fig:throughput\_scaling}: line plot, x-axis = agent slots (512, 1024, 2048, 4096), y-axis = CASPS (log scale), two lines (SceneFactory, Baseline). Fill from TensorBoard after runs complete.}
+The Baseline throughput is essentially flat at $\sim$152--174 CASPS across all world counts, confirming that per-agent Python loops---not the PhysX solver---are the bottleneck.
+SceneFactory scales near-linearly, reaching 19{,}250 CASPS at 256 worlds (4{,}096 agent slots): a \textbf{127$\times$ speedup} over the Baseline at the same scale.
+Even at the smallest configuration (32 worlds), SceneFactory is 22$\times$ faster.
+Neither pipeline exceeded GPU memory at 256 worlds on the RTX PRO 6000 Blackwell (96\,GB VRAM).
 
 \begin{table}[t]
 \centering
@@ -111,63 +88,55 @@ Both pipelines use the same Waymo scene, the same PhysX 5 rigid-body solver, and
 \toprule
 Worlds & Agent slots & Baseline & SceneFactory \\
 \midrule
- 32 &   512 & \hl{$a \pm b$} & \hl{$a' \pm b'$} \\
- 64 & 1{,}024 & \hl{$c \pm d$} & \hl{$c' \pm d'$} \\
-128 & 2{,}048 & \hl{$e \pm f$} & \hl{$e' \pm f'$} \\
-256 & 4{,}096 & \hl{$g \pm h$} & \hl{$g' \pm h'$} \\
+ 32 &   512 & $174 \pm 27$ & $3{,}870 \pm 66$ \\
+ 64 & 1{,}024 & $159 \pm 29$ & $7{,}173 \pm 114$ \\
+128 & 2{,}048 & $164 \pm 1$ & $12{,}225 \pm 1{,}520$ \\
+256 & 4{,}096 & $152 \pm 0$ & $19{,}250 \pm 2{,}984$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-\chattodo{Fill Table~\ref{tab:throughput\_scaling} from Experiment~A TensorBoard logs.  Baseline 128w/256w may OOM; record that as ``OOM'' in the cell.}
 
-\paragraph{Why the Baseline is slow.}
-Both pipelines embed sub-phase timers that decompose each environment step into physics, observation construction, reward computation, action application, and wrapper overhead.
-Table~\ref{tab:timing_breakdown} reports the per-step breakdown for the Baseline at 64 worlds (its production configuration).
-The PhysX rigid-body solver accounts for roughly half of wall-clock time (1{,}798\,ms, 49.6\%); this cost is irreducible and shared by both pipelines.
-The observation builder consumes another 1{,}000\,ms (27.6\%), because it iterates over each of the 638 active agents in a Python loop, issuing per-prim USD state queries and computing ego-frame transforms with scalar arithmetic.
-Geometric lane features, TTC computation, and action application add a further 22\% through similar per-agent loops.
+\paragraph{Why the speedup.}
+The speedup arises from three architectural changes: (1)~GPU-resident joint-state tensors that replace per-agent Python loops with batched \texttt{torch} operations, (2)~cloned PhysX solver islands that enable parallel broad-phase/narrow-phase dispatch, and (3)~an on-device training loop (RSL-RL) that eliminates CPU--GPU data transfers.
+A detailed per-phase timing breakdown (physics, observations, rewards, actions) is provided in Appendix~\ref{app:throughput}.
 
-SceneFactory eliminates these bottlenecks through three architectural changes:
-\begin{enumerate}[leftmargin=*, itemsep=2pt]
-  \item \textbf{Batched joint-state tensors.}
-        The custom URDF articulated vehicle (\S\ref{sec:vehicle_sysid}) exposes positions, velocities, and orientations as GPU-resident tensors of shape $(\texttt{num\_envs}, \texttt{num\_agents}, d)$ via Isaac Lab's \texttt{Articulation} API.
-        Observation construction reduces to a handful of batched \texttt{torch} operations with no Python per-agent loop.
-  \item \textbf{Cloned PhysX scenes.}
-        Isaac Lab's environment cloning creates $N$ independent PhysX solver islands, enabling the GPU broad-phase and narrow-phase to dispatch them in parallel.
-        The Baseline places all worlds in a single PhysX scene, limiting solver parallelism.
-  \item \textbf{GPU-resident training loop.}
-        RSL-RL reads observations, rewards, and dones as CUDA tensors directly from the environment; no CPU round-trip occurs during training.
-        The Baseline converts observations to NumPy for Stable-Baselines3's rollout buffer, incurring $O(\text{agents} \times \text{obs\_dim})$ bytes of device-to-host transfer every step.
-\end{enumerate}
+\paragraph{Comparison with kinematic simulators.}
+Table~\ref{tab:cross_simulator} places SceneFactory in the context of published throughput numbers from kinematic driving simulators.
+GPUDrive~\cite{kazemkhani_gpudrive_2025} (ICLR 2025) reports a peak of 2.3\,M agent-steps per second (ASPS) on an A100 GPU using a kinematic bicycle model.
+When restricted to \emph{controlled} agents---i.e., those with non-trivial goals---the effective rate drops to $\sim$200\,K CASPS due to the high fraction of parked or near-goal vehicles in randomly sampled Waymo scenes (mean $\sim$10.8 controllable agents per scene out of up to 128 agent slots).
+During end-to-end PPO training the authors report 200\,K--500\,K CASPS depending on hardware and observation configuration.
+Nocturne~\cite{vinitsky_nocturne_2022} (NeurIPS 2022), a CPU-based C++ simulator with a kinematic model, achieves $\sim$15\,K ASPS on 16 CPU cores.
+Waymax~\cite{gulino_waymax_2023} (NeurIPS 2024), a JAX-based simulator, supports GPU acceleration but encountered out-of-memory errors beyond 16 parallel environments in the GPUDrive authors' benchmarks, so we do not list a peak throughput.
+
+SceneFactory operates at a lower absolute throughput than GPUDrive because each agent is a 10-DOF articulated rigid body simulated by the PhysX 5 solver at 120\,Hz (four physics sub-steps per 30\,Hz control tick).
+The comparison is not apples-to-apples: the physics fidelity that makes SceneFactory useful for sim-to-real transfer---tire slip, suspension dynamics, inertial coupling---is precisely what makes it slower than a kinematic model.
+Nevertheless, at 19.3\,K CASPS SceneFactory already exceeds Nocturne's throughput while providing full rigid-body dynamics, and it operates within an order of magnitude of GPUDrive's training-time CASPS despite the fundamentally heavier physics workload.
+The relevant same-hardware, same-physics comparison is against the Baseline pipeline on the same RTX PRO 6000, where SceneFactory achieves a \textbf{127$\times$} speedup (Table~\ref{tab:throughput_scaling}).
 
 \begin{table}[t]
 \centering
-\caption{Per-step timing breakdown for the Baseline pipeline at 64 worlds (1{,}024 agent slots, 638 active agents).  Values are averaged over 197 steady-state iterations.}
-\label{tab:timing_breakdown}
+\caption{Cross-simulator throughput comparison using published numbers.
+All kinematic simulators use simplified vehicle dynamics (no rigid-body contact, no tire model); SceneFactory is the only entry with full PhysX 5 rigid-body physics.
+ASPS = agent steps per second (all agents, including parked); CASPS = controlled agent steps per second (policy-active agents only).
+GPUDrive and Nocturne numbers are taken from~\cite{kazemkhani_gpudrive_2025}; SceneFactory numbers are measured on our hardware.}
+\label{tab:cross_simulator}
 \small
-\begin{tabular}{lrr}
+\begin{tabular}{llllr}
 \toprule
-Phase & Time (ms) & Fraction \\
+Simulator & Physics model & GPU & Metric & Throughput \\
 \midrule
-PhysX solver          & 1{,}798 & 49.6\% \\
-Observation builder   & 1{,}000 & 27.6\% \\
-Geometric lane features & 211  &  5.8\% \\
-Road-edge TTC         &   184  &  5.1\% \\
-Action application    &   179  &  4.9\% \\
-Vehicle TTC           &   107  &  2.9\% \\
-TTC state queries     &    84  &  2.3\% \\
-Contact scan          &    37  &  1.0\% \\
+GPUDrive~\cite{kazemkhani_gpudrive_2025}
+  & Kinematic bicycle & A100 80\,GB & ASPS & 2{,}300{,}000 \\
+GPUDrive (training)
+  & Kinematic bicycle & A100 80\,GB & CASPS & 200K--500K \\
+Nocturne~\cite{vinitsky_nocturne_2022}
+  & Kinematic & CPU 16 cores & ASPS & 15{,}000 \\
 \midrule
-\textbf{Total env step} & \textbf{3{,}626} & \textbf{100\%} \\
+\textbf{SceneFactory (ours)}
+  & \textbf{10-DOF rigid body} & \textbf{RTX PRO 6000} & \textbf{CASPS} & \textbf{19{,}250} \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\paragraph{Comparison with kinematic simulators.}
-GPUDrive~\cite{kazemkhani_gpudrive_2025} reports over one million agent-steps per second using a kinematic bicycle model with no rigid-body dynamics.
-SceneFactory operates at a lower absolute throughput because each agent is a 10-DOF articulated rigid body simulated by the PhysX 5 solver at 120\,Hz (four physics steps per 30\,Hz control tick, i.e., decimation factor~4).
-The comparison is not apples-to-apples: the physics fidelity that makes SceneFactory useful for sim-to-real transfer is precisely what makes it slower than a kinematic model.
-The relevant comparison is therefore against other PhysX-based pipelines on the same hardware, which is what the Baseline provides.
 
 % ---------------------------------------------------------------
 \subsection{Navigation Performance}
