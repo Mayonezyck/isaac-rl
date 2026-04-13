@@ -26,6 +26,7 @@ from src.student_vehicle_goal_env import (
 )
 from src.scene_factory_multiworld_scene import (
     _build_single_world_roads_only,
+    _load_scene_cfg,
     _load_yaml,
     extract_vehicle_spawns_from_json,
 )
@@ -583,6 +584,10 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     random_steer_test_steering_hold_steps: int = 12
     random_steer_test_seed: int = 123
     invincible: bool = False
+    random_od: bool = False
+    random_od_min_travel_m: float = 20.0
+    random_od_max_travel_m: float = 60.0
+    random_od_lane_types: tuple[int, ...] = (1, 2)
 
     reward_scale_alive: float = 0.05
     reward_scale_progress: float = 10.0
@@ -618,6 +623,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
     def __init__(self, cfg: StudentVehicleMultiAgentGoalEnvCfg, render_mode: str | None = None, **kwargs):
         self._capture_camera: Camera | None = None
         self._vehicle_proxy_marker: VisualizationMarkers | None = None
+        self._capture_cam_center_xy: tuple[float, float] | None = None
+        self._capture_cam_half_w: float = 0.0
+        self._capture_cam_half_h: float = 0.0
         self._scenario_spawns: list | None = None
         self._scenario_spawns_by_env: list[list] | None = None
         self._scene_factory_spawn_start_local = None
@@ -626,7 +634,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._scene_factory_spawn_valid = None
         self._scene_factory_scene_json_path: str | None = None
         self._scene_factory_scene_json_paths_by_env: list[str] | None = None
+        self._scene_factory_scene_cfgs_by_env: list[dict[str, Any]] | None = None
         self._scene_factory_specs_by_env: list | None = None
+        self._random_od_rng = np.random.default_rng(42)
         self._scene_factory_flatten_road_z = False
         self._scene_factory_ignore_dataset_spawn_z = False
         self._scene_factory_bounds_size_m = float(_scene_factory_bounds_size_from_cfg(cfg))
@@ -741,6 +751,17 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 str(Path(spec.scene_json_path).expanduser().resolve()) for spec in resolved_specs
             ]
             self._scene_factory_scene_json_path = str(self._scene_factory_scene_json_paths_by_env[0])
+            if bool(cfg.random_od):
+                self._scene_factory_scene_cfgs_by_env = [
+                    _load_scene_cfg(p) for p in self._scene_factory_scene_json_paths_by_env
+                ]
+                print(
+                    f"[INFO][SceneFactory] random_od=true: cached {len(self._scene_factory_scene_cfgs_by_env)} "
+                    f"scene_cfg dicts for runtime OD resampling "
+                    f"(travel={cfg.random_od_min_travel_m:.0f}-{cfg.random_od_max_travel_m:.0f}m, "
+                    f"lane_types={cfg.random_od_lane_types}).",
+                    flush=True,
+                )
             self._weather_context_np = np.stack(
                 [_scene_factory_weather_context_from_spec(cfg, spec) for spec in resolved_specs],
                 axis=0,
@@ -1104,6 +1125,12 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             device=self.device,
         )
         self._capture_camera.set_world_poses_from_view(eyes=eye, targets=target)
+        # Store projection parameters for 2D vehicle proxy overlay
+        h_aperture = float(self.cfg.capture_camera_horizontal_aperture)
+        f_length = float(self.cfg.capture_camera_focal_length)
+        self._capture_cam_center_xy = (float(scene_center[0]), float(scene_center[1]))
+        self._capture_cam_half_w = capture_height * h_aperture / (2.0 * f_length)
+        self._capture_cam_half_h = self._capture_cam_half_w * int(self.cfg.capture_camera_height) / max(1, int(self.cfg.capture_camera_width))
 
     def capture_fixed_camera_frame(self) -> np.ndarray | None:
         if self._capture_camera is None:
@@ -1112,7 +1139,88 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         rgb = self._capture_camera.data.output.get("rgb")
         if rgb is None or rgb.numel() == 0:
             return None
-        return rgb[0].detach().cpu().numpy().copy()
+        frame = rgb[0].detach().cpu().numpy().copy()
+        if bool(self.cfg.vehicle_proxy_marker_enable):
+            frame = self._overlay_vehicle_proxy_markers_2d(frame)
+        return frame
+
+    def _overlay_vehicle_proxy_markers_2d(self, frame: np.ndarray) -> np.ndarray:
+        """Draw color-coded oriented rectangles at vehicle positions on the captured frame."""
+        if self._capture_cam_center_xy is None or self._capture_cam_half_w <= 0:
+            return frame
+        cx, cy = self._capture_cam_center_xy
+        half_w = self._capture_cam_half_w
+        half_h = self._capture_cam_half_h
+        img_h, img_w = frame.shape[:2]
+        n_channels = frame.shape[2] if frame.ndim == 3 else 1
+
+        palette = [
+            (243, 51, 51),
+            (26, 209, 235),
+            (245, 199, 26),
+            (89, 235, 66),
+            (245, 107, 31),
+            (158, 82, 245),
+            (242, 77, 184),
+            (166, 217, 46),
+        ]
+        env_idx = int(np.clip(int(self.cfg.capture_camera_env_index), 0, max(self.num_envs - 1, 0)))
+        vlen = float(self._vehicle_length_m)
+        vwid = float(self._vehicle_width_m)
+        try:
+            import cv2
+            _has_cv2 = True
+        except ImportError:
+            _has_cv2 = False
+
+        for agent_idx, vehicle in enumerate(self._vehicles):
+            # Skip un-spawned (inactive / limbo) agents
+            if hasattr(self, "_spawned_agent_mask"):
+                if not bool(self._spawned_agent_mask[agent_idx, env_idx].item()):
+                    continue
+
+            pos = vehicle.data.root_pos_w[env_idx]
+            quat = vehicle.data.root_quat_w[env_idx]  # (w, x, y, z)
+            wx, wy = float(pos[0]), float(pos[1])
+
+            # Skip vehicles that are clearly outside the camera view (limbo / stale)
+            if abs(wx - cx) > half_w * 3 or abs(wy - cy) > half_h * 3:
+                continue
+
+            qw, qx, qy, qz = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+            yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+            color_rgb = palette[agent_idx % len(palette)]
+            # Pad to match frame channels (e.g. RGBA)
+            color = color_rgb + (255,) * (n_channels - 3) if n_channels > 3 else color_rgb
+
+            if _has_cv2:
+                fwd = np.array([math.cos(yaw), math.sin(yaw)])
+                rgt = np.array([math.sin(yaw), -math.cos(yaw)])
+                corners_world = [
+                    np.array([wx, wy]) + fwd * vlen / 2 + rgt * vwid / 2,
+                    np.array([wx, wy]) + fwd * vlen / 2 - rgt * vwid / 2,
+                    np.array([wx, wy]) - fwd * vlen / 2 - rgt * vwid / 2,
+                    np.array([wx, wy]) - fwd * vlen / 2 + rgt * vwid / 2,
+                ]
+                corners_px = []
+                for c in corners_world:
+                    px_col = int(((c[0] - cx) / half_w + 1.0) * 0.5 * img_w)
+                    px_row = int((1.0 - (c[1] - cy) / half_h) * 0.5 * img_h)
+                    corners_px.append([px_col, px_row])
+                pts = np.array(corners_px, dtype=np.int32)
+                cv2.fillPoly(frame, [pts], color)
+                border_color = tuple([255] * n_channels)
+                cv2.polylines(frame, [pts], True, border_color, 1)
+            else:
+                px_col = int(((wx - cx) / half_w + 1.0) * 0.5 * img_w)
+                px_row = int((1.0 - (wy - cy) / half_h) * 0.5 * img_h)
+                px_half = max(3, int(vlen / (2.0 * half_w) * img_w * 0.5))
+                r1, r2 = max(0, px_row - px_half), min(img_h, px_row + px_half)
+                c1, c2 = max(0, px_col - px_half), min(img_w, px_col + px_half)
+                if r1 < r2 and c1 < c2:
+                    frame[r1:r2, c1:c2] = color
+
+        return frame
 
     def _build_scene_factory_world(self, stage, *, world_root: str, env_index: int = 0) -> None:
         scene_factory_cfg = _load_yaml(self.cfg.scene_factory_config_path)
@@ -1303,6 +1411,58 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if not valid_types:
             return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         return torch.any(self._lane_touch_mask[agent_idx, :, valid_types], dim=1)
+
+    def _resample_random_od_for_envs(self, env_ids: torch.Tensor) -> None:
+        """Resample OD pairs on lane centerlines for the given env indices.
+
+        Overwrites ``_scene_factory_spawn_start_local``, ``_scene_factory_spawn_start_yaw``,
+        ``_scene_factory_spawn_goal_local``, and ``_scene_factory_spawn_valid`` for all agents
+        in the specified environments.
+        """
+        from src.trfc import sample_lane_center_start_goal_pairs
+        from src.trfc.lane_center_sampler import compute_scene_center_from_road
+
+        num_agents = max(1, int(self.cfg.num_agents_per_env))
+        bounds_size_m = float(self._scene_factory_bounds_size_m)
+        min_travel = float(self.cfg.random_od_min_travel_m)
+        max_travel = float(self.cfg.random_od_max_travel_m)
+        lane_types = tuple(int(t) for t in self.cfg.random_od_lane_types)
+        env_ids_cpu = env_ids.cpu().tolist() if isinstance(env_ids, torch.Tensor) else list(env_ids)
+
+        for env_id in env_ids_cpu:
+            scene_cfg = self._scene_factory_scene_cfgs_by_env[int(env_id)]
+            seed = int(self._random_od_rng.integers(0, 2**31))
+            try:
+                samples = sample_lane_center_start_goal_pairs(
+                    scene_cfg,
+                    num_agents=num_agents,
+                    bounds_size_m=bounds_size_m,
+                    origin_mode="center",
+                    lane_types=lane_types,
+                    min_travel_distance_m=min_travel,
+                    max_travel_distance_m=max_travel,
+                    seed=seed,
+                )
+            except RuntimeError:
+                # If sampling fails (e.g. not enough viable lanes), keep existing OD.
+                continue
+            # sample_lane_center_start_goal_pairs returns coordinates in the raw
+            # scene JSON frame.  _scene_factory_spawn_start_local must be in the
+            # scene-center-relative "local" frame (the same frame used by the
+            # road builder), so subtract the scene center.
+            scene_center = compute_scene_center_from_road(scene_cfg)
+            for agent_idx, sample in enumerate(samples[:num_agents]):
+                self._scene_factory_spawn_start_local[env_id, agent_idx, 0] = float(sample.start_xyz[0]) - float(scene_center[0])
+                self._scene_factory_spawn_start_local[env_id, agent_idx, 1] = float(sample.start_xyz[1]) - float(scene_center[1])
+                self._scene_factory_spawn_start_local[env_id, agent_idx, 2] = float(sample.start_xyz[2]) - float(scene_center[2])
+                self._scene_factory_spawn_start_yaw[env_id, agent_idx] = float(sample.start_yaw_rad)
+                self._scene_factory_spawn_goal_local[env_id, agent_idx, 0] = float(sample.goal_xyz[0]) - float(scene_center[0])
+                self._scene_factory_spawn_goal_local[env_id, agent_idx, 1] = float(sample.goal_xyz[1]) - float(scene_center[1])
+                self._scene_factory_spawn_goal_local[env_id, agent_idx, 2] = float(sample.goal_xyz[2]) - float(scene_center[2])
+                self._scene_factory_spawn_valid[env_id, agent_idx] = True
+            # Mark any remaining agent slots as invalid
+            for agent_idx in range(len(samples), num_agents):
+                self._scene_factory_spawn_valid[env_id, agent_idx] = False
 
     def _done_vehicle_root_pose(self, agent_idx: int, env_ids: torch.Tensor) -> torch.Tensor:
         root_pose = self._default_root_pose[agent_idx][env_ids].clone()
@@ -3129,6 +3289,11 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 ).unsqueeze(0).repeat(num_resets, 1)
                 goal_pos_w = env_origins + goal_local
             elif use_scene_factory_roads:
+                if bool(self.cfg.random_od) and self._scene_factory_scene_cfgs_by_env is not None and agent_idx == 0:
+                    self._resample_random_od_for_envs(env_ids)
+                    # Re-read spawned_mask after resample may have changed valid flags
+                    spawned_mask = self._scene_factory_spawn_valid[env_ids, agent_idx]
+                    self._spawned_agent_mask[agent_idx, env_ids] = spawned_mask
                 if bool(torch.any(spawned_mask).item()):
                     valid_rows = torch.nonzero(spawned_mask, as_tuple=False).squeeze(-1)
                     spawn_jitter = sample_uniform(

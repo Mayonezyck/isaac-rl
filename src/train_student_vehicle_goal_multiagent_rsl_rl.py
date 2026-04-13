@@ -365,6 +365,24 @@ parser.add_argument(
     default=bool(_cfg_value(file_cfg, "test", "invincible", False)),
     help="If enabled, crash/collision/forbidden-lane events do not mark vehicles done or clear them out.",
 )
+parser.add_argument(
+    "--random_od",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "test", "random_od", False)),
+    help="If enabled, resample random origin-destination pairs on lane centerlines at each episode reset.",
+)
+parser.add_argument(
+    "--random_od_min_travel_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "test", "random_od_min_travel_m", 20.0)),
+    help="Minimum travel distance for randomly sampled OD pairs.",
+)
+parser.add_argument(
+    "--random_od_max_travel_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "test", "random_od_max_travel_m", 60.0)),
+    help="Maximum travel distance for randomly sampled OD pairs.",
+)
 parser.add_argument("--env_spacing", type=float, default=float(_cfg_value(file_cfg, "env", "env_spacing", 18.0)), help="Spacing between vectorized environments.")
 parser.add_argument("--start_radius_m", type=float, default=float(_cfg_value(file_cfg, "env", "start_radius_m", 0.5)), help="Shared per-world spawn offset radius.")
 parser.add_argument(
@@ -792,6 +810,9 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.reward_choco_road_edge_ttc_radius_m = float(args_cli.reward_choco_road_edge_ttc_radius_m)
     cfg.test_mode = str(args_cli.test_mode).strip().lower()
     cfg.invincible = bool(args_cli.invincible)
+    cfg.random_od = bool(args_cli.random_od)
+    cfg.random_od_min_travel_m = float(args_cli.random_od_min_travel_m)
+    cfg.random_od_max_travel_m = float(args_cli.random_od_max_travel_m)
     if bool(args_cli.double_time_allowance) and cfg.test_mode != "none":
         cfg.episode_length_s = float(cfg.episode_length_s) * 2.0
         print(
@@ -2035,6 +2056,13 @@ def _run_scene_factory_policy_eval(
             "collision/crash/forbidden-lane events are logged but do not terminate or clear vehicles.",
             flush=True,
         )
+    if bool(getattr(base_env.cfg, "random_od", False)):
+        print(
+            f"[INFO][SceneFactory] scene_factory_policy_eval random_od=true: "
+            f"OD pairs will be randomly resampled on lane centerlines at each episode reset "
+            f"(travel={base_env.cfg.random_od_min_travel_m:.0f}-{base_env.cfg.random_od_max_travel_m:.0f}m).",
+            flush=True,
+        )
 
     runner.load(str(checkpoint_path), load_optimizer=False, map_location=str(runner.device))
     inference_policy = runner.get_inference_policy(device=str(runner.device))
@@ -2157,6 +2185,9 @@ def _run_scene_factory_policy_eval(
         "checkpoint_path": str(checkpoint_path),
         "config_path": str(Path(args_cli.config).expanduser().resolve()),
         "invincible": bool(getattr(base_env.cfg, "invincible", False)),
+        "random_od": bool(getattr(base_env.cfg, "random_od", False)),
+        "random_od_min_travel_m": float(getattr(base_env.cfg, "random_od_min_travel_m", 20.0)),
+        "random_od_max_travel_m": float(getattr(base_env.cfg, "random_od_max_travel_m", 60.0)),
         "double_time_allowance": bool(args_cli.double_time_allowance),
         "max_steps": int(max_steps),
         "completed_world_count": int(len(completed_items)),
