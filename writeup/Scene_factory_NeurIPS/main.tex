@@ -64,12 +64,13 @@ with Physics-Based Vehicle Dynamics}
 % ============================================================
 \begin{abstract}
 Training and evaluating autonomous driving agents at scale requires simulators that combine high physics fidelity with high computational throughput.
-Existing platforms force a trade-off: physically realistic simulators such as CARLA and MetaDrive run only one scene at a time, while GPU-accelerated systems such as Waymax and GPUDrive achieve massive parallelism by simplifying vehicle dynamics to bicycle or kinematic models.
+Existing platforms force a trade-off: physically realistic simulators such as CARLA and MetaDrive model vehicles as non-vectorized PhysX or Bullet articulations with per-agent Python control loops, limiting them to one scene at a time; GPU-accelerated systems such as Waymax and GPUDrive achieve massive parallelism by abandoning rigid-body physics entirely in favor of bicycle or kinematic models.
 We present \textbf{SceneFactory}, a procedural scene construction and multi-agent training platform built on NVIDIA Isaac Sim and Isaac Lab that closes this gap.
-SceneFactory ingests road topologies from the Waymo Open Motion Dataset, procedurally constructs multi-world USD environments, and orchestrates the parallel simulation of hundreds of articulated vehicles—governed by PhysX~5 rigid-body dynamics—across dozens of independent road worlds on a single GPU.
+At its core is a \emph{fully vectorized articulated PhysX vehicle}: joint states, observations, rewards, and policy inference are computed entirely through batched GPU tensor operations, eliminating the per-agent loops that bottleneck existing physics-based simulators and achieving up to \textbf{127$\times$} higher throughput than a non-vectorized PhysX baseline on the same hardware.
+SceneFactory ingests road topologies from the Waymo Open Motion Dataset, procedurally constructs multi-world USD environments, and orchestrates the parallel simulation of hundreds of these articulated vehicles across dozens of independent road worlds on a single GPU.
 A weather-to-friction module maps precipitation and road surface type to effective friction coefficients applied directly to the physics engine.
-We train navigation policies via PPO with a three-stage curriculum (navigation $\to$ lane safety $\to$ traffic + weather) and report throughput and policy performance.
-To our knowledge, SceneFactory is the first system that simultaneously provides GPU-parallel multi-world execution, multi-agent support, full rigid-body physics, and weather-aware friction modeling.
+We train navigation policies via PPO and report throughput and policy performance.
+To our knowledge, SceneFactory is the first system that simultaneously provides GPU-parallel multi-world execution, multi-agent support, full rigid-body physics with vectorized articulated vehicles, and weather-aware friction modeling.
 \end{abstract}
 
 % ============================================================

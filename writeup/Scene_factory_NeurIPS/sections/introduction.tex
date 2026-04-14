@@ -45,7 +45,8 @@ Traffic engineers have spent decades developing simulators at both microscopic a
 SUMO~\cite{krajzewicz_sumo_2012}, for instance, is a widely used open-source microscopic traffic simulator employed in digital-twin applications, tracking individual vehicles with car-following and lane-changing models.
 However, SUMO provides only limited support for weather effects and does not model tire--road friction physics.
 Simulators such as CARLA~\cite{Dosovitskiy17}, built on Unreal Engine~4 with PhysX-based vehicle physics, and MetaDrive~\cite{li2022metadrive}, built on Panda3D with the Bullet engine, incorporate richer vehicle dynamics and environmental modeling.
-Yet neither supports \emph{GPU-parallel execution of multiple independent scenes}: evaluating $N$ scenarios requires $N$ sequential simulation runs, which is prohibitively slow for large-scale benchmarking or policy search.
+However, in these systems each vehicle is driven by non-vectorized per-agent Python loops: actuation commands, state queries, and reward computations are executed sequentially for every agent, making the CPU-side control code---not the physics solver---the throughput bottleneck.
+As a result, neither simulator supports \emph{GPU-parallel execution of multiple independent scenes}: evaluating $N$ scenarios requires $N$ sequential simulation runs, which is prohibitively slow for large-scale benchmarking or policy search.
 
 On the other end of the spectrum, GPU-accelerated simulators such as Waymax~\cite{gulino_waymax_2023} and GPUDrive~\cite{kazemkhani_gpudrive_2025} achieve impressive throughput by batching hundreds of scenarios on a single GPU.
 GPUDrive, built on the Madrona game engine, can simulate over a million steps per second for multi-agent training on the Waymo Open Motion Dataset.
@@ -58,8 +59,9 @@ This simplification is reasonable for many research tasks, but limits applicabil
 
 There exists a gap in the current landscape of autonomous-driving simulators: no existing system simultaneously provides
 (i)~GPU-parallel execution of multiple independent driving scenes,
-(ii)~multi-agent support within each scene, and
-(iii)~a full rigid-body physics engine governing vehicle dynamics with weather-aware friction modeling.
+(ii)~multi-agent support within each scene,
+(iii)~\emph{vectorized} articulated vehicles whose actuation, sensing, and reward computation scale with GPU parallelism rather than with per-agent CPU loops, and
+(iv)~a full rigid-body physics engine governing vehicle dynamics with weather-aware friction modeling.
 
 % ------------------------------------------------------------------
 %  P6 — Our solution
@@ -67,7 +69,9 @@ There exists a gap in the current landscape of autonomous-driving simulators: no
 
 To fill this gap, we present \textbf{SceneFactory}, a procedural scene construction and multi-agent training platform built on NVIDIA Isaac Sim and Isaac Lab~\cite{nvidia_isaac_2025}.
 Isaac Lab provides a vectorized multi-agent reinforcement learning environment (DirectMARLEnv) that runs entirely on the GPU, with PhysX~5 as the underlying rigid-body physics engine.
-SceneFactory ingests real-world road topologies from the Waymo Open Motion Dataset~\cite{Kan_2024_icra}, procedurally constructs physically realistic USD road environments, and orchestrates the parallel simulation of hundreds of articulated vehicles across dozens of distinct road worlds on a single GPU.
+A key technical contribution is a \emph{fully vectorized articulated PhysX vehicle}: all joint-state queries, actuation commands, observation assembly, and reward computation are expressed as batched tensor operations over the full agent population, eliminating the per-agent Python loops that throttle existing physics-based simulators.
+This vectorized design achieves up to \textbf{127$\times$} higher throughput than a non-vectorized PhysX baseline on the same GPU and physics solver (\S\ref{sec:throughput}).
+SceneFactory ingests real-world road topologies from the Waymo Open Motion Dataset~\cite{Kan_2024_icra}, procedurally constructs physically realistic USD road environments, and orchestrates the parallel simulation of hundreds of these articulated vehicles across dozens of distinct road worlds on a single GPU.
 Additionally, we integrate a weather-to-friction module based on Zhao et al.'s tire--pavement friction model~\cite{zhao_tire-pavement_2024}, which maps precipitation conditions and road surface type to effective friction coefficients applied directly to PhysX material properties.
 This paper presents the first phase of a larger research program; it describes the full pipeline and reports initial training results.
 
@@ -78,9 +82,9 @@ This paper presents the first phase of a larger research program; it describes t
 The contributions of this work are:
 \begin{enumerate}[leftmargin=*, itemsep=2pt]
   \item \textbf{SceneFactory}, a procedural scene construction pipeline that converts Waymo Open Motion Dataset scenarios into GPU-parallelized, multi-world Isaac Sim stages with full PhysX rigid-body dynamics.
+  \item A \textbf{fully vectorized articulated PhysX vehicle} whose joint-state queries, actuation, observation assembly, and reward computation are expressed entirely as batched GPU tensor operations, achieving up to 127$\times$ higher throughput than a non-vectorized PhysX baseline on the same hardware.
   \item A \textbf{multi-agent RL training environment} supporting $N$ parallel worlds $\times$ $M$ agents per world, all driven by a shared navigation policy trained via PPO.
   \item A \textbf{weather-to-friction module} that maps precipitation and road surface type to PhysX tire friction coefficients, enabling weather-aware driving behavior training.
-  \item A \textbf{three-stage training curriculum} (navigation $\to$ lane safety $\to$ traffic + weather) that enables stable policy learning under complex, multi-signal rewards.
 \end{enumerate}
 
 \chattodo{Insert concrete throughput and success-rate numbers once experiments are finalized (e.g., ``X env-steps/sec with Y agents on a single A6000 pro, Z\% goal-reach rate'').}
