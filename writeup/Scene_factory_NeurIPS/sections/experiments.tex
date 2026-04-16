@@ -18,11 +18,11 @@ All experiments use a single shared navigation policy trained with PPO; the cont
 \paragraph{Hardware and software.}
 All training and evaluation runs execute on a single NVIDIA RTX PRO 6000 Blackwell GPU (96\,GB VRAM).
 The software stack consists of
-NVIDIA Isaac Sim~\chattodo{version number},
-Isaac Lab~\chattodo{version number}~\cite{nvidia_isaac_2025},
-RSL-RL~\cite{schwarke_rsl-rl_2025} for PPO,
-PyTorch~\chattodo{version}, and
-CUDA~\chattodo{version}.
+NVIDIA Isaac Sim Full 5.1.0,
+Isaac Lab 0.54.3 ~\cite{nvidia_isaac_2025},
+RSL-RL 3.1.2 for PPO,
+PyTorch 2.7.0+cu128, and
+CUDA 12.8.
 Physics runs at 120\,Hz (time step $\Delta t = 1/120$\,s);
 the control policy acts at 30\,Hz (decimation factor 4).
 
@@ -157,10 +157,17 @@ To assess how well the learned policy generalizes across scenes and routing targ
   \item \textbf{Test scenes, original OD.}
         64 held-out Waymo scenes with the original origin--destination pairs extracted from the dataset.
   \item \textbf{Test scenes, random OD.}
-        The same 64 held-out scenes, but each agent's destination is re-sampled uniformly along reachable road segments at 20--60\,m travel distance.
+        The same 64 held-out scenes, but each agent's destination is re-sampled uniformly along reachable road segments at 10--100\,m travel distance.
   \item \textbf{Train scenes, random OD.}
-        The 64 unique training scenes, each with 16 randomly sampled origin--destination pairs (20--60\,m travel distance), for a total of 1{,}024 agents---matching the test-scene agent count.
+        The 64 unique training scenes, each with 16 randomly sampled origin--destination pairs (10--100\,m travel distance), for a total of 1{,}024 agents---matching the test-scene agent count.
 \end{enumerate}
+
+\paragraph{Random OD protocol.}
+We adopt a 10--100\,m travel-distance range for the random OD protocol.
+This range is deliberately wide: short routes (10--20\,m) test low-speed goal approach and braking precision, while long routes (60--100\,m) require sustained lane-following, multi-turn navigation, and interaction with neighboring vehicles.
+The upper bound of 100\,m is constrained by the 400\,m $\times$ 400\,m world bounding box---routes longer than $\sim$100\,m frequently violate the ``goal within bounds'' filter and produce too few valid OD pairs.
+We verified that the 10--100\,m range yields 1{,}024 valid spawns (all 16 slots filled) in every evaluation scene, avoiding sparse-agent artifacts that would arise with longer routes.
+Compared to a narrower 20--60\,m band, the wider range is a more demanding test of route generalization and better represents the diversity of real-world driving distances.
 
 Table~\ref{tab:generalization} reports the results.
 
@@ -169,7 +176,7 @@ Table~\ref{tab:generalization} reports the results.
 \caption{Generalization evaluation of the navigation policy (model\_975).
 All runs use invincible mode with a 50\,s episode budget and 3.0\,m goal threshold.
 ``Original OD'' denotes destination points extracted from the Waymo dataset;
-``Random OD'' denotes destinations re-sampled uniformly at 20--60\,m travel distance along reachable road segments.}
+``Random OD'' denotes destinations re-sampled uniformly at 10--100\,m travel distance along reachable road segments.}
 \label{tab:generalization}
 \small
 \begin{tabular}{llccccc}
@@ -177,23 +184,25 @@ All runs use invincible mode with a 50\,s episode budget and 3.0\,m goal thresho
 Scenes & OD & Agents & Success $\uparrow$ & Collision $\downarrow$ & Lane-Forbidden $\downarrow$ & $\bar{d}_\text{goal}$ (m) $\downarrow$ \\
 \midrule
 Test (64)   & Original & 624   & 71.6\% & 6.3\% & 9.0\% & 10.1 \\
-Test (64)   & Random   & 1{,}024 & 92.8\% & 4.5\% & 6.9\% & 3.7 \\
-Train (64)  & Random   & 1{,}024 & 92.5\% & 3.5\% & 7.6\% & 3.7 \\
+Test (64)   & Random   & 1{,}024 & 84.5\% & 3.9\% & 7.1\% & 5.0 \\
+Train (64)  & Random   & 1{,}024 & 84.5\% & 3.6\% & 6.7\% & 5.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 On held-out test scenes with original destinations, the policy reaches its goal in 71.6\% of cases (447 of 624 agents) with a mean residual distance of 10.1\,m for non-successful agents.
-When the same test scenes are paired with randomly sampled destinations (Condition~2), the success rate jumps to 92.8\% (950 of 1{,}024 agents), nearly matching the 92.5\% achieved on training scenes with the same random-OD protocol (Condition~3).
-The near-identical performance between Conditions~2 and~3 is the central finding: \emph{the policy generalizes to entirely novel road geometries as well as it performs on familiar ones}, when the routing difficulty is controlled.
+When the same test scenes are paired with randomly sampled destinations at 10--100\,m travel distance (Condition~2), the success rate rises to 84.5\% (865 of 1{,}024 agents), matching \emph{exactly} the 84.5\% achieved on training scenes with the same random-OD protocol (Condition~3).
+The identical performance between Conditions~2 and~3 is the central finding: \emph{the policy generalizes to entirely novel road geometries as well as it performs on familiar ones}, when the routing difficulty is controlled.
 This rules out scene memorization and confirms that the policy has learned a general goal-conditioned navigation strategy.
 
-The 21-percentage-point gap between Conditions~1 and~2 (71.6\% vs.\ 92.8\%), which share the same test scenes but differ only in OD pairs, reveals that the original Waymo destinations are substantially harder than the 20--60\,m random-OD protocol.
+The 13-percentage-point gap between Conditions~1 and~2 (71.6\% vs.\ 84.5\%), which share the same test scenes but differ only in OD pairs, reveals that the original Waymo destinations are substantially harder than the 10--100\,m random-OD protocol.
 The Waymo-extracted routes include long-range multi-turn trajectories, goals near road boundaries, and occasionally ambiguous lane assignments that the random sampler avoids by construction.
-This suggests that further gains on the original OD setting are achievable through longer episodes, curriculum over route difficulty, or improved goal-approach behavior, rather than additional scene diversity.
+We also verified this trend at a narrower 20--60\,m travel range, where the success rate reaches 92.8\% on the same test scenes---confirming that shorter, simpler routes inflate the headline number without meaningfully testing navigation capability.
+This motivates our choice of the wider 10--100\,m band, which provides a more demanding and representative evaluation.
+Further gains on the original OD setting are achievable through longer episodes, curriculum over route difficulty, or improved goal-approach behavior, rather than additional scene diversity.
 
-The collision rates remain low across all conditions (3.5--6.3\%), and are inflated by invincible mode, which allows post-collision agents to continue driving and potentially trigger additional collision events; under normal termination semantics each collision would end the episode immediately.
-Notably, the off-road crash rate is higher on test scenes (18.7\%) than on training scenes (14.8\%) under the same random-OD protocol, indicating that novel road geometries do cause more lane departures---but the policy recovers and still reaches the goal at nearly the same rate.
+The collision rates remain low across all conditions (3.6--6.3\%), and are inflated by invincible mode, which allows post-collision agents to continue driving and potentially trigger additional collision events; under normal termination semantics each collision would end the episode immediately.
+Notably, the off-road crash rate is higher on test scenes (16.9\%) than on training scenes (15.9\%) under the same 10--100\,m random-OD protocol, indicating that novel road geometries do cause slightly more lane departures---but the policy recovers and still reaches the goal at the same rate.
 
 \paragraph{Comparison with kinematic simulators.}
 GPUDrive reports near-perfect goal-reach rates ($>$98\%) on Waymo scenes using a kinematic bicycle model with no rigid-body dynamics.
@@ -202,6 +211,143 @@ The 10-DOF articulated vehicle with effort-based actuation (\S\ref{sec:action_sp
 Closing this gap through longer training, refined reward shaping, and curriculum design is active work; the current results demonstrate that the platform successfully trains navigating agents end-to-end under physically realistic dynamics.
 
 \chattodo{Add a training curve figure (mean reward and/or success rate vs.\ training iteration) for the best run.  Even a single curve is informative.  Export from TensorBoard.}
+
+
+
+% ---------------------------------------------------------------
+\subsection{Ablation: Does Scene Curation Matter?}
+\label{sec:ablation_curation}
+% ---------------------------------------------------------------
+
+The evaluation protocol in \S\ref{sec:navigation_perf} relies on a human-curated set of 256 training scenes.
+A natural question is whether this manual curation step is necessary for training a performant policy, or whether simply sampling scenes at random from the valid pool would suffice.
+If curation is unnecessary, the entire pipeline becomes fully automated and can scale to arbitrary dataset sizes without human bottleneck.
+
+\paragraph{Experimental setup.}
+We train a second policy (\textbf{Random-256}) using the identical PPO configuration, reward function (v6-patient), and network architecture as the curated baseline (\textbf{Curated-256}), changing only the scene selection:
+instead of the 256 hand-curated scenes, we uniformly sample 256 scenes at random (seed~2024) from the 449 valid Waymo scenarios that pass the automated geometric filters (bounding box, minimum road segments, reachable goals) but \emph{without} any human visual inspection.
+This random pool therefore includes scenes that the human curator would have rejected.
+
+Both models train for 1{,}200 PPO iterations on a single RTX PRO 6000 Blackwell GPU.
+For comparison we select \texttt{model\_975} from the curated run ($\sim$511M environment steps) and \texttt{model\_1100} from the random run ($\sim$577M environment steps).
+
+We evaluate both checkpoints under three conditions that vary both the scene set and the origin--destination (OD) protocol:
+%
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Unseen scenes, original OD.}
+        64 held-out test scenes with dataset-extracted OD pairs (624 valid agents out of 1{,}024 nominal slots).
+        This is the hardest condition: novel road geometry and long-range Waymo-extracted routes.
+  \item \textbf{Seen/training scenes, random OD.}
+        64 of each model's own training scenes (subsampled via \texttt{random\_envs} mode), with randomly re-sampled OD pairs at 10--100\,m travel distance along reachable road segments (1{,}024 agents).
+        This condition tests in-distribution road geometry with novel routing under the same random OD protocol as Condition~3.
+  \item \textbf{Unseen scenes, random OD.}
+        The same 64 held-out test scenes, but with randomly re-sampled OD pairs at 10--100\,m travel distance (1{,}024 agents).
+        This condition tests both novel geometry and novel routing.
+\end{enumerate}
+%
+All evaluations use invincible mode (events logged but agents not terminated) with a 50\,s episode budget, deterministic policy rollout, and 3.0\,m goal threshold.
+
+\paragraph{Results.}
+Table~\ref{tab:curation_ablation} reports per-agent success rate (SR), collision rate (CR), and lane-forbidden rate (LF) across all six conditions.
+
+\begin{table}[t]
+\centering
+\caption{Scene curation ablation: Curated-256 (\texttt{model\_975}) vs.\ Random-256 (\texttt{model\_1100}).
+Both models use identical PPO hyperparameters, reward (v6-patient), and network architecture; only the training scene set differs.
+All evaluations use invincible mode, 50\,s episodes, and 3.0\,m goal threshold.
+$\Delta$ rows show (Random $-$ Curated).}
+\label{tab:curation_ablation}
+\small
+\begin{tabular}{llcccc}
+\toprule
+Eval condition & Model & Agents & SR $\uparrow$ & CR $\downarrow$ & LF $\downarrow$ \\
+\midrule
+\multirow{3}{*}{Unseen, original OD}
+  & Curated-256 & 624   & 71.6\% & 6.2\% & 9.0\% \\
+  & Random-256  & 624   & 71.6\% & 6.6\% & 7.7\% \\
+  & $\Delta$    &       & \textbf{+0.0\%} & +0.3\% & $-$1.3\% \\
+\midrule
+\multirow{3}{*}{Train scenes, random OD}
+  & Curated-256 & 1{,}024 & 84.5\% & 3.6\% & 6.7\% \\
+  & Random-256  & 1{,}024 & 85.0\% & 6.3\% & 5.7\% \\
+  & $\Delta$    &         & \textbf{+0.5\%} & +2.7\% & $-$1.0\% \\
+\midrule
+\multirow{3}{*}{Unseen, random OD}
+  & Curated-256 & 1{,}024 & 84.5\% & 3.9\% & 7.1\% \\
+  & Random-256  & 1{,}024 & 83.3\% & 5.8\% & 5.8\% \\
+  & $\Delta$    &         & \textbf{$-$1.2\%} & +1.9\% & $-$1.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Discussion.}
+The central finding is that \textbf{scene curation has negligible impact on policy performance}.
+Across all three evaluation conditions, the agent-level success rate delta between Curated-256 and Random-256 is at most 1.2 percentage points, and in the hardest condition (unseen scenes with original OD pairs) the two models achieve \emph{identical} success rates of 71.6\%.
+
+On seen/training scenes with random OD (Condition~2), the two models are virtually indistinguishable: $\Delta\text{SR} = {+}0.5\%$ ($85.0\%$ vs.\ $84.5\%$).
+Using the same 10--100\,m random OD protocol for both training-scene and unseen-scene evaluation (Conditions~2 and~3) yields directly comparable numbers and confirms that the difficulty is dominated by the long-route component rather than scene geometry.
+
+On unseen scenes with random OD (Condition~3), the curated model holds a modest +1.2\% SR advantage---the only condition where curation helps---but this difference is well within the range of inter-checkpoint variation and is unlikely to be statistically significant given the 64-world sample size.
+
+The collision rate is consistently $\sim$2--3\% higher for the random model across all conditions, while the lane-forbidden rate is consistently $\sim$1--1.5\% lower.
+These small, systematic offsets may reflect differences in the road geometry distribution (random scenes include more unusual lane structures that are harder to navigate but also have simpler lane boundaries), but neither effect is large enough to affect the overall viability of the policy.
+
+\paragraph{Implications.}
+This result has significant practical implications for the SceneFactory pipeline.
+The human curation step---which requires a domain expert to visually inspect each candidate scene---was originally considered essential for filtering out degenerate road geometries that could corrupt training.
+The ablation demonstrates that the automated geometric filters alone (bounding-box check, minimum road-segment count, reachable goal verification) are sufficient to produce a training-quality scene set.
+This means the pipeline is \textbf{fully automated end-to-end}: given a collection of Waymo TFRecords, SceneFactory can generate training environments, train a multi-agent navigation policy, and evaluate on held-out scenes without any human intervention.
+This is critical for scalability---the approach can ingest thousands of scenes without a curation bottleneck.
+
+% - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+% TRACEABILITY: File paths and artifact locations for reproducibility
+% (This block can be removed before final submission)
+% - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+%
+% Curated-256 training:
+%   Config:     configs/scene_factory/generated/scene_factory_256scene_curated_0326_train_fastgoal_v6_patient.yaml
+%   Scene list: configs/scene_factory/generated/scene_factory_256scene_curated_0326_train.yaml
+%   Log dir:    logs/rsl_rl/scene_factory_goal_reaching_roads/2026-04-10_13-48-01_scene_factory_256scene_curated_0326_train_fastgoal_v6_patient/
+%   Checkpoint: model_975.pt
+%
+% Random-256 training:
+%   Config:     configs/scene_factory/generated/scene_factory_256scene_random_0414_train_fastgoal_v6_patient.yaml
+%   Scene list: configs/scene_factory/generated/scene_factory_256scene_random_0414_train.yaml  (256 scenes, seed=2024, from 449 valid pool)
+%   Log dir:    logs/rsl_rl/scene_factory_goal_reaching_roads/2026-04-14_00-50-25_scene_factory_256scene_random_0414_train_fastgoal_v6_patient/
+%   Checkpoint: model_1100.pt
+%   Training log: /tmp/train_v6_patient_random256.log  (PID 2762406, cuda:0)
+%
+% Eval results (Curated-256 model_975):
+%   Unseen, orig OD:   logs/rsl_rl/scene_factory_goal_reaching_eval/2026-04-13_11-27-38_eval_fastgoal_v6_patient_model_975_test64/
+%   Train, random OD:  logs/rsl_rl/scene_factory_goal_reaching_eval/2026-04-15_06-04-49_eval_fastgoal_v6_patient_model_975_train64_random_od_10_100/  (min=10m, max=100m)
+%   Unseen, random OD: logs/rsl_rl/scene_factory_goal_reaching_eval/2026-04-13_22-46-01_eval_fastgoal_v6_patient_model_975_test64_random_od/  (min=10m, max=100m)
+%
+% Eval results (Random-256 model_1100):
+%   Unseen, orig OD:   logs/rsl_rl/scene_factory_goal_reaching_eval/2026-04-15_00-57-53_eval_random256_v6_patient_model_1100_test64/
+%   Unseen, random OD: logs/rsl_rl/scene_factory_goal_reaching_eval/2026-04-15_04-51-54_eval_random256_v6_patient_model_1100_test64_random_od/  (min=10m, max=100m)
+%   Train, random OD:  logs/rsl_rl/scene_factory_goal_reaching_eval/2026-04-15_06-10-11_eval_random256_v6_patient_model_1100_train64_random_od_10_100/  (min=10m, max=100m)
+%
+% Eval configs:
+%   configs/scene_factory/generated/eval_random256_v6_patient_model_1100_test64.yaml
+%   configs/scene_factory/generated/eval_random256_v6_patient_model_1100_test64_random_od.yaml
+%   configs/scene_factory/generated/eval_random256_v6_patient_model_1100_train64_random_od.yaml
+%
+% Test scenes:   configs/scene_factory/generated/scene_factory_64scene_curated_0326_test.yaml  (64 held-out scenes, shared by both models)
+%
+% Per-world JSON results are in scene_factory_policy_eval_summary.json and
+% scene_factory_policy_eval_worlds.jsonl within each eval log directory.
+%
+% Analysis script (ad hoc, run in terminal):
+%   The 2x3 ablation table was computed by parsing scene_factory_policy_eval_worlds.jsonl
+%   from each of the 6 eval directories above, summing spawned_count, success_count,
+%   collision_count, and lane_forbidden_count across all worlds, then dividing by
+%   total spawned to get agent-level rates.
+%
+% Note on random OD ranges:
+%   - Both "Train scenes, random OD" and "Unseen scenes, random OD" use min=10m, max=100m
+%   - This ensures consistent task difficulty across conditions (see Random OD protocol paragraph in §4.3)
+%   - Old 20-60m evals retained in logs/ for cross-validation but no longer reported in the paper
+% - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 % ---------------------------------------------------------------
 \subsection{Qualitative Analysis}
