@@ -113,12 +113,23 @@ The comparison is not apples-to-apples: the physics fidelity that makes SceneFac
 Nevertheless, at 19.3\,K CASPS SceneFactory already exceeds Nocturne's throughput while providing full rigid-body dynamics, and it operates within an order of magnitude of GPUDrive's training-time CASPS despite the fundamentally heavier physics workload.
 The relevant same-hardware, same-physics comparison is against the Baseline pipeline on the same RTX PRO 6000, where SceneFactory achieves a \textbf{127$\times$} speedup (Table~\ref{tab:throughput_scaling}).
 
+\paragraph{Comparison with MetaDrive (physics-based, measured on our hardware).}
+To complement the published kinematic-simulator numbers, we directly measure the throughput of MetaDrive~\cite{li2022metadrive} on the same RTX~PRO~6000 machine.
+MetaDrive uses the Bullet rigid-body physics engine and, like our non-vectorized Baseline, issues actuation, observation, and reward computations through per-agent Python loops.
+We run \texttt{MultiAgentRoundaboutEnv} at agent counts of 1, 4, 8, 16, 32, and 40 (the spawn-geometry ceiling for this map), using random actions to isolate loop overhead.
+CASSPS is measured over 10 steady-state windows of 500 steps each after a 200-step warmup, mirroring the Baseline protocol.
+MetaDrive peaks at $\sim$1{,}390 CASPS with 8 agents and \emph{declines} to 1{,}050 CASPS at 40 agents---confirming that per-agent Python loops, not the physics solver, are the throughput bottleneck, independently of whether the backend is PhysX~5 or Bullet.
+Critically, MetaDrive has no multi-world parallelism axis: each process simulates exactly one scene at a time.
+SceneFactory exposes a \texttt{num\_worlds} scaling dimension that MetaDrive's architecture does not support; at the smallest SceneFactory configuration (32 worlds, 512 agent slots) SceneFactory already achieves 3{,}870 CASPS---a \textbf{2.8$\times$} advantage over MetaDrive's per-scene peak, growing to \textbf{13.9$\times$} at 256 worlds (4{,}096 agent slots).
+
 \begin{table}[t]
 \centering
-\caption{Cross-simulator throughput comparison using published numbers.
-All kinematic simulators use simplified vehicle dynamics (no rigid-body contact, no tire model); SceneFactory is the only entry with full PhysX 5 rigid-body physics.
+\caption{Cross-simulator throughput comparison.
+All kinematic simulators use simplified vehicle dynamics (no rigid-body contact, no tire model).
+MetaDrive and SceneFactory both use full rigid-body physics engines (Bullet and PhysX~5, respectively).
 ASPS = agent steps per second (all agents, including parked); CASPS = controlled agent steps per second (policy-active agents only).
-GPUDrive and Nocturne numbers are taken from~\cite{kazemkhani_gpudrive_2025}; SceneFactory numbers are measured on our hardware.}
+GPUDrive and Nocturne numbers are taken from~\cite{kazemkhani_gpudrive_2025}; MetaDrive and SceneFactory numbers are measured on our RTX~PRO~6000 hardware.
+MetaDrive's per-scene agent count is bounded by spawn-road geometry ($\leq 40$); it has no multi-world parallelism axis.}
 \label{tab:cross_simulator}
 \small
 \begin{tabular}{llllr}
@@ -131,6 +142,11 @@ GPUDrive (training)
   & Kinematic bicycle & A100 80\,GB & CASPS & 200K--500K \\
 Nocturne~\cite{vinitsky_nocturne_2022}
   & Kinematic & CPU 16 cores & ASPS & 15{,}000 \\
+\midrule
+MetaDrive~\cite{li2022metadrive} (8 agents, peak)
+  & Bullet rigid body & RTX PRO 6000 & CASPS & 1{,}390 \\
+MetaDrive~\cite{li2022metadrive} (40 agents, ceiling)
+  & Bullet rigid body & RTX PRO 6000 & CASPS & 1{,}050 \\
 \midrule
 \textbf{SceneFactory (ours)}
   & \textbf{10-DOF rigid body} & \textbf{RTX PRO 6000} & \textbf{CASPS} & \textbf{19{,}250} \\

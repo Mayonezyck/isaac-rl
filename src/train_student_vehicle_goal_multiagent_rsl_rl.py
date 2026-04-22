@@ -102,6 +102,12 @@ parser.add_argument(
     help="Include SceneFactory weather/friction context in the choco_reference observation mode.",
 )
 parser.add_argument(
+    "--obs_weather_context_blind",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "observation", "weather_context_blind", False)),
+    help="Feed all-zeros weather context regardless of actual surface friction (for OOD eval of dry-trained models on varied-friction scenes).",
+)
+parser.add_argument(
     "--obs_road_points_enable",
     action=argparse.BooleanOptionalAction,
     default=bool(_cfg_value(file_cfg, "observation", "road_points_enable", True)),
@@ -330,6 +336,7 @@ parser.add_argument(
         "scene_factory_collision_test",
         "scene_factory_multiworld_random_steer_test",
         "scene_factory_policy_eval",
+        "friction_ruler",
     ),
     default=str(_cfg_value(file_cfg, "test", "mode", "none")),
     help=(
@@ -536,9 +543,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--video_view_mode",
-    choices=("whole_grid", "single_env"),
+    choices=("whole_grid", "single_env", "per_env"),
     default=str(_cfg_value(file_cfg, "video", "view_mode", "whole_grid")),
-    help="Capture either the whole training grid or a single environment.",
+    help="Capture either the whole training grid, a single environment, or one video per environment.",
 )
 parser.add_argument(
     "--video_env_index",
@@ -555,8 +562,84 @@ parser.add_argument(
 parser.add_argument(
     "--video_vehicle_proxy_z_offset_m",
     type=float,
-    default=float(_cfg_value(file_cfg, "video", "vehicle_proxy_z_offset_m", 0.35)),
+    default=float(_cfg_value(file_cfg, "video", "vehicle_proxy_z_offset_m", 0.0)),
     help="Vertical offset for the vehicle proxy boxes in debug/video renders.",
+)
+parser.add_argument(
+    "--video_camera_pose_mode",
+    type=str,
+    default=str(_cfg_value(file_cfg, "video", "camera_pose_mode", "top_down")),
+    choices=["top_down", "traffic_cam", "flyover", "flyover_drift"],
+    help="Camera pose mode: top_down (bird's-eye), traffic_cam (tilted, low), or flyover (cinematic rise).",
+)
+parser.add_argument(
+    "--video_traffic_cam_height_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "video", "traffic_cam_height_m", 7.0)),
+    help="Traffic-cam eye height in meters.",
+)
+parser.add_argument(
+    "--video_traffic_cam_distance_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "video", "traffic_cam_distance_m", 25.0)),
+    help="Traffic-cam horizontal offset behind scene center.",
+)
+parser.add_argument(
+    "--video_traffic_cam_look_height_m",
+    type=float,
+    default=float(_cfg_value(file_cfg, "video", "traffic_cam_look_height_m", 0.5)),
+    help="Height the traffic-cam looks at.",
+)
+parser.add_argument(
+    "--video_traffic_cam_azimuth_deg",
+    type=float,
+    default=float(_cfg_value(file_cfg, "video", "traffic_cam_azimuth_deg", 0.0)),
+    help="Azimuth rotation in degrees. 0=camera south of scene looking north. Positive=rotate left (CCW from above).",
+)
+parser.add_argument(
+    "--video_traffic_cam_lateral_offset_m",
+    type=float,
+    default=0.0,
+    help="Shift camera left (positive) or right (negative) in meters.",
+)
+# Flyover camera args
+parser.add_argument("--video_flyover_start_height_m", type=float, default=8.0, help="Flyover: starting camera height.")
+parser.add_argument("--video_flyover_end_height_m", type=float, default=200.0, help="Flyover: final camera height.")
+parser.add_argument("--video_flyover_surveillance_frames", type=int, default=120, help="Flyover phase 1: hold as surveillance cam.")
+parser.add_argument("--video_flyover_tilt_frames", type=int, default=180, help="Flyover phase 2: tilt up to reveal neighbors.")
+parser.add_argument("--video_flyover_zoomout_frames", type=int, default=300, help="Flyover phase 3: gentle rise.")
+parser.add_argument("--video_flyover_start_env_index", type=int, default=0, help="Flyover: env index to stay centered on.")
+parser.add_argument("--video_flyover_start_tilt_deg", type=float, default=25.0, help="Flyover: low surveillance angle from horizontal.")
+parser.add_argument("--video_flyover_end_tilt_deg", type=float, default=75.0, help="Flyover: near top-down angle at end.")
+parser.add_argument("--video_flyover_start_distance_m", type=float, default=25.0, help="Flyover: horizontal offset at start.")
+parser.add_argument("--video_flyover_lookaway_frames", type=int, default=0, help="Flyover phase 4: tilt head up + pan left (0=disabled).")
+parser.add_argument("--video_flyover_lookaway_pitch_deg", type=float, default=45.0, help="Flyover phase 4: degrees to tilt up.")
+parser.add_argument("--video_flyover_lookaway_yaw_deg", type=float, default=45.0, help="Flyover phase 4: degrees to pan left.")
+# Flyover-drift camera args
+parser.add_argument("--video_drift_rise_frames", type=int, default=300, help="Drift: frames to rise to overview.")
+parser.add_argument("--video_drift_lateral_frames", type=int, default=300, help="Drift: frames to drift left.")
+parser.add_argument("--video_drift_pan_frames", type=int, default=300, help="Drift: frames to pan right + pitch up.")
+parser.add_argument("--video_drift_hold_frames", type=int, default=0, help="Drift: frames to hold final pose.")
+parser.add_argument("--video_drift_start_height_m", type=float, default=8.0, help="Drift: starting camera height.")
+parser.add_argument("--video_drift_rise_height_m", type=float, default=400.0, help="Drift: height at end of rise.")
+parser.add_argument("--video_drift_lateral_distance_m", type=float, default=600.0, help="Drift: how far to drift left.")
+parser.add_argument("--video_drift_pan_yaw_deg", type=float, default=90.0, help="Drift: how far to pan right.")
+parser.add_argument("--video_drift_pitch_up_deg", type=float, default=30.0, help="Drift: how far to pitch up at end.")
+parser.add_argument("--video_drift_start_tilt_deg", type=float, default=25.0, help="Drift: initial surveillance tilt.")
+parser.add_argument("--video_drift_rise_tilt_deg", type=float, default=70.0, help="Drift: tilt at top of rise.")
+parser.add_argument("--video_drift_azimuth_deg", type=float, default=0.0, help="Drift: initial viewing direction.")
+parser.add_argument("--video_flyover_azimuth_deg", type=float, default=0.0, help="Flyover: viewing direction.")
+parser.add_argument(
+    "--road_hidden_types",
+    type=str,
+    default=str(_cfg_value(file_cfg, "road", "hidden_types", "")),
+    help="Comma-separated road type ints to hide visually (e.g. '1,2,3' for lane centers). Still in scene for obs/physics.",
+)
+parser.add_argument(
+    "--hide_goal_markers",
+    action=argparse.BooleanOptionalAction,
+    default=bool(_cfg_value(file_cfg, "video", "hide_goal_markers", False)),
+    help="Hide destination beacon visuals for clean video capture.",
 )
 parser.add_argument(
     "--resume_from",
@@ -575,6 +658,25 @@ parser.add_argument(
     action=argparse.BooleanOptionalAction,
     default=bool(_cfg_value(file_cfg, "debug", "exit_after_stage_save", False)),
     help="Exit immediately after saving the initialized stage debug dump.",
+)
+parser.add_argument(
+    "--fixed_action",
+    type=float,
+    nargs=3,
+    default=None,
+    metavar=("THROTTLE", "STEER", "BRAKE"),
+    help="Override policy actions with fixed [throttle, steer, brake] each in [-1,1]. "
+         "Useful for friction demo videos where all vehicles get identical commands.",
+)
+parser.add_argument(
+    "--action_schedule",
+    type=str,
+    nargs="+",
+    default=None,
+    metavar="STEP:T,S,B",
+    help="Time-varying scripted actions. Each entry is step:throttle,steer,brake. "
+         "E.g. --action_schedule 0:1.0,0.0,0.0 60:1.0,1.0,0.0  means full throttle "
+         "straight for 60 steps then full throttle + full steer. Overrides --fixed_action.",
 )
 AppLauncher.add_app_launcher_args(parser)
 _device_from_cfg = _cfg_value(file_cfg, "app", "device", None)
@@ -755,6 +857,7 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.agent_collision_warmup_steps = int(args_cli.agent_collision_warmup_steps)
     cfg.observation_mode = str(args_cli.observation_mode)
     cfg.obs_weather_context_enable = bool(args_cli.obs_weather_context_enable)
+    cfg.obs_weather_context_blind = bool(args_cli.obs_weather_context_blind)
     cfg.obs_road_points_enable = bool(args_cli.obs_road_points_enable)
     cfg.obs_road_points_k = int(args_cli.obs_road_points_k)
     cfg.obs_road_points_radius_m = float(args_cli.obs_road_points_radius_m)
@@ -841,8 +944,46 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
     cfg.capture_camera_height = int(args_cli.video_height)
     cfg.capture_camera_view_mode = str(args_cli.video_view_mode)
     cfg.capture_camera_env_index = int(args_cli.video_env_index)
+    cfg.capture_camera_pose_mode = str(args_cli.video_camera_pose_mode)
+    cfg.capture_camera_traffic_cam_height_m = float(args_cli.video_traffic_cam_height_m)
+    cfg.capture_camera_traffic_cam_distance_m = float(args_cli.video_traffic_cam_distance_m)
+    cfg.capture_camera_traffic_cam_look_height_m = float(args_cli.video_traffic_cam_look_height_m)
+    cfg.capture_camera_traffic_cam_azimuth_deg = float(args_cli.video_traffic_cam_azimuth_deg)
+    cfg.capture_camera_traffic_cam_lateral_offset_m = float(args_cli.video_traffic_cam_lateral_offset_m)
+    cfg.capture_camera_traffic_cam_lateral_offset_m = float(args_cli.video_traffic_cam_lateral_offset_m)
+    # Flyover
+    cfg.capture_camera_flyover_start_height_m = float(args_cli.video_flyover_start_height_m)
+    cfg.capture_camera_flyover_end_height_m = float(args_cli.video_flyover_end_height_m)
+    cfg.capture_camera_flyover_surveillance_frames = int(args_cli.video_flyover_surveillance_frames)
+    cfg.capture_camera_flyover_tilt_frames = int(args_cli.video_flyover_tilt_frames)
+    cfg.capture_camera_flyover_zoomout_frames = int(args_cli.video_flyover_zoomout_frames)
+    cfg.capture_camera_flyover_start_env_index = int(args_cli.video_flyover_start_env_index)
+    cfg.capture_camera_flyover_start_tilt_deg = float(args_cli.video_flyover_start_tilt_deg)
+    cfg.capture_camera_flyover_end_tilt_deg = float(args_cli.video_flyover_end_tilt_deg)
+    cfg.capture_camera_flyover_start_distance_m = float(args_cli.video_flyover_start_distance_m)
+    cfg.capture_camera_flyover_azimuth_deg = float(args_cli.video_flyover_azimuth_deg)
+    cfg.capture_camera_flyover_lookaway_frames = int(args_cli.video_flyover_lookaway_frames)
+    cfg.capture_camera_flyover_lookaway_pitch_deg = float(args_cli.video_flyover_lookaway_pitch_deg)
+    cfg.capture_camera_flyover_lookaway_yaw_deg = float(args_cli.video_flyover_lookaway_yaw_deg)
+    # Flyover-drift
+    cfg.capture_camera_drift_rise_frames = int(args_cli.video_drift_rise_frames)
+    cfg.capture_camera_drift_lateral_frames = int(args_cli.video_drift_lateral_frames)
+    cfg.capture_camera_drift_pan_frames = int(args_cli.video_drift_pan_frames)
+    cfg.capture_camera_drift_hold_frames = int(args_cli.video_drift_hold_frames)
+    cfg.capture_camera_drift_start_height_m = float(args_cli.video_drift_start_height_m)
+    cfg.capture_camera_drift_rise_height_m = float(args_cli.video_drift_rise_height_m)
+    cfg.capture_camera_drift_lateral_distance_m = float(args_cli.video_drift_lateral_distance_m)
+    cfg.capture_camera_drift_pan_yaw_deg = float(args_cli.video_drift_pan_yaw_deg)
+    cfg.capture_camera_drift_pitch_up_deg = float(args_cli.video_drift_pitch_up_deg)
+    cfg.capture_camera_drift_start_tilt_deg = float(args_cli.video_drift_start_tilt_deg)
+    cfg.capture_camera_drift_rise_tilt_deg = float(args_cli.video_drift_rise_tilt_deg)
+    cfg.capture_camera_drift_azimuth_deg = float(args_cli.video_drift_azimuth_deg)
     cfg.vehicle_proxy_marker_enable = bool(args_cli.video_vehicle_proxy_markers)
     cfg.vehicle_proxy_marker_z_offset_m = float(args_cli.video_vehicle_proxy_z_offset_m)
+    # Road type visual hiding (still in scene for obs/physics)
+    _rht = str(args_cli.road_hidden_types).strip()
+    cfg.road_hidden_types = [int(x) for x in _rht.split(",") if x.strip()] if _rht else None
+    cfg.hide_goal_markers = bool(args_cli.hide_goal_markers)
     cfg.student_usd_path = str(Path(args_cli.student_usd or DEFAULT_STUDENT_VEHICLE_USD).expanduser().resolve())
     if str(args_cli.tunable_config_json):
         cfg.tunable_config_json = str(Path(args_cli.tunable_config_json).expanduser().resolve())
@@ -889,7 +1030,22 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
         if not cfg.use_scene_factory_roads:
             print("[INFO][SceneFactory] scene_factory_policy_eval enables SceneFactory roads.")
         cfg.use_scene_factory_roads = True
+    elif cfg.test_mode == "friction_ruler":
+        cfg.use_scene_factory_roads = False
+        cfg.friction_ruler_mode = True
+        cfg.friction_ruler_mu_values = str(_cfg_value(file_cfg, "env", "friction_ruler_mu_values", "1.1,0.6,0.3,0.1"))
+        cfg.friction_ruler_labels = str(_cfg_value(file_cfg, "env", "friction_ruler_labels", ""))
+        print(
+            f"[INFO][FrictionRuler] friction_ruler mode: roads disabled, "
+            f"mu_values={cfg.friction_ruler_mu_values}",
+            flush=True,
+        )
     configure_multi_agent_spaces(cfg, int(args_cli.num_agents_per_env))
+
+    # ── Scripted action overrides (from config YAML) ──
+    cfg.fixed_action = str(_cfg_value(file_cfg, "env", "fixed_action", ""))
+    cfg.action_schedule = str(_cfg_value(file_cfg, "env", "action_schedule", ""))
+
     return cfg
 
 
@@ -2013,12 +2169,18 @@ def _run_scene_factory_policy_eval(
     import imageio.v2 as imageio
 
     checkpoint_path_raw = str(args_cli.checkpoint_path).strip()
-    if not checkpoint_path_raw:
+    _has_scripted = (
+        args_cli.fixed_action is not None
+        or args_cli.action_schedule is not None
+        or bool(getattr(base_env.cfg, "fixed_action", ""))
+        or bool(getattr(base_env.cfg, "action_schedule", ""))
+    )
+    if not checkpoint_path_raw and not _has_scripted:
         raise ValueError(
             "scene_factory_policy_eval requires --checkpoint_path or test.checkpoint_path in the config."
         )
-    checkpoint_path = Path(checkpoint_path_raw).expanduser().resolve()
-    if not checkpoint_path.is_file():
+    checkpoint_path = Path(checkpoint_path_raw).expanduser().resolve() if checkpoint_path_raw else None
+    if checkpoint_path is not None and not checkpoint_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     test_mode_name = str(base_env.cfg.test_mode).strip().lower() or "scene_factory_policy_eval"
@@ -2028,23 +2190,39 @@ def _run_scene_factory_policy_eval(
     video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
     video_step_stride = max(1, int(args_cli.video_step_stride))
     video_writer = None
+    video_writers_per_env: list = []  # for per_env mode
+    is_per_env_video = str(args_cli.video_view_mode).strip().lower() == "per_env"
     if bool(args_cli.video):
         video_path.parent.mkdir(parents=True, exist_ok=True)
-        video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+        if is_per_env_video:
+            for ei in range(int(base_env.num_envs)):
+                p = video_path.parent / f"{test_mode_name}_env{ei}.mp4"
+                video_writers_per_env.append(
+                    imageio.get_writer(str(p), fps=max(1, int(args_cli.video_fps)))
+                )
+        else:
+            video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
     video_capture_step_index = 0
 
     def _write_frame(*, force: bool = False) -> None:
         nonlocal video_capture_step_index, frames_written
-        if video_writer is None:
+        if video_writer is None and not video_writers_per_env:
             return
         should_capture = force or (video_capture_step_index % video_step_stride == 0)
         video_capture_step_index += 1
         if not should_capture:
             return
-        frame = base_env.capture_fixed_camera_frame()
-        if frame is not None:
-            video_writer.append_data(frame)
-            frames_written += 1
+        if video_writers_per_env:
+            per_env_frames = base_env.capture_per_env_frames()
+            for ei, (writer, frame) in enumerate(zip(video_writers_per_env, per_env_frames)):
+                if frame is not None:
+                    writer.append_data(frame)
+                    frames_written += 1
+        elif video_writer is not None:
+            frame = base_env.capture_fixed_camera_frame()
+            if frame is not None:
+                video_writer.append_data(frame)
+                frames_written += 1
 
     print(
         f"[INFO][SceneFactory] Running deterministic {test_mode_name} rollout from checkpoint {checkpoint_path}.",
@@ -2064,8 +2242,46 @@ def _run_scene_factory_policy_eval(
             flush=True,
         )
 
-    runner.load(str(checkpoint_path), load_optimizer=False, map_location=str(runner.device))
-    inference_policy = runner.get_inference_policy(device=str(runner.device))
+    # ── Parse action schedule (CLI overrides config) ──
+    _action_schedule = None
+    _action_schedule_raw = None
+    if args_cli.action_schedule is not None:
+        _action_schedule_raw = args_cli.action_schedule  # list of "step:t,s,b" strings
+    elif getattr(base_env.cfg, "action_schedule", ""):
+        _action_schedule_raw = str(base_env.cfg.action_schedule).strip().split()
+
+    if _action_schedule_raw:
+        _action_schedule = []
+        for entry in _action_schedule_raw:
+            step_str, vals_str = entry.split(":")
+            vals = [float(v) for v in vals_str.split(",")]
+            assert len(vals) == 3, f"Expected 3 values (throttle,steer,brake) in '{entry}'"
+            _action_schedule.append((int(step_str), vals))
+        _action_schedule.sort(key=lambda x: x[0])
+        print(
+            f"[INFO][SceneFactory] action_schedule with {len(_action_schedule)} entries: "
+            + ", ".join(f"step{s}→[{a[0]:.2f},{a[1]:.2f},{a[2]:.2f}]" for s, a in _action_schedule),
+            flush=True,
+        )
+
+    # ── Parse fixed_action (CLI overrides config) ──
+    _fixed_action = None
+    if args_cli.fixed_action is not None:
+        _fixed_action = args_cli.fixed_action
+    elif getattr(base_env.cfg, "fixed_action", ""):
+        _fixed_action = [float(v) for v in str(base_env.cfg.fixed_action).strip().split(",")]
+
+    if _action_schedule is not None or _fixed_action is not None:
+        _label = "action_schedule" if _action_schedule is not None else f"fixed_action={_fixed_action}"
+        print(
+            f"[INFO][SceneFactory] {_label} specified; "
+            f"skipping checkpoint load (policy output will be overridden).",
+            flush=True,
+        )
+        inference_policy = runner.get_inference_policy(device=str(runner.device))
+    else:
+        runner.load(str(checkpoint_path), load_optimizer=False, map_location=str(runner.device))
+        inference_policy = runner.get_inference_policy(device=str(runner.device))
 
     base_env.consume_last_reset_world_episode_summaries()
     obs, extras = env.reset()
@@ -2089,6 +2305,21 @@ def _run_scene_factory_policy_eval(
         with torch.inference_mode():
             for step in range(max_steps):
                 actions = inference_policy(obs)
+                if _action_schedule is not None:
+                    # find the last entry whose step <= current step
+                    _cur_act = _action_schedule[0][1]
+                    for _t, _a in _action_schedule:
+                        if step >= _t:
+                            _cur_act = _a
+                        else:
+                            break
+                    actions = torch.tensor(
+                        [_cur_act], device=actions.device, dtype=actions.dtype
+                    ).expand_as(actions)
+                elif _fixed_action is not None:
+                    actions = torch.tensor(
+                        [_fixed_action], device=actions.device, dtype=actions.dtype
+                    ).expand_as(actions)
                 step_output = env.step(actions)
                 if len(step_output) == 4:
                     obs, rewards, dones, extras = step_output
@@ -2098,6 +2329,19 @@ def _run_scene_factory_policy_eval(
                     )
 
                 _write_frame()
+
+                # ── Friction ruler: log per-env velocity every 30 steps ──
+                if bool(getattr(base_env.cfg, "friction_ruler_mode", False)) and step % 30 == 0:
+                    for vi, vehicle in enumerate(base_env._vehicles):
+                        vel = vehicle.data.root_lin_vel_w  # (num_envs, 3)
+                        speed = vel.norm(dim=-1)  # (num_envs,)
+                        pos_y = vehicle.data.root_pos_w[:, 1] - base_env.scene.env_origins[:, 1]
+                        parts = []
+                        for ei in range(min(int(base_env.num_envs), 8)):
+                            parts.append(
+                                f"env{ei}: speed={speed[ei].item():.3f}m/s  y={pos_y[ei].item():.2f}m"
+                            )
+                        print(f"  [RULER] step={step}  {' | '.join(parts)}", flush=True)
 
                 new_world_summaries = base_env.consume_last_reset_world_episode_summaries()
                 new_completed_envs: list[int] = []
@@ -2132,6 +2376,8 @@ def _run_scene_factory_policy_eval(
 
     if video_writer is not None:
         video_writer.close()
+    for w in video_writers_per_env:
+        w.close()
 
     completed_items = [completed_worlds[idx] for idx in sorted(completed_worlds.keys())]
     total_spawned = float(sum(float(item.get("spawned_count", 0.0)) for item in completed_items))
@@ -2287,7 +2533,7 @@ def main():
             _patch_single_agent_marl_observation_bridge(env)
         env = RslRlVecEnvWrapper(env, clip_actions=runner_cfg.clip_actions)
 
-    eval_test_mode = str(args_cli.test_mode).strip().lower() == "scene_factory_policy_eval"
+    eval_test_mode = str(args_cli.test_mode).strip().lower() in {"scene_factory_policy_eval", "friction_ruler"}
     if not eval_test_mode:
         env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
 

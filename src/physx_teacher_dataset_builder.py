@@ -34,6 +34,148 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _build_comprehensive_fwd_suite() -> List[ManeuverSpec]:
+    """Build a comprehensive sysid dataset covering the full operating envelope.
+
+    Tiers:
+      1. Longitudinal – throttle sweep (0.1 to 1.0), brake sweep, ramp-throttle
+      2. Lateral – step-steer and constant-steer at multiple throttles × steer values
+      3. Combined – trail-brake, chirp-steer at multiple speeds
+      4. Frequency response – sine-steer at multiple frequencies and amplitudes
+      5. Surface transitions – existing S-transition maneuver
+    """
+    specs: List[ManeuverSpec] = []
+
+    # ── Tier 1: Longitudinal ──────────────────────────────────────────────
+    # Straight accel-brake at many throttle levels
+    for throttle in [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]:
+        t_str = f"{throttle:.0%}".replace("%", "pct")
+        specs.append(ManeuverSpec(
+            name=f"straight_accel_t{t_str}",
+            preset="straight-accel-brake",
+            params={"idle_s": 1.0, "accel_s": 5.0, "coast_s": 1.0, "brake_s": 2.0,
+                    "throttle": throttle, "brake": 0.65},
+            description=f"Straight accel-coast-brake at throttle={throttle:.2f}.",
+        ))
+
+    # Brake sweep at moderate speed
+    for brake_val in [0.20, 0.40, 0.60, 0.80, 1.00]:
+        b_str = f"{brake_val:.0%}".replace("%", "pct")
+        specs.append(ManeuverSpec(
+            name=f"straight_brake_b{b_str}",
+            preset="straight-accel-brake",
+            params={"idle_s": 1.0, "accel_s": 4.0, "coast_s": 0.5, "brake_s": 3.0,
+                    "throttle": 0.70, "brake": brake_val},
+            description=f"Accel then brake at brake={brake_val:.2f}.",
+        ))
+
+    # Ramp throttle 0→1 and 1→0
+    specs.append(ManeuverSpec(
+        name="ramp_throttle_up",
+        preset="ramp-throttle",
+        params={"idle_s": 1.0, "ramp_s": 8.0, "sample_dt_s": 0.2,
+                "throttle_start": 0.0, "throttle_end": 1.0, "steer": 0.0,
+                "brake_s": 2.0, "brake": 0.65},
+        description="Linear throttle ramp 0→1.",
+    ))
+    specs.append(ManeuverSpec(
+        name="ramp_throttle_down",
+        preset="ramp-throttle",
+        params={"idle_s": 1.0, "ramp_s": 8.0, "sample_dt_s": 0.2,
+                "throttle_start": 1.0, "throttle_end": 0.0, "steer": 0.0,
+                "brake_s": 2.0, "brake": 0.65},
+        description="Linear throttle ramp 1→0 (coast-down).",
+    ))
+
+    # ── Tier 2: Lateral ───────────────────────────────────────────────────
+    # Step-steer at multiple throttles × steer magnitudes
+    for throttle in [0.30, 0.50, 0.70, 0.90]:
+        for steer in [0.10, 0.25, 0.50, 0.75, 1.00]:
+            t_str = f"{throttle:.0%}".replace("%", "pct")
+            s_str = f"{int(steer * 100)}pct"
+            for sign, label in [(1.0, "left"), (-1.0, "right")]:
+                specs.append(ManeuverSpec(
+                    name=f"step_steer_{label}_t{t_str}_s{s_str}",
+                    preset="step-steer",
+                    params={"idle_s": 1.0, "entry_s": 3.0, "step_hold_s": 3.0,
+                            "recenter_s": 1.0, "brake_s": 1.5,
+                            "throttle": throttle, "steer": sign * steer, "brake": 0.65},
+                    description=f"Step steer {label} steer={sign * steer:.2f} at throttle={throttle:.2f}.",
+                ))
+
+    # Constant-steer (steady-state cornering) at multiple throttles × steer
+    for throttle in [0.30, 0.50, 0.70]:
+        for steer in [0.15, 0.30, 0.50, 0.80]:
+            t_str = f"{throttle:.0%}".replace("%", "pct")
+            s_str = f"{int(steer * 100)}pct"
+            for sign, label in [(1.0, "left"), (-1.0, "right")]:
+                specs.append(ManeuverSpec(
+                    name=f"const_steer_{label}_t{t_str}_s{s_str}",
+                    preset="constant-steer",
+                    params={"idle_s": 1.0, "hold_s": 5.0, "brake_s": 1.5,
+                            "throttle": throttle, "steer": sign * steer, "brake": 0.65},
+                    description=f"Constant steer {label} steer={sign * steer:.2f} at throttle={throttle:.2f}.",
+                ))
+
+    # ── Tier 3: Combined (trail-brake) ────────────────────────────────────
+    for throttle in [0.60, 0.80, 1.00]:
+        for steer in [0.20, 0.40, 0.70]:
+            t_str = f"{throttle:.0%}".replace("%", "pct")
+            s_str = f"{int(steer * 100)}pct"
+            for sign, label in [(1.0, "left"), (-1.0, "right")]:
+                specs.append(ManeuverSpec(
+                    name=f"trail_brake_{label}_t{t_str}_s{s_str}",
+                    preset="trail-brake",
+                    params={"idle_s": 1.0, "accel_s": 4.0, "trail_s": 3.0,
+                            "sample_dt_s": 0.2, "throttle": throttle,
+                            "steer": sign * steer, "brake_peak": 0.80, "coast_s": 1.0},
+                    description=f"Trail-brake {label} steer={sign * steer:.2f} from throttle={throttle:.2f}.",
+                ))
+
+    # ── Tier 4: Frequency response ────────────────────────────────────────
+    # Sine-steer at multiple frequencies, amplitudes, throttles
+    for throttle in [0.35, 0.55, 0.80]:
+        for amplitude in [0.15, 0.30, 0.50]:
+            for freq_hz in [0.25, 0.50, 1.00, 2.00]:
+                t_str = f"{throttle:.0%}".replace("%", "pct")
+                a_str = f"{int(amplitude * 100)}pct"
+                f_str = f"{freq_hz:.2f}hz".replace(".", "p")
+                specs.append(ManeuverSpec(
+                    name=f"sine_steer_t{t_str}_a{a_str}_f{f_str}",
+                    preset="sine-steer",
+                    params={"idle_s": 1.0, "run_s": 6.0, "sample_dt_s": 0.05,
+                            "throttle": throttle, "amplitude": amplitude,
+                            "frequency_hz": freq_hz, "phase_deg": 0.0,
+                            "brake_s": 1.5, "brake": 0.65},
+                    description=f"Sine steer amp={amplitude:.2f} freq={freq_hz:.2f}Hz at throttle={throttle:.2f}.",
+                ))
+
+    # Chirp-steer at multiple throttles
+    for throttle in [0.40, 0.65, 0.90]:
+        t_str = f"{throttle:.0%}".replace("%", "pct")
+        specs.append(ManeuverSpec(
+            name=f"chirp_steer_t{t_str}",
+            preset="chirp-steer",
+            params={"idle_s": 1.0, "run_s": 10.0, "sample_dt_s": 0.05,
+                    "throttle": throttle, "amplitude": 0.30,
+                    "freq_start_hz": 0.1, "freq_end_hz": 2.5,
+                    "brake_s": 1.5, "brake": 0.65},
+            description=f"Chirp steer 0.1–2.5 Hz at throttle={throttle:.2f}.",
+        ))
+
+    # ── Tier 5: Surface transition ────────────────────────────────────────
+    specs.append(ManeuverSpec(
+        name="surface_transition_s",
+        preset="surface-transition-s",
+        params={"launch_s": 1.0, "dry_s": 3.5, "wet_s": 2.0, "gravel_s": 2.0,
+                "brake_s": 1.5, "launch_throttle": 0.20, "cruise_throttle": 0.55,
+                "wet_steer": 0.24, "gravel_steer": -0.24, "brake": 0.60},
+        description="Cross dry, wet, and gravel patches with an S-turn and brake.",
+    ))
+
+    return specs
+
+
 def build_dataset_suite(suite_name: str) -> List[ManeuverSpec]:
     suites: Dict[str, List[ManeuverSpec]] = {
         "smoke": [
@@ -44,6 +186,7 @@ def build_dataset_suite(suite_name: str) -> List[ManeuverSpec]:
                 description="Minimal smoke maneuver with accel, coast, and brake.",
             )
         ],
+        "sysid-comprehensive-fwd": _build_comprehensive_fwd_suite(),
         "sysid-basic-fwd": [
             ManeuverSpec(
                 name="straight_accel_brake",
@@ -250,7 +393,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset-dir", type=str, required=True, help="Dataset root containing programs/, rollouts/, and manifest.json.")
     parser.add_argument("--dataset-name", type=str, default="", help="Optional manifest name override. Defaults to the dataset directory name.")
-    parser.add_argument("--suite", type=str, default="sysid-basic-fwd", choices=["smoke", "sysid-basic-fwd"])
+    parser.add_argument("--suite", type=str, default="sysid-comprehensive-fwd", choices=["smoke", "sysid-basic-fwd", "sysid-comprehensive-fwd"])
     parser.add_argument("--record-python", type=str, default=sys.executable, help="Python executable used to launch the teacher recorder.")
     parser.add_argument("--generate-only", action="store_true", help="Only write maneuver JSONs and manifest; do not record rollouts.")
     parser.add_argument("--skip-existing", action="store_true", help="Skip rollouts that already have both rollout files.")

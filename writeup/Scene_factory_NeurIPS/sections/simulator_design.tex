@@ -190,19 +190,51 @@ Steering is converted to a position target $\theta_{\mathrm{target}} = \text{ste
 \end{equation}
 Throttle applies a drive torque to the two front wheels (front-wheel drive): $\tau_{\mathrm{drive}} = \text{throttle} \times \tau_{\mathrm{drive,max}}$.
 Brake applies an opposing torque to all four wheels, with sign determined by wheel angular velocity (and a sign-memory mechanism to handle zero-velocity transitions).
-An external wrench on the chassis provides two stabilization terms: a lateral velocity damping force $F_{\mathrm{lat}} = -\lambda_{\mathrm{lat}} \cdot f_{\mathrm{lat}} \cdot v_{\mathrm{lat}}$ and a yaw damping torque $\tau_z = -\lambda_{\mathrm{yaw}} \cdot f_{\mathrm{lat}} \cdot \omega_z$, where $f_{\mathrm{lat}}$ is the sysid-tuned lateral friction scale for the active surface type.
+An external wrench on the chassis provides two stabilization terms: a lateral velocity damping force $F_{\mathrm{lat}} = -\lambda_{\mathrm{lat}} \cdot v_{\mathrm{lat}}$ and a yaw damping torque $\tau_z = -\lambda_{\mathrm{yaw}} \cdot \omega_z$.
+These terms compensate for the simplified tire--ground interaction in our rigid-body model, which lacks the full slip-angle dynamics of the PhysX Vehicle tire model.
+Their magnitudes ($\lambda_{\mathrm{lat}}$, $\lambda_{\mathrm{yaw}}$) are vehicle-intrinsic parameters fitted by sysid; they are not scaled by road friction, because the PhysX contact solver already reduces lateral grip naturally when wheel material friction is lowered.
 The concrete PD gains and torque limits are listed in Table~\ref{tab:action_params} (\S\ref{sec:actions}).
 
 % \chattodo{Report the final PD gains ($K_p$, $K_d$) and torque limits from the sysid result used in experiments.}
 
 \paragraph{System identification.}
-The vehicle model has 20 tunable dynamics parameters (drive/brake torques, steering PD gains, suspension stiffness/damping, wheel inertia, per-surface friction scales, etc.).
-We fit these via a five-stage cross-entropy method (CEM) against reference trajectories from a PhysX ``teacher'' vehicle executing seven scripted maneuvers (straight-line, step-steer, constant-radius turns, sinusoidal steering, and multi-surface transitions) at 60\,Hz.
-The loss combines per-channel MSE over position, yaw, speed, yaw rate, wheel speed, and steer angle, with terminal-frame position and speed penalties.
-The full loss function, CEM stage descriptions, and hyperparameters are provided in Appendix~\ref{app:sysid}.
+The articulated vehicle model has 20 tunable dynamics parameters that are \emph{intrinsic} to the vehicle: drive/brake torques, steering PD gains, suspension stiffness/damping, wheel mass and inertia, chassis center-of-mass offset, and lateral/yaw stabilization coefficients.
+These parameters determine how the vehicle responds to actuator commands---they do not change when the road surface changes.
+Environment-level friction variation is handled separately by the PhysX contact solver via wheel material properties (\S\ref{sec:weather_friction}).
 
-\chattodo{\textbf{ACTION ITEM --- TABLE:} Add a table reporting per-stage sysid loss from the final sysid run.}
-\chattodo{\textbf{ACTION ITEM --- FIGURE:} Consider a trajectory overlay figure showing teacher vs.\ student vehicle.}
+We fit the vehicle-intrinsic parameters via a five-stage cross-entropy method (CEM) against reference trajectories from a PhysX ``teacher'' vehicle.
+The teacher uses the Isaac Sim built-in PhysX Vehicle model, which includes a validated tire model, drivetrain, and suspension---providing a high-fidelity reference that our simpler articulation must match.
+The teacher executes 139 scripted maneuvers organized into five tiers of increasing complexity:
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item \emph{Longitudinal} (17 maneuvers): throttle sweeps from 10\% to 100\%, brake sweeps at 20--100\%, and linear throttle ramps.
+  \item \emph{Lateral} (64 maneuvers): step-steer and constant-radius turns at four throttle levels $\times$ four--five steer amplitudes $\times$ left/right.
+  \item \emph{Combined} (18 maneuvers): trail-brake inputs at three throttle levels $\times$ three steer amplitudes $\times$ left/right.
+  \item \emph{Frequency response} (39 maneuvers): sinusoidal steering at three throttle levels $\times$ three amplitudes $\times$ four frequencies, plus chirp (frequency-sweep) steering.
+  \item \emph{Surface transition} (1 maneuver): S-curve across dry asphalt, wet asphalt, and gravel.
+\end{enumerate}
+Each rollout records per-frame chassis position, yaw, speed, yaw rate, wheel angular velocities, and steer angles at 60\,Hz.
+The loss combines per-channel MSE over these six channels with terminal-frame position and speed penalties (Appendix~\ref{app:sysid}).
+The CEM search uses 320 trials distributed across five stages (population size 24, elite fraction 25\%), with each stage inheriting the best configuration from the previous one.
+Table~\ref{tab:sysid_stages} reports the per-stage results.
+
+\begin{table}[h]
+\centering\small
+\caption{Per-stage sysid results from the comprehensive CEM run (320 trials, 139 teacher maneuvers).}
+\label{tab:sysid_stages}
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+Stage & Teachers & Trials & Best loss & Key parameters \\
+\midrule
+Longitudinal         & 17  & 96 & 5.29  & drive torque, brake, wheel mass/inertia \\
+Steering             & 121 & 64 & 170.6 & steering PD, suspension, yaw damping \\
+Surface              & 1   & 48 & 55.4  & per-surface friction scales \\
+Refinement           & 139 & 64 & 150.2 & all 20 parameters (narrow window) \\
+Brake preservation   & 17  & 48 & 3.69  & longitudinal re-anchor \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\chattodo{\textbf{ACTION ITEM --- FIGURE:} Consider a trajectory overlay figure showing teacher vs.\ student vehicle on one or two maneuvers.}
 
 \subsection{Weather-to-Friction Module}
 \label{sec:weather_friction}

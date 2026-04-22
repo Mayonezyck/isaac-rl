@@ -153,7 +153,7 @@ This prevents torque chatter near zero velocity.
 \paragraph{Actuation parameters.}
 Table~\ref{tab:app_action_params} lists the sysid-tuned values used in all experiments.
 Drive torque is applied to the two front wheels only (FWD); brake torque is applied to all four wheels with separate front/rear magnitudes.
-Both drive and brake torques are further scaled by a shared longitudinal scale $s_{\mathrm{long}} = 0.9273$, which is one of the 20 sysid parameters (\S\ref{sec:vehicle_sysid}).
+The sysid procedure additionally fits per-surface friction scales (longitudinal and lateral) that modulate the effective contact friction for each road surface type; these are relevant only for multi-surface scenarios (\S\ref{sec:weather_friction}).
 
 \begin{table}[h]
   \centering\small
@@ -163,14 +163,18 @@ Both drive and brake torques are further scaled by a shared longitudinal scale $
     \toprule
     Parameter & Symbol & Value \\
     \midrule
-    Max steer angle        & $\theta_{\max}$               & $0.5585$\,rad ($\approx 32^{\circ}$) \\
-    Steering PD $K_p$      & $K_p$                          & $1600$\,N$\cdot$m/rad \\
-    Steering PD $K_d$      & $K_d$                          & $160$\,N$\cdot$m$\cdot$s/rad \\
+    Max steer angle        & $\theta_{\max}$               & $0.450$\,rad ($\approx 25.8^{\circ}$) \\
+    Steering PD $K_p$      & $K_p$                          & $1839.5$\,N$\cdot$m/rad \\
+    Steering PD $K_d$      & $K_d$                          & $110.5$\,N$\cdot$m$\cdot$s/rad \\
     Steering effort clamp  & $\tau_{\mathrm{steer,max}}$   & $1200$\,N$\cdot$m \\
-    Drive torque           & $\tau_{\mathrm{drive,max}}$   & $619.8$\,N$\cdot$m \\
-    Brake torque (front)   & $\tau_{\mathrm{brk,F}}$      & $1292.1$\,N$\cdot$m \\
-    Brake torque (rear)    & $\tau_{\mathrm{brk,R}}$      & $638.5$\,N$\cdot$m \\
-    Longitudinal scale     & $s_{\mathrm{long}}$           & $0.9273$ \\
+    Drive torque           & $\tau_{\mathrm{drive,max}}$   & $600.7$\,N$\cdot$m \\
+    Brake torque (front)   & $\tau_{\mathrm{brk,F}}$      & $1090.5$\,N$\cdot$m \\
+    Brake torque (rear)    & $\tau_{\mathrm{brk,R}}$      & $980.7$\,N$\cdot$m \\
+    Wheel mass             & $m_{\mathrm{wheel}}$          & $37.5$\,kg \\
+    Wheel inertia scale    & $s_{\mathrm{inertia}}$        & $1.094$ \\
+    Suspension stiffness   & $k_{\mathrm{susp}}$           & $1080.8$\,N/m \\
+    Suspension damping      & $c_{\mathrm{susp}}$           & $2764.3$\,N$\cdot$s/m \\
+    Yaw stability damping  & $\lambda_{\mathrm{yaw}}$      & $10.6$\,N$\cdot$m$\cdot$s/rad \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -276,7 +280,9 @@ The vehicle model has 20 tunable dynamics parameters: drive, brake (front/rear),
 We fit these parameters using the cross-entropy method (CEM).
 
 \paragraph{Reference data.}
-A PhysX ``teacher'' vehicle (the Isaac Sim built-in PhysX vehicle model, not our articulated URDF vehicle) executes seven scripted maneuvers on a multi-surface patch track: straight-line acceleration and braking, left and right step-steer inputs, constant-radius turns, sinusoidal steering, and an S-curve surface transition across dry asphalt ($\mu_s{=}1.0$), wet asphalt ($\mu_s{=}0.75$), and gravel ($\mu_s{=}0.60$).
+A PhysX ``teacher'' vehicle (the Isaac Sim built-in PhysX Vehicle model, which includes a validated tire model, drivetrain, and suspension) executes 139 scripted maneuvers on a multi-surface patch track.
+The maneuvers span five tiers: 17 longitudinal (throttle sweep 10--100\%, brake sweep, linear ramps), 64 lateral (step-steer and constant-radius at four throttle levels $\times$ four--five steer amplitudes $\times$ left/right), 18 combined (trail-brake at three throttle$\times$steer$\times$direction), 39 frequency-response (sinusoidal steering at multiple throttle/amplitude/frequency settings, plus chirp sweeps), and 1 surface transition across dry asphalt ($\mu_s{=}1.0$), wet asphalt ($\mu_s{=}0.75$), and gravel ($\mu_s{=}0.60$).
+The comprehensive suite covers the full operating envelope from 10\% to 100\% throttle, ensuring that the fitted parameters generalize across the vehicle's speed and lateral-force range.
 Each rollout records per-frame chassis position, yaw, speed, yaw rate, wheel angular velocities, and steer angles at 60\,Hz.
 
 \paragraph{Loss function.}
@@ -304,9 +310,15 @@ The CEM search is divided into five stages to manage the 20-dimensional space:
   \item \emph{Brake preservation}: re-tunes longitudinal parameters with a tight window (10\%) to prevent regression.
 \end{enumerate}
 Each stage inherits the best configuration from the previous stage.
-The CEM uses a population of 16 candidates, an elite fraction of 25\%, and an initial standard deviation of 25\% of each parameter's range.
+The CEM uses a population of 24 candidates, an elite fraction of 25\%, an initial standard deviation of 25\% of each parameter's range, and a minimum standard deviation of 5\% to prevent premature convergence.
+A total of 320 trials are allocated across the five stages with weights (30\%, 20\%, 15\%, 20\%, 15\%).
 
-\chattodo{\textbf{ACTION ITEM --- TABLE:} Add a table reporting per-stage sysid loss from the final sysid run.}
+\paragraph{Vehicle-intrinsic vs.\ environment parameters.}
+The 20 sysid parameters are \emph{vehicle-intrinsic}: they characterize how the articulation converts actuator commands into motion (drive torque, steering response, suspension compliance, etc.).
+They do not change when the road surface changes.
+Environment-level friction variation is handled orthogonally by the PhysX contact solver: each environment's wheel colliders are assigned a friction coefficient $\mu$ via their physics material, and the contact solver computes friction forces at the wheel--ground contact points accordingly (using combine mode \texttt{min}).
+This separation is deliberate: sysid produces a realistic vehicle model once, and the physics engine then automatically adapts that vehicle's behavior to any friction environment.
+
 \chattodo{\textbf{ACTION ITEM --- FIGURE:} Consider a trajectory overlay figure showing teacher vs.\ student vehicle on one or two maneuvers.}
 
 
@@ -375,8 +387,9 @@ In rare cases this causes a vehicle to retain a residual velocity or contact sta
 The collision warmup window (above) masks most such artifacts.
 
 \paragraph{Uniform friction surface.}
-As discussed in \S\ref{sec:weather_friction}, per-world friction is currently observation-only.
-Even once per-vehicle wheel materials are implemented, friction will remain spatially uniform within each world: every wheel contact with the ground plane uses the same coefficient.
+Per-world friction variation is implemented by writing to each vehicle's wheel collider physics material at environment construction time.
+Because the global ground plane has friction $\mu{=}1.0$ and PhysX uses combine mode \texttt{min}, the effective contact friction is $\min(\mu_{\mathrm{wheel}}, 1.0) = \mu_{\mathrm{wheel}}$, giving per-environment control.
+However, friction remains spatially uniform within each world: every wheel contact with the ground plane uses the same coefficient.
 Real roads exhibit local friction variation (wet patches, oil spills, transitions between asphalt and concrete), and scenarios such as a slippery lane adjacent to a dry lane cannot be represented.
 Modeling local friction would require either a segmented ground mesh with per-face materials or runtime material-property writes keyed to vehicle position, neither of which is straightforward under PhysX~5's current contact pipeline.
 

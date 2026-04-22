@@ -1,0 +1,19 @@
+# Friction ruler: 4 envs on bare flat ground, no Waymo roads.
+# Each env gets a different μ value via friction_ruler_mu_values in the eval config.
+# Uses Zhao model for reference estimates where water_film_mm is provided.
+io:
+  scene_json_dir: /home/yz8733/Github/isaac-rl/data/processed/waymo_scenes_json
+world:
+  root_container: /World/SceneFactoryWorlds
+  world_count: 4
+  grid_cols: 2
+  rows: 2
+  world_size_m:
+  - 100.0
+  - 100.0
+  padding_m: 200.0
+  base_z_m: 0.0
+  bounds_size_m: 100.0
+  origin_mode: center
+  origin_center_mode: mean
+  # No assignments — friction ruler mode doesn't use scene JSON.

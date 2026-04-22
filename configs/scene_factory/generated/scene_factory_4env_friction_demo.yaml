@@ -1,0 +1,44 @@
+io:
+  scene_json_dir: /home/yz8733/Github/isaac-rl/data/processed/waymo_scenes_json
+world:
+  root_container: /World/SceneFactoryWorlds
+  world_count: 4
+  grid_cols: 2
+  rows: 2
+  world_size_m:
+  - 200.0
+  - 200.0
+  padding_m: 200.0
+  base_z_m: 0.0
+  bounds_size_m: 200.0
+  origin_mode: center
+  origin_center_mode: mean
+  assignments:
+  # Env 0: Dry (clear, no water film)
+  - scene_json: scene_000090.json
+    friction:
+      road_type: AC
+      precip_type: clear
+      precip_intensity_mmph: 0.0
+      water_film_mm: 0.0
+  # Env 1: Light rain (0.2mm water film)
+  - scene_json: scene_000090.json
+    friction:
+      road_type: AC
+      precip_type: rain
+      precip_intensity_mmph: 4.0
+      water_film_mm: 0.2
+  # Env 2: Moderate rain (0.5mm water film)
+  - scene_json: scene_000090.json
+    friction:
+      road_type: AC
+      precip_type: rain
+      precip_intensity_mmph: 10.0
+      water_film_mm: 0.5
+  # Env 3: Heavy rain (0.8mm water film)
+  - scene_json: scene_000090.json
+    friction:
+      road_type: AC
+      precip_type: shower
+      precip_intensity_mmph: 16.0
+      water_film_mm: 0.8

@@ -47,7 +47,7 @@ from isaaclab.markers import CUBOID_MARKER_CFG, VisualizationMarkers
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
-from isaaclab.sim import SimulationCfg
+from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, sample_uniform, subtract_frame_transforms
 
@@ -225,6 +225,11 @@ def _reference_vehicle_feat_dim(include_ttc: bool, include_index: bool) -> int:
     return dim
 
 
+_LOWPOLY_CAR_USDZ = str(
+    Path(__file__).resolve().parent.parent / "artifacts" / "low_poly_car_proxy.usd"
+)
+
+
 def _build_vehicle_proxy_marker(
     prim_path: str,
     *,
@@ -233,29 +238,22 @@ def _build_vehicle_proxy_marker(
     vehicle_width_m: float,
     vehicle_height_m: float = 0.55,
 ) -> VisualizationMarkers:
-    palette = (
-        (0.95, 0.20, 0.20),
-        (0.10, 0.82, 0.92),
-        (0.96, 0.78, 0.10),
-        (0.35, 0.92, 0.26),
-        (0.96, 0.42, 0.12),
-        (0.62, 0.32, 0.96),
-        (0.95, 0.30, 0.72),
-        (0.65, 0.85, 0.18),
-    )
+    """Build car-shaped proxy markers using a low-poly USDZ asset.
+
+    The USDZ has: up=Y, metersPerUnit=0.01, car long-axis along Z.
+    Isaac Sim is Z-up with forward along +X.
+    We apply scale=0.01 (cm→m) and a rotation to convert Y-up/Z-forward
+    to Z-up/X-forward.
+    """
+    # scale: cm → m
+    _scale = 0.01
     marker_cfg = CUBOID_MARKER_CFG.copy()
     marker_cfg.prim_path = str(prim_path)
     marker_cfg.markers = {}
     for agent_idx in range(max(1, int(num_agent_prototypes))):
-        color = palette[agent_idx % len(palette)]
-        marker_cfg.markers[f"vehicle_{agent_idx}"] = sim_utils.CuboidCfg(
-            size=(float(vehicle_length_m), float(vehicle_width_m), float(vehicle_height_m)),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=color,
-                emissive_color=tuple(0.22 * channel for channel in color),
-                roughness=0.22,
-                metallic=0.0,
-            ),
+        marker_cfg.markers[f"vehicle_{agent_idx}"] = sim_utils.UsdFileCfg(
+            usd_path=_LOWPOLY_CAR_USDZ,
+            scale=(_scale, _scale, _scale),
         )
     return VisualizationMarkers(marker_cfg)
 
@@ -373,6 +371,8 @@ def resolve_scene_factory_env_assignments(cfg: "StudentVehicleMultiAgentGoalEnvC
     if selection_mode == "fixed":
         requested_world_index = int(cfg.scene_factory_world_index)
         selected_specs = [world_specs[requested_world_index % len(world_specs)] for _ in range(num_envs)]
+    elif selection_mode == "sequential":
+        selected_specs = [world_specs[i % len(world_specs)] for i in range(num_envs)]
     elif selection_mode == "random-envs":
         rng = random.Random(world_seed)
         order = list(range(len(world_specs)))
@@ -453,6 +453,12 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
+        ),
+        physx=PhysxCfg(
+            # Default 5*2**15=163840 is insufficient when suspension stiffness
+            # is non-zero (sysid v4): all wheels generate contact patches at
+            # spawn simultaneously. 2**22=4194304 gives ~25x headroom.
+            gpu_max_rigid_patch_count=2**22,
         ),
     )
 
@@ -544,6 +550,7 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     reward_choco_road_edge_ttc_hard_min_ttc: float = 0.5
     reward_choco_road_edge_ttc_radius_m: float = 40.0
     obs_weather_context_enable: bool = True
+    obs_weather_context_blind: bool = False  # If True, feed all-zeros weather context regardless of actual surface (for OOD eval of dry-trained models)
     obs_road_points_enable: bool = True
     obs_road_points_k: int = 200
     obs_road_points_radius_m: float = 35.0
@@ -584,6 +591,11 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     random_steer_test_steering_hold_steps: int = 12
     random_steer_test_seed: int = 123
     invincible: bool = False
+    friction_ruler_mode: bool = False
+    friction_ruler_mu_values: str = ""  # comma-separated per-env μ, e.g. "1.1,0.6,0.3,0.1"
+    friction_ruler_labels: str = ""  # comma-separated per-env labels for video overlay
+    fixed_action: str = ""  # e.g. "0.8,0.0,0.0" → [throttle, steer, brake]
+    action_schedule: str = ""  # e.g. "0:1.0,0.0,0.0 60:1.0,1.0,0.0" step:t,s,b entries
     random_od: bool = False
     random_od_min_travel_m: float = 20.0
     random_od_max_travel_m: float = 60.0
@@ -613,8 +625,42 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     capture_camera_height_scale: float = 1.6
     capture_camera_view_mode: str = "whole_grid"
     capture_camera_env_index: int = 0
+    capture_camera_pose_mode: str = "top_down"  # "top_down" or "traffic_cam"
+    capture_camera_traffic_cam_height_m: float = 7.0
+    capture_camera_traffic_cam_distance_m: float = 25.0
+    capture_camera_traffic_cam_look_height_m: float = 0.5
+    capture_camera_traffic_cam_azimuth_deg: float = 0.0  # 0=south, positive=counterclockwise (left from cam POV)
+    capture_camera_traffic_cam_lateral_offset_m: float = 0.0  # shift camera left (positive) or right (negative)
+    # Flyover camera: cinematic reveal — surveillance → tilt to horizon → gentle zoom-out
+    capture_camera_flyover_start_height_m: float = 8.0
+    capture_camera_flyover_end_height_m: float = 200.0
+    capture_camera_flyover_surveillance_frames: int = 120  # phase 1: hold as surveillance cam
+    capture_camera_flyover_tilt_frames: int = 180  # phase 2: tilt up to reveal neighbors
+    capture_camera_flyover_zoomout_frames: int = 300  # phase 3: gentle rise
+    capture_camera_flyover_start_env_index: int = 0
+    capture_camera_flyover_start_tilt_deg: float = 25.0  # low surveillance angle from horizontal
+    capture_camera_flyover_end_tilt_deg: float = 75.0  # nearly top-down at end
+    capture_camera_flyover_start_distance_m: float = 25.0  # horizontal offset at start
+    capture_camera_flyover_azimuth_deg: float = 0.0  # viewing direction
+    capture_camera_flyover_lookaway_frames: int = 0  # phase 4: tilt head up + pan left (0 = disabled)
+    capture_camera_flyover_lookaway_pitch_deg: float = 45.0  # how far to tilt up from final look direction
+    capture_camera_flyover_lookaway_yaw_deg: float = 45.0  # how far to pan left
+    # Flyover-drift: rise → lateral drift left (slow start) → pan right + pitch up
+    capture_camera_drift_rise_frames: int = 300  # phase 1: rise to overview height
+    capture_camera_drift_lateral_frames: int = 300  # phase 2: drift left
+    capture_camera_drift_pan_frames: int = 300  # phase 3: pan right + pitch up
+    capture_camera_drift_hold_frames: int = 0  # phase 4: hold final pose
+    capture_camera_drift_start_height_m: float = 8.0
+    capture_camera_drift_rise_height_m: float = 400.0  # height at end of rise
+    capture_camera_drift_lateral_distance_m: float = 600.0  # how far to drift left
+    capture_camera_drift_pan_yaw_deg: float = 90.0  # how far to pan right
+    capture_camera_drift_pitch_up_deg: float = 30.0  # how far to tilt up at end
+    capture_camera_drift_start_tilt_deg: float = 25.0  # initial surveillance tilt
+    capture_camera_drift_rise_tilt_deg: float = 70.0  # tilt at top of rise
+    capture_camera_drift_azimuth_deg: float = 0.0  # initial viewing direction
+    hide_goal_markers: bool = False  # hide destination beacon visuals (for clean video capture)
     vehicle_proxy_marker_enable: bool = False
-    vehicle_proxy_marker_z_offset_m: float = 0.35
+    vehicle_proxy_marker_z_offset_m: float = -0.5
 
 
 class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
@@ -622,6 +668,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def __init__(self, cfg: StudentVehicleMultiAgentGoalEnvCfg, render_mode: str | None = None, **kwargs):
         self._capture_camera: Camera | None = None
+        self._capture_cameras_per_env: list[Camera] = []  # for per_env view mode
         self._vehicle_proxy_marker: VisualizationMarkers | None = None
         self._capture_cam_center_xy: tuple[float, float] | None = None
         self._capture_cam_half_w: float = 0.0
@@ -797,6 +844,12 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if weather_context.ndim == 1:
             weather_context = weather_context.unsqueeze(0).repeat(self.num_envs, 1)
         self._weather_context = weather_context
+        # Constant used when obs_weather_context_blind=True: dry AC surface (water_film=0, road_type=AC)
+        # This matches the fixed context seen by weather-unaware models trained on a single dry surface.
+        _dry_ac = encode_weather_context(water_film_mm=0.0, road_type="AC")
+        self._weather_context_blind_const = torch.tensor(
+            _dry_ac, dtype=torch.float32, device=self.device
+        ).unsqueeze(0).repeat(self.num_envs, 1)
         if self._scene_factory_spawn_start_local is not None:
             self._scene_factory_spawn_start_local = torch.as_tensor(
                 self._scene_factory_spawn_start_local, dtype=torch.float32, device=self.device
@@ -937,6 +990,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 joint_ids=suspension_joint_ids,
             )
 
+        # --- Apply per-env tire friction from weather/friction pipeline ---
+        self._apply_per_env_tire_friction()
+
         self._steer_joint_ids_tensor = torch.tensor(self._steer_joint_ids, dtype=torch.long, device=self.device)
         self._drive_joint_ids_tensor = torch.tensor(self._drive_joint_ids, dtype=torch.long, device=self.device)
         self._brake_joint_ids_tensor = torch.tensor(self._brake_joint_ids, dtype=torch.long, device=self.device)
@@ -1018,6 +1074,25 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self.scene.articulations[agent_id] = vehicle
         self._register_vehicle_contact_sensors()
 
+        if bool(self.cfg.friction_ruler_mode):
+            self._build_friction_ruler_visuals(stage)
+        # Hide USD vehicle meshes & spawn 3D proxy markers whenever proxy markers are enabled
+        if bool(self.cfg.vehicle_proxy_marker_enable) or bool(self.cfg.friction_ruler_mode):
+            self._hide_vehicle_visuals(stage)
+        if bool(self.cfg.vehicle_proxy_marker_enable):
+            if self._vehicle_proxy_marker is None:
+                self._vehicle_proxy_marker = _build_vehicle_proxy_marker(
+                    "/Visuals/VehicleProxyMarkers",
+                    num_agent_prototypes=int(self.cfg.num_agents_per_env),
+                    vehicle_length_m=float(self._vehicle_length_m),
+                    vehicle_width_m=float(self._vehicle_width_m),
+                )
+            self._vehicle_proxy_marker.set_visibility(True)
+
+        # Visually hide road types that shouldn't appear on camera (e.g. lane centers)
+        if hasattr(self.cfg, "road_hidden_types") and self.cfg.road_hidden_types:
+            self._hide_road_type_visuals(stage, self.cfg.road_hidden_types)
+
         light_cfg = sim_utils.DomeLightCfg(intensity=2500.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
         self._spawn_capture_camera()
@@ -1054,6 +1129,32 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._capture_camera = None
             return
 
+        view_mode = str(self.cfg.capture_camera_view_mode).strip().lower()
+
+        if view_mode == "per_env":
+            # Spawn one camera per environment
+            self._capture_cameras_per_env = []
+            for ei in range(self.num_envs):
+                cam_cfg = CameraCfg(
+                    prim_path=f"/World/SceneFactoryCaptureCamera_env{ei}",
+                    update_period=0.0,
+                    height=int(self.cfg.capture_camera_height),
+                    width=int(self.cfg.capture_camera_width),
+                    data_types=["rgb"],
+                    colorize_instance_id_segmentation=False,
+                    colorize_instance_segmentation=False,
+                    colorize_semantic_segmentation=False,
+                    spawn=sim_utils.PinholeCameraCfg(
+                        focal_length=float(self.cfg.capture_camera_focal_length),
+                        focus_distance=400.0,
+                        horizontal_aperture=float(self.cfg.capture_camera_horizontal_aperture),
+                        clipping_range=(0.1, 1.0e6),
+                    ),
+                )
+                self._capture_cameras_per_env.append(Camera(cam_cfg))
+            self._capture_camera = None  # not used in per_env mode
+            return
+
         camera_cfg = CameraCfg(
             prim_path="/World/SceneFactoryCaptureCamera",
             update_period=0.0,
@@ -1073,10 +1174,54 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._capture_camera = Camera(camera_cfg)
 
     def _configure_capture_camera_pose(self) -> None:
-        if self._capture_camera is None:
+        env_origins = self.scene.env_origins.detach()
+
+        # --- per_env mode: position each camera over its env ---
+        if self._capture_cameras_per_env:
+            for ei, cam in enumerate(self._capture_cameras_per_env):
+                sc = env_origins[ei]
+                if bool(self.cfg.friction_ruler_mode):
+                    # Friction ruler: top-down camera centered on the car's starting position
+                    h = 50.0
+                    eye = torch.tensor(
+                        [[float(sc[0]), float(sc[1]) + 10.0, h]],
+                        dtype=torch.float32, device=self.device,
+                    )
+                    target = torch.tensor(
+                        [[float(sc[0]), float(sc[1]) + 10.0, 0.0]],
+                        dtype=torch.float32, device=self.device,
+                    )
+                else:
+                    pose_mode = str(self.cfg.capture_camera_pose_mode).strip().lower()
+                    if pose_mode == "traffic_cam":
+                        # Traffic-light style: offset camera behind/above, tilted down
+                        import math as _math
+                        cam_h = float(self.cfg.capture_camera_traffic_cam_height_m)
+                        cam_dist = float(self.cfg.capture_camera_traffic_cam_distance_m)
+                        look_h = float(self.cfg.capture_camera_traffic_cam_look_height_m)
+                        az_rad = _math.radians(float(self.cfg.capture_camera_traffic_cam_azimuth_deg))
+                        # base direction is -y (south); rotate CCW by azimuth
+                        dx = cam_dist * -_math.sin(az_rad)
+                        dy = cam_dist * -_math.cos(az_rad)
+                        eye = torch.tensor(
+                            [[float(sc[0]) + dx, float(sc[1]) + dy, cam_h]],
+                            dtype=torch.float32, device=self.device,
+                        )
+                        target = torch.tensor(
+                            [[float(sc[0]), float(sc[1]), look_h]],
+                            dtype=torch.float32, device=self.device,
+                        )
+                    else:
+                        # Default top-down
+                        coverage_radius = float(self.cfg.max_distance_from_origin_m) * float(self.cfg.capture_camera_padding_scale)
+                        h = max(40.0, float(self.cfg.capture_camera_height_scale) * float(max(25.0, coverage_radius)))
+                        eye = torch.tensor([[float(sc[0]), float(sc[1]), h]], dtype=torch.float32, device=self.device)
+                        target = torch.tensor([[float(sc[0]), float(sc[1]), 0.0]], dtype=torch.float32, device=self.device)
+                cam.set_world_poses_from_view(eyes=eye, targets=target)
             return
 
-        env_origins = self.scene.env_origins.detach()
+        if self._capture_camera is None:
+            return
         if str(self.cfg.test_mode).strip().lower() in {"collision_test", "scene_factory_collision_test"}:
             env_index = int(np.clip(int(self.cfg.capture_camera_env_index), 0, max(self.num_envs - 1, 0)))
             scene_center = env_origins[env_index]
@@ -1110,20 +1255,48 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                 + float(self.cfg.max_distance_from_origin_m)
                 + float(self.cfg.scene.env_spacing) * 0.25
             ) * float(self.cfg.capture_camera_padding_scale)
-        capture_height = max(
-            40.0,
-            float(self.cfg.capture_camera_height_scale) * float(max(25.0, coverage_radius)),
-        )
-        eye = torch.tensor(
-            [[float(scene_center[0]), float(scene_center[1]), capture_height]],
-            dtype=torch.float32,
-            device=self.device,
-        )
-        target = torch.tensor(
-            [[float(scene_center[0]), float(scene_center[1]), 0.0]],
-            dtype=torch.float32,
-            device=self.device,
-        )
+        pose_mode = str(getattr(self.cfg, "capture_camera_pose_mode", "top_down")).strip().lower()
+        if pose_mode == "traffic_cam":
+            import math as _math
+            cam_h = float(getattr(self.cfg, "capture_camera_traffic_cam_height_m", 7.0))
+            cam_d = float(getattr(self.cfg, "capture_camera_traffic_cam_distance_m", 25.0))
+            look_h = float(getattr(self.cfg, "capture_camera_traffic_cam_look_height_m", 0.5))
+            az_rad = _math.radians(float(getattr(self.cfg, "capture_camera_traffic_cam_azimuth_deg", 0.0)))
+            lat_off = float(getattr(self.cfg, "capture_camera_traffic_cam_lateral_offset_m", 0.0))
+            dx = cam_d * -_math.sin(az_rad)
+            dy = cam_d * -_math.cos(az_rad)
+            # "Left" from camera POV is 90° CCW from forward direction
+            fwd_x, fwd_y = -dx, -dy
+            fwd_len = max(1e-6, _math.sqrt(fwd_x**2 + fwd_y**2))
+            left_x, left_y = -fwd_y / fwd_len, fwd_x / fwd_len
+            cx = float(scene_center[0]) + left_x * lat_off
+            cy = float(scene_center[1]) + left_y * lat_off
+            eye = torch.tensor(
+                [[cx + dx, cy + dy, cam_h]],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            target = torch.tensor(
+                [[cx, cy, look_h]],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            capture_height = cam_h  # for projection params below
+        else:
+            capture_height = max(
+                40.0,
+                float(self.cfg.capture_camera_height_scale) * float(max(25.0, coverage_radius)),
+            )
+            eye = torch.tensor(
+                [[float(scene_center[0]), float(scene_center[1]), capture_height]],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            target = torch.tensor(
+                [[float(scene_center[0]), float(scene_center[1]), 0.0]],
+                dtype=torch.float32,
+                device=self.device,
+            )
         self._capture_camera.set_world_poses_from_view(eyes=eye, targets=target)
         # Store projection parameters for 2D vehicle proxy overlay
         h_aperture = float(self.cfg.capture_camera_horizontal_aperture)
@@ -1132,9 +1305,269 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         self._capture_cam_half_w = capture_height * h_aperture / (2.0 * f_length)
         self._capture_cam_half_h = self._capture_cam_half_w * int(self.cfg.capture_camera_height) / max(1, int(self.cfg.capture_camera_width))
 
+    def _update_vehicle_proxy_markers(self) -> None:
+        """Sync 3D low-poly proxy marker positions/orientations with current vehicle state."""
+        if self._vehicle_proxy_marker is None:
+            return
+        positions = []
+        orientations = []
+        indices = []
+        z_offset = float(self.cfg.vehicle_proxy_marker_z_offset_m)
+        for agent_idx, vehicle in enumerate(self._vehicles):
+            pos_w = vehicle.data.root_pos_w.clone()
+            if not hasattr(self, "_proxy_z_logged"):
+                print(
+                    f"[ProxyMarker] agent={agent_idx} root_z={pos_w[0, 2].item():.3f} "
+                    f"z_offset={z_offset:.3f} final_z={pos_w[0, 2].item() + z_offset:.3f}",
+                    flush=True,
+                )
+            pos_w[:, 2] += z_offset
+            positions.append(pos_w)
+            orientations.append(vehicle.data.root_quat_w.clone())
+            indices.append(
+                torch.full((self.num_envs,), agent_idx, dtype=torch.int32, device=self.device)
+            )
+        if not hasattr(self, "_proxy_z_logged"):
+            self._proxy_z_logged = True
+        self._vehicle_proxy_marker.visualize(
+            translations=torch.cat(positions, dim=0),
+            orientations=torch.cat(orientations, dim=0),
+            marker_indices=torch.cat(indices, dim=0),
+        )
+
+    def _update_flyover_camera(self) -> None:
+        """Animate flyover camera: surveillance → tilt to horizon → gentle zoom-out.
+
+        Always stays centered on the starting world.
+        Phase 1 (surveillance): low traffic-cam view of one scene.
+        Phase 2 (tilt): camera tilts up to reveal neighboring worlds on the horizon.
+        Phase 3 (zoom-out): gently rise to show the bigger grid picture.
+        """
+        if self._capture_camera is None:
+            return
+        pose_mode = str(self.cfg.capture_camera_pose_mode).strip().lower()
+        if pose_mode != "flyover":
+            return
+        import math as _math
+
+        if not hasattr(self, "_flyover_frame"):
+            self._flyover_frame = 0
+            env_origins = self.scene.env_origins
+            start_idx = int(min(self.cfg.capture_camera_flyover_start_env_index, max(self.num_envs - 1, 0)))
+            self._flyover_center_xy = (float(env_origins[start_idx, 0]), float(env_origins[start_idx, 1]))
+
+        frame = self._flyover_frame
+        p1 = max(1, int(self.cfg.capture_camera_flyover_surveillance_frames))
+        p2 = max(1, int(self.cfg.capture_camera_flyover_tilt_frames))
+        p3 = max(1, int(self.cfg.capture_camera_flyover_zoomout_frames))
+
+        h_start = float(self.cfg.capture_camera_flyover_start_height_m)
+        h_end = float(self.cfg.capture_camera_flyover_end_height_m)
+        tilt_start = float(self.cfg.capture_camera_flyover_start_tilt_deg)
+        tilt_end = float(self.cfg.capture_camera_flyover_end_tilt_deg)
+        dist_start = float(self.cfg.capture_camera_flyover_start_distance_m)
+        az_rad = _math.radians(float(self.cfg.capture_camera_flyover_azimuth_deg))
+
+        cx, cy = self._flyover_center_xy
+
+        def _ease(t: float) -> float:
+            return 0.5 - 0.5 * _math.cos(min(1.0, max(0.0, t)) * _math.pi)
+
+        p4 = max(0, int(self.cfg.capture_camera_flyover_lookaway_frames))
+
+        if frame < p1:
+            # Phase 1: hold surveillance pose
+            tilt_deg = tilt_start
+            cam_h = h_start
+        elif frame < p1 + p2:
+            # Phase 2: tilt up, slight height increase
+            frac = _ease((frame - p1) / p2)
+            tilt_deg = tilt_start + (tilt_end - tilt_start) * frac * 0.5  # tilt halfway
+            cam_h = h_start + (h_end - h_start) * frac * 0.15  # rise a little
+        elif frame < p1 + p2 + p3:
+            # Phase 3: continue tilting + zoom out
+            frac = _ease((frame - p1 - p2) / p3)
+            tilt_deg = tilt_start + (tilt_end - tilt_start) * (0.5 + 0.5 * frac)
+            cam_h = h_start + (h_end - h_start) * (0.15 + 0.85 * frac)
+        else:
+            # Phase 4: hold height, tilt head up + pan left
+            cam_h = h_end
+            tilt_deg = tilt_end  # base tilt stays at end value
+
+        tilt_rad = _math.radians(tilt_deg)
+        horiz_dist = cam_h / max(0.01, _math.tan(tilt_rad))
+
+        eye_x = cx + horiz_dist * (-_math.sin(az_rad))
+        eye_y = cy + horiz_dist * (-_math.cos(az_rad))
+
+        eye = torch.tensor([[eye_x, eye_y, cam_h]], dtype=torch.float32, device=self.device)
+
+        # Phase 4: smoothly move the look-target up (pitch) and left (yaw)
+        if p4 > 0 and frame >= p1 + p2 + p3:
+            frac4 = _ease(min(1.0, (frame - p1 - p2 - p3) / p4))
+            pitch_offset_deg = float(self.cfg.capture_camera_flyover_lookaway_pitch_deg) * frac4
+            yaw_offset_deg = float(self.cfg.capture_camera_flyover_lookaway_yaw_deg) * frac4
+            # Move target upward (pitch up = raise target Z)
+            target_z = cam_h * _math.tan(_math.radians(pitch_offset_deg))
+            # Move target left (positive yaw_offset = counterclockwise = left from camera POV)
+            yaw_shift_rad = _math.radians(yaw_offset_deg)
+            # "Left" from camera's POV is perpendicular to the camera-to-center direction
+            # Camera faces along (cx - eye_x, cy - eye_y); left is 90° counterclockwise
+            fwd_x, fwd_y = cx - eye_x, cy - eye_y
+            left_x, left_y = -fwd_y, fwd_x  # 90° CCW
+            fwd_len = max(1e-6, _math.sqrt(fwd_x**2 + fwd_y**2))
+            left_x, left_y = left_x / fwd_len, left_y / fwd_len
+            pan_dist = fwd_len * _math.tan(yaw_shift_rad)
+            target = torch.tensor([[cx + left_x * pan_dist, cy + left_y * pan_dist, target_z]], dtype=torch.float32, device=self.device)
+        else:
+            target = torch.tensor([[cx, cy, 0.0]], dtype=torch.float32, device=self.device)
+
+        self._capture_camera.set_world_poses_from_view(eyes=eye, targets=target)
+        self._flyover_frame += 1
+
+    def _update_flyover_drift_camera(self) -> None:
+        """Animate flyover-drift camera: rise over grid center → drift left → pan right + pitch up.
+
+        Phase 1 (rise): camera rises straight up from low surveillance to overview height,
+                         always looking at the grid center.
+        Phase 2 (drift): camera and look-target both slide left together (starts slow).
+        Phase 3 (pan): camera holds position, pans right + pitches up.
+        """
+        if self._capture_camera is None:
+            return
+        pose_mode = str(self.cfg.capture_camera_pose_mode).strip().lower()
+        if pose_mode != "flyover_drift":
+            return
+        import math as _math
+
+        if not hasattr(self, "_drift_frame"):
+            self._drift_frame = 0
+            env_origins = self.scene.env_origins
+            az_rad_init = _math.radians(float(self.cfg.capture_camera_drift_azimuth_deg))
+            # "Left" from camera POV
+            fwd_x0, fwd_y0 = -_math.sin(az_rad_init), -_math.cos(az_rad_init)
+            left_x0, left_y0 = -fwd_y0, fwd_x0
+
+            # Find the env closest to the geometric center of the grid
+            grid_mean = env_origins[:, :2].mean(dim=0)
+            dists = torch.linalg.norm(env_origins[:, :2] - grid_mean.unsqueeze(0), dim=1)
+            center_idx = int(dists.argmin().item())
+            cx, cy = float(env_origins[center_idx, 0]), float(env_origins[center_idx, 1])
+
+            # Project all envs onto the "left" axis relative to center env
+            rel = env_origins[:, :2] - env_origins[center_idx, :2].unsqueeze(0)
+            left_proj = rel[:, 0] * left_x0 + rel[:, 1] * left_y0  # signed distance along left
+            # Find the env farthest in the "left" direction
+            end_idx = int(left_proj.argmax().item())
+            ex, ey = float(env_origins[end_idx, 0]), float(env_origins[end_idx, 1])
+
+            # Drift distance = distance between center env and end env projected onto left axis
+            self._drift_computed_distance = float(left_proj[end_idx].item())
+            self._drift_grid_center = (cx, cy)
+            self._drift_end_xy = (ex, ey)
+            print(
+                f"[FlyoverDrift] center env={center_idx} ({cx:.0f},{cy:.0f}) → "
+                f"end env={end_idx} ({ex:.0f},{ey:.0f}), "
+                f"drift={self._drift_computed_distance:.0f}m"
+            )
+
+        frame = self._drift_frame
+        p1 = max(1, int(self.cfg.capture_camera_drift_rise_frames))
+        p2 = max(1, int(self.cfg.capture_camera_drift_lateral_frames))
+        p3 = max(1, int(self.cfg.capture_camera_drift_pan_frames))
+        p4_hold = max(0, int(self.cfg.capture_camera_drift_hold_frames))
+
+        h_start = float(self.cfg.capture_camera_drift_start_height_m)
+        h_rise = float(self.cfg.capture_camera_drift_rise_height_m)
+        tilt_start = float(self.cfg.capture_camera_drift_start_tilt_deg)
+        tilt_rise = float(self.cfg.capture_camera_drift_rise_tilt_deg)
+        az_rad = _math.radians(float(self.cfg.capture_camera_drift_azimuth_deg))
+        # Use computed distance (center env → farthest env in left direction)
+        lateral_dist = self._drift_computed_distance
+        pan_yaw_deg = float(self.cfg.capture_camera_drift_pan_yaw_deg)
+        pitch_up_deg = float(self.cfg.capture_camera_drift_pitch_up_deg)
+
+        gcx, gcy = self._drift_grid_center
+
+        def _ease(t: float) -> float:
+            return 0.5 - 0.5 * _math.cos(min(1.0, max(0.0, t)) * _math.pi)
+
+        def _ease_in(t: float) -> float:
+            t = min(1.0, max(0.0, t))
+            return t * t
+
+        # Camera forward direction (from camera toward look-target)
+        fwd_x, fwd_y = -_math.sin(az_rad), -_math.cos(az_rad)
+        # "Left" from camera POV is 90° CCW from forward
+        left_x, left_y = -fwd_y, fwd_x
+
+        if frame < p1:
+            # Phase 1: rise straight up, always looking at grid center
+            frac = _ease(frame / p1)
+            cam_h = h_start + (h_rise - h_start) * frac
+            tilt_deg = tilt_start + (tilt_rise - tilt_start) * frac
+            look_x, look_y = gcx, gcy
+            lateral_offset = 0.0
+            pan_frac = 0.0
+        elif frame < p1 + p2:
+            # Phase 2: drift left — starts slow, accelerates
+            frac = _ease_in((frame - p1) / p2)
+            cam_h = h_rise
+            tilt_deg = tilt_rise
+            lateral_offset = lateral_dist * frac
+            # Shift look-target left too so the grid stays centered in frame
+            look_x = gcx + left_x * lateral_offset
+            look_y = gcy + left_y * lateral_offset
+            pan_frac = 0.0
+        elif frame < p1 + p2 + p3:
+            # Phase 3: hold position, pan right + pitch up
+            frac = _ease(min(1.0, (frame - p1 - p2) / p3))
+            cam_h = h_rise
+            tilt_deg = tilt_rise
+            lateral_offset = lateral_dist
+            look_x = gcx + left_x * lateral_offset
+            look_y = gcy + left_y * lateral_offset
+            pan_frac = frac
+        else:
+            # Phase 4: hold final pose
+            cam_h = h_rise
+            tilt_deg = tilt_rise
+            lateral_offset = lateral_dist
+            look_x = gcx + left_x * lateral_offset
+            look_y = gcy + left_y * lateral_offset
+            pan_frac = 1.0
+
+        tilt_rad = _math.radians(tilt_deg)
+        horiz_dist = cam_h / max(0.01, _math.tan(tilt_rad))
+
+        # Eye position: behind look-target along -forward, plus lateral offset
+        eye_x = look_x + horiz_dist * (-fwd_x)
+        eye_y = look_y + horiz_dist * (-fwd_y)
+
+        eye = torch.tensor([[eye_x, eye_y, cam_h]], dtype=torch.float32, device=self.device)
+
+        # Compute look target with pan right + pitch up
+        if pan_frac > 0:
+            # Pan right = negative of left direction
+            right_x, right_y = -left_x, -left_y
+            pan_dist = horiz_dist * _math.tan(_math.radians(pan_yaw_deg * pan_frac))
+            pitch_z = cam_h * _math.tan(_math.radians(pitch_up_deg * pan_frac))
+            target = torch.tensor(
+                [[look_x + right_x * pan_dist, look_y + right_y * pan_dist, pitch_z]],
+                dtype=torch.float32, device=self.device,
+            )
+        else:
+            target = torch.tensor([[look_x, look_y, 0.0]], dtype=torch.float32, device=self.device)
+
+        self._capture_camera.set_world_poses_from_view(eyes=eye, targets=target)
+        self._drift_frame += 1
+
     def capture_fixed_camera_frame(self) -> np.ndarray | None:
         if self._capture_camera is None:
             return None
+        self._update_flyover_camera()
+        self._update_flyover_drift_camera()
+        self._update_vehicle_proxy_markers()
         self._capture_camera.update(self.step_dt)
         rgb = self._capture_camera.data.output.get("rgb")
         if rgb is None or rgb.numel() == 0:
@@ -1143,6 +1576,21 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if bool(self.cfg.vehicle_proxy_marker_enable):
             frame = self._overlay_vehicle_proxy_markers_2d(frame)
         return frame
+
+    def capture_per_env_frames(self) -> list[np.ndarray | None]:
+        """Capture one RGB frame per environment (for per_env video mode)."""
+        if not self._capture_cameras_per_env:
+            return []
+        self._update_vehicle_proxy_markers()
+        frames: list[np.ndarray | None] = []
+        for cam in self._capture_cameras_per_env:
+            cam.update(self.step_dt)
+            rgb = cam.data.output.get("rgb")
+            if rgb is None or rgb.numel() == 0:
+                frames.append(None)
+            else:
+                frames.append(rgb[0].detach().cpu().numpy().copy())
+        return frames
 
     def _overlay_vehicle_proxy_markers_2d(self, frame: np.ndarray) -> np.ndarray:
         """Draw color-coded oriented rectangles at vehicle positions on the captured frame."""
@@ -1466,10 +1914,16 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def _done_vehicle_root_pose(self, agent_idx: int, env_ids: torch.Tensor) -> torch.Tensor:
         root_pose = self._default_root_pose[agent_idx][env_ids].clone()
-        env_origins = self.scene.env_origins[env_ids]
-        root_pose[:, 0] = env_origins[:, 0] + 1000.0 + 40.0 * float(agent_idx)
-        root_pose[:, 1] = env_origins[:, 1] + 1000.0 + 25.0 * float(agent_idx)
-        root_pose[:, 2] = env_origins[:, 2] + 10.0
+        # Park done vehicles in a row just outside the grid boundary
+        if not hasattr(self, "_parking_row_x"):
+            all_origins = self.scene.env_origins  # (num_envs, 3)
+            spacing = float(self.cfg.scene.env_spacing)
+            self._parking_row_x = float(all_origins[:, 0].max().item()) + spacing + 5.0
+            self._parking_row_y_start = float(all_origins[:, 1].min().item())
+            self._parking_row_z = 0.5
+        root_pose[:, 0] = self._parking_row_x
+        root_pose[:, 1] = self._parking_row_y_start + 3.0 * float(agent_idx)
+        root_pose[:, 2] = self._parking_row_z
         return root_pose
 
     def _park_done_vehicle(self, agent_idx: int, env_ids: torch.Tensor) -> None:
@@ -1493,6 +1947,126 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def _reset_mode_name(self) -> str:
         return str(getattr(self.cfg, "reset_mode", "isaac_reset")).strip().lower().replace("-", "_")
+
+    def _apply_per_env_tire_friction(self) -> None:
+        """Set wheel contact-shape friction per-env from weather friction estimates.
+
+        Because every env shares a single PhysX ground plane whose material
+        cannot vary per-env, we instead set the **wheel** collision-shape
+        material on each vehicle.  The ground uses
+        ``friction_combine_mode="min"``, so the effective contact friction is
+        ``min(ground_μ, wheel_μ)``.  As long as the wheel μ is ≤ the ground μ
+        (true for any wet condition), the ``min`` picks the wheel value —
+        giving us per-env friction control.
+
+        For each env we read the Zhao et al. friction estimate (μ_static,
+        μ_dynamic) and write those values directly onto the wheel shapes.
+
+        In **friction_ruler_mode**, μ values come directly from the config
+        (``friction_ruler_mu_values``) instead of Zhao estimates.
+        """
+        # ── Friction ruler mode: direct μ override ──
+        if bool(self.cfg.friction_ruler_mode):
+            mu_values = self._friction_ruler_mu_values()
+            mu_static_per_env = [max(1e-3, v) for v in mu_values[:self.num_envs]]
+            # Use 80% of static for dynamic (typical ratio)
+            mu_dynamic_per_env = [0.8 * s for s in mu_static_per_env]
+        else:
+            specs = getattr(self, "_scene_factory_specs_by_env", None)
+            if not specs:
+                return
+
+            # Collect per-env friction estimates; skip if none have estimates
+            estimates = [getattr(s, "friction_estimate", None) for s in specs]
+            if all(e is None for e in estimates):
+                return
+
+            # Build per-env target friction (num_envs,)
+            # For envs without an estimate, use a high default so the ground
+            # material dominates via min().
+            DEFAULT_MU = 2.0  # effectively "don't limit"
+            mu_static_per_env = []
+            mu_dynamic_per_env = []
+            any_finite = False
+            for est in estimates:
+                if est is None:
+                    mu_static_per_env.append(DEFAULT_MU)
+                    mu_dynamic_per_env.append(DEFAULT_MU)
+                else:
+                    s = max(1.0e-3, float(est.mu_static))
+                    d = min(s, max(1.0e-3, float(est.mu_dynamic)))
+                    mu_static_per_env.append(s)
+                    mu_dynamic_per_env.append(d)
+                    if s < DEFAULT_MU - 0.01:
+                        any_finite = True
+
+            if not any_finite:
+                return
+
+        mu_s_t = torch.tensor(mu_static_per_env, dtype=torch.float32)   # (num_envs,)
+        mu_d_t = torch.tensor(mu_dynamic_per_env, dtype=torch.float32)  # (num_envs,)
+
+        modified_count = 0
+        for vehicle in self._vehicles:
+            view = vehicle.root_physx_view
+
+            # --- Discover which shape indices belong to wheel bodies ---
+            wheel_body_names = [
+                "front_left_wheel_link", "front_right_wheel_link",
+                "rear_left_wheel_link", "rear_right_wheel_link",
+            ]
+            wheel_body_ids, _ = vehicle.find_bodies(wheel_body_names)
+
+            # Build a map: body_id -> (start_shape_idx, end_shape_idx)
+            num_shapes_per_body = []
+            for link_path in view.link_paths[0]:
+                link_view = vehicle._physics_sim_view.create_rigid_body_view(link_path)
+                num_shapes_per_body.append(link_view.max_shapes)
+
+            wheel_shape_slices = []
+            for bid in wheel_body_ids:
+                start = sum(num_shapes_per_body[:bid])
+                end = start + num_shapes_per_body[bid]
+                wheel_shape_slices.append((start, end))
+
+            if not wheel_shape_slices:
+                continue
+
+            # --- Read current material, overwrite wheel shapes only ---
+            # material_properties shape: (num_envs, max_shapes, 3)
+            #   [:, :, 0] = static_friction
+            #   [:, :, 1] = dynamic_friction
+            #   [:, :, 2] = restitution
+            materials = view.get_material_properties()
+
+            for start, end in wheel_shape_slices:
+                materials[:, start:end, 0] = mu_s_t.unsqueeze(1)
+                materials[:, start:end, 1] = mu_d_t.unsqueeze(1)
+
+            all_env_ids = torch.arange(self.num_envs, dtype=torch.int32)
+            view.set_material_properties(materials, all_env_ids)
+            modified_count += 1
+
+            # ── Read-back verification ──
+            readback = view.get_material_properties()
+            for env_i in range(min(self.num_envs, 8)):
+                for start, end in wheel_shape_slices:
+                    rb_static = readback[env_i, start, 0].item()
+                    rb_dynamic = readback[env_i, start, 1].item()
+                    print(
+                        f"  [VERIFY] env={env_i}  wheel_shape={start}  "
+                        f"μ_static_SET={mu_static_per_env[env_i]:.4f}  μ_static_READ={rb_static:.4f}  "
+                        f"μ_dynamic_SET={mu_dynamic_per_env[env_i]:.4f}  μ_dynamic_READ={rb_dynamic:.4f}",
+                        flush=True,
+                    )
+
+        # Log summary
+        unique_mu = sorted(set(f"{s:.4f}" for s in mu_static_per_env))
+        print(
+            f"[INFO][SceneFactory] Applied per-env wheel friction to {modified_count} vehicle slots. "
+            f"Unique μ_static values: {unique_mu or ['(all dry)']}.",
+            flush=True,
+        )
 
     def _invincible_mode_enabled(self) -> bool:
         return bool(getattr(self.cfg, "invincible", False))
@@ -1544,6 +2118,137 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([floor_color])
         except Exception:
             pass
+
+    def _hide_vehicle_visuals(self, stage) -> None:
+        """Make USD vehicle visual meshes invisible so only proxy markers show."""
+        from pxr import Usd, UsdGeom
+        num_envs = self.num_envs
+        for env_idx in range(num_envs):
+            for agent_idx in range(len(self._agent_ids)):
+                vpath = f"/World/envs/env_{env_idx}/Vehicle_{agent_idx}"
+                root = stage.GetPrimAtPath(vpath)
+                if not root.IsValid():
+                    continue
+                for prim in Usd.PrimRange(root):
+                    pp = str(prim.GetPath())
+                    if "/visuals/" in pp:
+                        try:
+                            UsdGeom.Imageable(prim).MakeInvisible()
+                        except Exception:
+                            pass
+        print(f"[INFO][FrictionRuler] Hid USD vehicle visual meshes for {num_envs} envs.")
+
+    def _hide_road_type_visuals(self, stage, hidden_types: list[int]) -> None:
+        """Make road segment prims for specific Waymo types invisible in the render.
+
+        Road segments are under .../SceneFactoryWorlds/world_000/Road/Type_XX/.
+        This hides them visually while keeping them in the scene for observations/physics.
+        """
+        from pxr import Usd, UsdGeom
+        hidden_set = set(int(t) for t in hidden_types)
+        count = 0
+        for env_idx in range(self.num_envs):
+            for t in hidden_set:
+                type_path = f"/World/envs/env_{env_idx}/SceneFactoryWorlds/world_000/Road/Type_{t:02d}"
+                root = stage.GetPrimAtPath(type_path)
+                if not root.IsValid():
+                    continue
+                for prim in Usd.PrimRange(root):
+                    try:
+                        UsdGeom.Imageable(prim).MakeInvisible()
+                        count += 1
+                    except Exception:
+                        pass
+        print(f"[INFO][SceneFactory] Hid {count} road prims for types {sorted(hidden_set)}.")
+
+    def _build_friction_ruler_visuals(self, stage) -> None:
+        """Spawn ruler lines + distance/friction labels on the ground per env."""
+        from pxr import Gf, UsdGeom, Sdf
+
+        env_origins = self.scene.env_origins.cpu().numpy()  # (num_envs, 3)
+        mu_values = self._friction_ruler_mu_values()
+        labels_raw = str(self.cfg.friction_ruler_labels).strip()
+        labels = [s.strip() for s in labels_raw.split(",")] if labels_raw else [f"μ={mu:.2f}" for mu in mu_values]
+
+        ruler_length_m = 50.0   # how far ahead to draw ruler
+        ruler_width_m = 0.15    # line width
+        lane_width_m = 4.0      # visual lane width for each env
+        line_height = 0.005     # just above ground
+
+        for env_i in range(self.num_envs):
+            ox, oy, oz = float(env_origins[env_i, 0]), float(env_origins[env_i, 1]), float(env_origins[env_i, 2])
+            env_root = f"/World/envs/env_{env_i}/FrictionRuler"
+
+            # --- Draw horizontal ruler lines every 1 meter ---
+            for dist_m in range(0, int(ruler_length_m) + 1):
+                is_major = (dist_m % 5 == 0)
+                line_w = ruler_width_m * (2.0 if is_major else 1.0)
+                color = Gf.Vec3f(1.0, 1.0, 1.0) if is_major else Gf.Vec3f(0.6, 0.6, 0.6)
+
+                line_path = f"{env_root}/line_{dist_m}"
+                cube = UsdGeom.Cube.Define(stage, line_path)
+                cube.GetSizeAttr().Set(1.0)
+                api = UsdGeom.XformCommonAPI(cube)
+                # Lines are perpendicular to Y (driving direction), at local y=dist_m
+                api.SetTranslate(Gf.Vec3d(0.0, float(dist_m), line_height))
+                api.SetScale(Gf.Vec3f(lane_width_m, line_w, 0.002))
+                try:
+                    UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([color])
+                except Exception:
+                    pass
+
+            # --- Distance labels at every 5m ---
+            for dist_m in range(0, int(ruler_length_m) + 1, 5):
+                label_path = f"{env_root}/dist_label_{dist_m}"
+                # Use a small colored cube as a label marker (no text rendering in PhysX)
+                # Put a distinct color block at left edge
+                cube = UsdGeom.Cube.Define(stage, label_path)
+                cube.GetSizeAttr().Set(1.0)
+                api = UsdGeom.XformCommonAPI(cube)
+                api.SetTranslate(Gf.Vec3d(-lane_width_m / 2 - 0.8, float(dist_m), line_height + 0.01))
+                api.SetScale(Gf.Vec3f(1.2, 0.5, 0.002))
+                # Color encodes distance: gradient from green (0m) to red (50m)
+                frac = dist_m / max(ruler_length_m, 1.0)
+                label_color = Gf.Vec3f(frac, 1.0 - frac, 0.0)
+                try:
+                    UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([label_color])
+                except Exception:
+                    pass
+
+            # --- Friction label: colored block at start to identify env ---
+            mu = mu_values[env_i] if env_i < len(mu_values) else 1.0
+            label_path = f"{env_root}/friction_label"
+            cube = UsdGeom.Cube.Define(stage, label_path)
+            cube.GetSizeAttr().Set(1.0)
+            api = UsdGeom.XformCommonAPI(cube)
+            api.SetTranslate(Gf.Vec3d(lane_width_m / 2 + 1.0, 0.0, line_height + 0.01))
+            api.SetScale(Gf.Vec3f(1.5, 1.5, 0.002))
+            # Blue = high friction, Red = low friction
+            mu_frac = min(1.0, max(0.0, mu / 1.2))
+            friction_color = Gf.Vec3f(1.0 - mu_frac, 0.2, mu_frac)
+            try:
+                UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([friction_color])
+            except Exception:
+                pass
+
+        mu_str = ", ".join(f"env{i}={mu_values[i]:.3f}" for i in range(min(self.num_envs, len(mu_values))))
+        label_str = ", ".join(labels[:self.num_envs])
+        print(
+            f"[INFO][FrictionRuler] Built ruler visuals for {self.num_envs} envs. "
+            f"μ: [{mu_str}]. Labels: [{label_str}].",
+            flush=True,
+        )
+
+    def _friction_ruler_mu_values(self) -> list[float]:
+        """Parse comma-separated friction_ruler_mu_values config into a list of floats."""
+        raw = str(self.cfg.friction_ruler_mu_values).strip()
+        if not raw:
+            return [1.0] * self.num_envs
+        values = [float(x.strip()) for x in raw.split(",") if x.strip()]
+        # Extend to num_envs if fewer values provided
+        while len(values) < self.num_envs:
+            values.append(values[-1] if values else 1.0)
+        return values
 
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]):
         timing_start = perf_counter()
@@ -2165,7 +2870,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                     self._vehicles[agent_idx].data.root_lin_vel_b[:, :2] / 10.0,
                 ]
                 if bool(self.cfg.obs_weather_context_enable):
-                    obs_parts.append(self._weather_context)
+                    if bool(self.cfg.obs_weather_context_blind):
+                        obs_parts.append(self._weather_context_blind_const)
+                    else:
+                        obs_parts.append(self._weather_context)
                 if bool(self.cfg.obs_road_points_enable):
                     self._sync_timing_device()
                     obs_road_start = perf_counter()
@@ -3331,43 +4039,53 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
                         )
                     goal_pos_w[valid_rows] = env_origins[valid_rows] + goal_local
             else:
-                formation_angle = phase + (2.0 * math.pi * agent_idx / max(1, self._num_agents))
-                spawn_jitter = sample_uniform(
-                    -float(self.cfg.agent_spawn_jitter_m),
-                    float(self.cfg.agent_spawn_jitter_m),
-                    (num_resets, 2),
-                    self.device,
-                )
-                spawn_offset = torch.stack(
-                    [
-                        float(self.cfg.agent_spawn_circle_radius_m) * torch.cos(formation_angle),
-                        float(self.cfg.agent_spawn_circle_radius_m) * torch.sin(formation_angle),
-                    ],
-                    dim=-1,
-                )
-                root_pose[:, 0:2] = env_origins[:, 0:2] + shared_world_offset + spawn_offset + spawn_jitter
-                root_pose[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
-                yaw = formation_angle + math.pi + sample_uniform(
-                    -float(self.cfg.spawn_yaw_noise_rad),
-                    float(self.cfg.spawn_yaw_noise_rad),
-                    (num_resets,),
-                    self.device,
-                )
-                goal_heading = formation_angle + math.pi + sample_uniform(
-                    -float(self.cfg.goal_heading_noise_rad),
-                    float(self.cfg.goal_heading_noise_rad),
-                    (num_resets,),
-                    self.device,
-                )
-                env_goal_offset = torch.stack(
-                    [
-                        goal_radius * torch.cos(goal_heading),
-                        goal_radius * torch.sin(goal_heading),
-                        torch.full_like(goal_radius, float(self.cfg.goal_height_m)),
-                    ],
-                    dim=-1,
-                )
-                goal_pos_w = env_origins + env_goal_offset
+                if bool(self.cfg.friction_ruler_mode):
+                    # Friction ruler: spawn at env origin, facing +Y (north)
+                    root_pose[:, 0] = env_origins[:, 0]
+                    root_pose[:, 1] = env_origins[:, 1]
+                    root_pose[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
+                    yaw = torch.full((num_resets,), math.pi / 2.0, device=self.device)
+                    goal_pos_w[:, 0] = env_origins[:, 0]
+                    goal_pos_w[:, 1] = env_origins[:, 1] + 50.0
+                    goal_pos_w[:, 2] = env_origins[:, 2] + float(self.cfg.goal_height_m)
+                else:
+                    formation_angle = phase + (2.0 * math.pi * agent_idx / max(1, self._num_agents))
+                    spawn_jitter = sample_uniform(
+                        -float(self.cfg.agent_spawn_jitter_m),
+                        float(self.cfg.agent_spawn_jitter_m),
+                        (num_resets, 2),
+                        self.device,
+                    )
+                    spawn_offset = torch.stack(
+                        [
+                            float(self.cfg.agent_spawn_circle_radius_m) * torch.cos(formation_angle),
+                            float(self.cfg.agent_spawn_circle_radius_m) * torch.sin(formation_angle),
+                        ],
+                        dim=-1,
+                    )
+                    root_pose[:, 0:2] = env_origins[:, 0:2] + shared_world_offset + spawn_offset + spawn_jitter
+                    root_pose[:, 2] = env_origins[:, 2] + float(self.cfg.spawn_height_m)
+                    yaw = formation_angle + math.pi + sample_uniform(
+                        -float(self.cfg.spawn_yaw_noise_rad),
+                        float(self.cfg.spawn_yaw_noise_rad),
+                        (num_resets,),
+                        self.device,
+                    )
+                    goal_heading = formation_angle + math.pi + sample_uniform(
+                        -float(self.cfg.goal_heading_noise_rad),
+                        float(self.cfg.goal_heading_noise_rad),
+                        (num_resets,),
+                        self.device,
+                    )
+                    env_goal_offset = torch.stack(
+                        [
+                            goal_radius * torch.cos(goal_heading),
+                            goal_radius * torch.sin(goal_heading),
+                            torch.full_like(goal_radius, float(self.cfg.goal_height_m)),
+                        ],
+                        dim=-1,
+                    )
+                    goal_pos_w = env_origins + env_goal_offset
             self._sync_timing_device()
             reset_pose_spawn_ms += (perf_counter() - reset_pose_spawn_start) * 1000.0
 
@@ -3650,9 +4368,10 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
-            if not hasattr(self, "_goal_marker"):
-                self._goal_marker = build_goal_beacon_marker("/Visuals/MultiGoalMarker")
-            self._goal_marker.set_visibility(True)
+            if not bool(self.cfg.hide_goal_markers):
+                if not hasattr(self, "_goal_marker"):
+                    self._goal_marker = build_goal_beacon_marker("/Visuals/MultiGoalMarker")
+                self._goal_marker.set_visibility(True)
             if bool(self.cfg.vehicle_proxy_marker_enable):
                 if self._vehicle_proxy_marker is None:
                     self._vehicle_proxy_marker = _build_vehicle_proxy_marker(
@@ -3687,23 +4406,7 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             marker_positions, marker_indices = goal_beacon_visualization(goal_positions)
             self._goal_marker.visualize(marker_positions, marker_indices=marker_indices)
         if self._vehicle_proxy_marker is not None:
-            positions = []
-            orientations = []
-            indices = []
-            z_offset = float(self.cfg.vehicle_proxy_marker_z_offset_m)
-            for agent_idx, vehicle in enumerate(self._vehicles):
-                pos_w = vehicle.data.root_pos_w.clone()
-                pos_w[:, 2] += z_offset
-                positions.append(pos_w)
-                orientations.append(vehicle.data.root_quat_w.clone())
-                indices.append(
-                    torch.full((self.num_envs,), agent_idx, dtype=torch.int32, device=self.device)
-                )
-            self._vehicle_proxy_marker.visualize(
-                translations=torch.cat(positions, dim=0),
-                orientations=torch.cat(orientations, dim=0),
-                marker_indices=torch.cat(indices, dim=0),
-            )
+            self._update_vehicle_proxy_markers()
         if hasattr(self, "_collision_test_vehicle_marker"):
             positions = []
             indices = []

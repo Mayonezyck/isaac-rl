@@ -173,6 +173,37 @@ def _prompt_bool(label: str, default: bool) -> bool:
         print("  Enter y or n.")
 
 
+# ---------------------------------------------------------------------------
+# Friction randomization
+# ---------------------------------------------------------------------------
+# Each entry: (weight, road_type, precip_type, precip_intensity_mmph, water_film_mm)
+# Weights are relative; they will be normalised to sum to 1.0.
+# Roughly: 50% dry AC, 20% light-rain AC, 15% moderate-rain AC,
+#           10% wet SMA, 5% heavy-rain OGFC.
+_FRICTION_DISTRIBUTION: list[tuple[float, str, str, float, float]] = [
+    (0.50, "AC",   "clear", 0.0,  0.00),
+    (0.20, "AC",   "rain",  2.0,  0.30),
+    (0.15, "AC",   "rain",  5.0,  1.00),
+    (0.10, "SMA",  "rain",  5.0,  2.00),
+    (0.05, "OGFC", "rain", 10.0,  4.00),
+]
+
+
+def _sample_friction_cfg(rng: np.random.Generator) -> dict[str, Any]:
+    """Draw one friction config from _FRICTION_DISTRIBUTION."""
+    weights = np.array([w for w, *_ in _FRICTION_DISTRIBUTION], dtype=float)
+    weights /= weights.sum()
+    idx = int(rng.choice(len(_FRICTION_DISTRIBUTION), p=weights))
+    _, road_type, precip_type, precip_intensity_mmph, water_film_mm = _FRICTION_DISTRIBUTION[idx]
+    return {
+        "road_type": road_type,
+        "precip_type": precip_type,
+        "precip_intensity_mmph": float(precip_intensity_mmph),
+        "water_film_mm": float(water_film_mm),
+    }
+
+
+
 def _infer_grid_cols(world_count: int) -> int:
     return max(1, int(math.ceil(math.sqrt(float(max(world_count, 1))))))
 
@@ -705,6 +736,7 @@ def _apply_common_values(
     min_points_for_reduction: int,
     friction_cfg: Mapping[str, Any],
     assignments: list[dict[str, Any]],
+    randomize_friction: bool = False,
 ) -> dict[str, Any]:
     out = copy.deepcopy(cfg)
     rows = _infer_rows(world_count, grid_cols)
@@ -754,9 +786,12 @@ def _apply_common_values(
     if not isinstance(friction_values, list) or not friction_values:
         ground_cfg["friction_values"] = [0.50]
 
-    # Stamp friction defaults into assignments even if the template used mixed friction before.
-    for entry in out["world"]["assignments"]:
-        entry["friction"] = dict(friction_cfg)
+    # Stamp friction into assignments.
+    # When randomize_friction=True the assignments already carry per-world friction
+    # drawn from _FRICTION_DISTRIBUTION; do not overwrite them.
+    if not randomize_friction:
+        for entry in out["world"]["assignments"]:
+            entry["friction"] = dict(friction_cfg)
 
     return out
 
@@ -822,6 +857,13 @@ def _prompt_settings(template_cfg: Mapping[str, Any], scene_json_dir_override: s
         "precip_intensity_mmph": _prompt_float("  precip_intensity_mmph", 0.0),
         "water_film_mm": _prompt_float("  water_film_mm", 0.0),
     }
+    randomize_friction = _prompt_bool(
+        "Randomize friction per world (draws from built-in AC/SMA/OGFC distribution)",
+        False,
+    )
+    friction_random_seed = None
+    if randomize_friction:
+        friction_random_seed = _prompt_int("  Friction randomization seed", 42, minimum=0)
 
     return {
         "base_name": base_name,
@@ -847,6 +889,8 @@ def _prompt_settings(template_cfg: Mapping[str, Any], scene_json_dir_override: s
         "flatten_road_z": flatten_road_z,
         "road_render_mode": road_render_mode,
         "friction_cfg": friction_cfg,
+        "randomize_friction": randomize_friction,
+        "friction_random_seed": friction_random_seed,
     }
 
 
@@ -985,7 +1029,15 @@ def main() -> None:
             simulation_app.close()
         raise RuntimeError("No training scenes were selected.")
 
-    train_assignments = [_make_assignment(path.name, settings["friction_cfg"]) for path in train_selected]
+    _randomize = bool(settings.get("randomize_friction", False))
+    _seed = settings.get("friction_random_seed") or 42
+    _rng = np.random.default_rng(int(_seed))
+    if _randomize:
+        train_assignments = [
+            _make_assignment(path.name, _sample_friction_cfg(_rng)) for path in train_selected
+        ]
+    else:
+        train_assignments = [_make_assignment(path.name, settings["friction_cfg"]) for path in train_selected]
     train_cfg = _apply_common_values(
         template_cfg,
         scene_json_dir=settings["scene_json_dir"],
@@ -1011,6 +1063,7 @@ def main() -> None:
         min_points_for_reduction=settings["min_points_for_reduction"],
         friction_cfg=settings["friction_cfg"],
         assignments=train_assignments,
+        randomize_friction=_randomize,
     )
 
     output_dir = Path(args_cli.output_dir).expanduser().resolve()
@@ -1077,6 +1130,7 @@ def main() -> None:
             summary_payload["test_selected"] = []
             summary_payload["test_rejected"] = sorted(test_rejected)
         else:
+            # Test configs always use dry/uniform friction so evaluation results are comparable.
             test_assignments = [_make_assignment(path.name, settings["friction_cfg"]) for path in test_selected]
             test_cfg = _apply_common_values(
                 template_cfg,
@@ -1103,6 +1157,7 @@ def main() -> None:
                 min_points_for_reduction=settings["min_points_for_reduction"],
                 friction_cfg=settings["friction_cfg"],
                 assignments=test_assignments,
+                randomize_friction=False,  # eval always uniform
             )
             test_path = output_dir / f"{settings['base_name']}_test.yaml"
             _write_yaml(test_path, test_cfg)

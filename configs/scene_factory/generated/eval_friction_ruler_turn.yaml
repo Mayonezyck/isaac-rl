@@ -1,0 +1,71 @@
+# Friction ruler eval config – straight then sharp turn.
+# 4 envs × 1 car, bare flat ground, different friction per env.
+# Full throttle straight for 60 steps, then full throttle + full steer.
+#
+# Run:
+#   PYTHONPATH=/home/yz8733/Github/isaac-rl python -u src/train_student_vehicle_goal_multiagent_rsl_rl.py \
+#     --config configs/scene_factory/generated/eval_friction_ruler_turn.yaml \
+#     --test_mode friction_ruler --invincible --headless --enable_cameras \
+#     --video --video_view_mode per_env --no-use_fabric
+env:
+  num_envs: 4
+  num_agents_per_env: 1
+  observation_mode: choco_reference
+  env_spacing: 400.0
+  spawn_height_m: 1.2
+  spawn_yaw_noise_rad: 0.0
+  ground_mode: plane
+  use_scene_factory_roads: false
+  reset_mode: teleport_only
+  start_radius_m: 0.0
+  agent_spawn_circle_radius_m: 0.0
+  agent_spawn_jitter_m: 0.0
+  episode_length_s: 30.0
+  goal_radius_min_m: 5.0
+  goal_radius_max_m: 30.0
+  goal_reached_threshold_m: 3.0
+  fall_height_threshold_m: 0.0
+  bad_tilt_gravity_threshold: -0.15
+  max_distance_from_origin_m: 200.0
+  agent_neighbor_obs_scale_m: 100.0
+  agent_collision_warmup_steps: 24
+  replicate_physics: false
+  clone_in_fabric: 'false'
+  # ── Friction ruler config ──
+  friction_ruler_mode: true
+  # Per-env μ values: dry=1.1, wet=0.6, icy=0.3, black ice=0.1
+  friction_ruler_mu_values: "1.1,0.6,0.3,0.1"
+  friction_ruler_labels: "Dry μ=1.1,Wet μ=0.6,Icy μ=0.3,Black ice μ=0.1"
+  # Full throttle straight for 60 steps, then full throttle + full right steer
+  action_schedule: "0:1.0,0.0,0.0 60:1.0,1.0,0.0"
+  debug_vis: true
+scene_factory:
+  config_path: configs/scene_factory/generated/scene_factory_friction_ruler.yaml
+  world_index: 0
+  world_selection_mode: sequential
+test:
+  random_od: false
+observation:
+  weather_context_enable: false
+  road_points_enable: false
+  road_points_k: 0
+  road_points_radius_m: 0.0
+  road_points_type_norm: 20.0
+  road_points_mode: road_running
+  road_points_include_dirs: false
+  neighbor_enable: false
+  neighbor_k: 0
+  neighbor_include_ttc: false
+  neighbor_include_index: false
+  neighbor_ttc_max_s: 10.0
+  timing_print_enable: false
+video:
+  enabled: true
+  resolution:
+  - 960
+  - 540
+  fps: 30
+  frame_length: 900
+  vehicle_proxy_markers: true
+physics:
+  replicate_physics: false

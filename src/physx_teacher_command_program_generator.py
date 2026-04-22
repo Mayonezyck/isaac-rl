@@ -139,6 +139,89 @@ def build_surface_transition_s_program(
     )
 
 
+def build_ramp_throttle_program(
+    *,
+    idle_s: float = 1.0,
+    ramp_s: float = 6.0,
+    sample_dt_s: float = 0.2,
+    throttle_start: float = 0.0,
+    throttle_end: float = 1.0,
+    steer: float = 0.0,
+    brake_s: float = 2.0,
+    brake: float = 0.65,
+) -> CommandProgram:
+    """Linear throttle ramp from throttle_start to throttle_end."""
+    segments = [CommandSegment(float(idle_s), VehicleCommand(0.0, 0.0, 0.0), "idle")]
+    n_samples = max(1, int(math.ceil(float(ramp_s) / float(sample_dt_s))))
+    for i in range(n_samples):
+        frac = i / max(1, n_samples - 1)
+        throttle = float(throttle_start) + frac * (float(throttle_end) - float(throttle_start))
+        dur = min(float(sample_dt_s), float(ramp_s) - i * float(sample_dt_s))
+        if dur <= 0:
+            break
+        segments.append(CommandSegment(dur, VehicleCommand(throttle, float(steer), 0.0), f"ramp_{i:04d}"))
+    segments.append(CommandSegment(float(brake_s), VehicleCommand(0.0, 0.0, float(brake)), "service_brake"))
+    return CommandProgram(segments)
+
+
+def build_trail_brake_program(
+    *,
+    idle_s: float = 1.0,
+    accel_s: float = 4.0,
+    trail_s: float = 3.0,
+    sample_dt_s: float = 0.2,
+    throttle: float = 0.80,
+    steer: float = 0.30,
+    brake_peak: float = 0.80,
+    coast_s: float = 1.0,
+) -> CommandProgram:
+    """Accelerate, then simultaneously apply steering while ramping brake and reducing throttle."""
+    segments = [
+        CommandSegment(float(idle_s), VehicleCommand(0.0, 0.0, 0.0), "idle"),
+        CommandSegment(float(accel_s), VehicleCommand(float(throttle), 0.0, 0.0), "straight_accel"),
+    ]
+    n_samples = max(1, int(math.ceil(float(trail_s) / float(sample_dt_s))))
+    for i in range(n_samples):
+        frac = i / max(1, n_samples - 1)
+        t = float(throttle) * (1.0 - frac)
+        b = float(brake_peak) * frac
+        s = float(steer) * min(1.0, frac * 2.0)  # steer ramps in first half
+        dur = min(float(sample_dt_s), float(trail_s) - i * float(sample_dt_s))
+        if dur <= 0:
+            break
+        segments.append(CommandSegment(dur, VehicleCommand(t, s, b), f"trail_{i:04d}"))
+    segments.append(CommandSegment(float(coast_s), VehicleCommand(0.0, 0.0, 0.0), "coast"))
+    return CommandProgram(segments)
+
+
+def build_chirp_steer_program(
+    *,
+    idle_s: float = 1.0,
+    run_s: float = 8.0,
+    sample_dt_s: float = 0.05,
+    throttle: float = 0.50,
+    amplitude: float = 0.30,
+    freq_start_hz: float = 0.2,
+    freq_end_hz: float = 2.0,
+    brake_s: float = 1.5,
+    brake: float = 0.65,
+) -> CommandProgram:
+    """Chirp (frequency sweep) steering for broad frequency-response identification."""
+    segments = [CommandSegment(float(idle_s), VehicleCommand(0.0, 0.0, 0.0), "idle")]
+    n_samples = max(1, int(math.ceil(float(run_s) / float(sample_dt_s))))
+    for i in range(n_samples):
+        t_s = i * float(sample_dt_s)
+        dur = min(float(sample_dt_s), float(run_s) - t_s)
+        if dur <= 0:
+            break
+        frac = t_s / float(run_s)
+        freq = float(freq_start_hz) + frac * (float(freq_end_hz) - float(freq_start_hz))
+        steer_val = float(amplitude) * math.sin(2.0 * math.pi * freq * t_s)
+        segments.append(CommandSegment(dur, VehicleCommand(float(throttle), steer_val, 0.0), f"chirp_{i:04d}"))
+    segments.append(CommandSegment(float(brake_s), VehicleCommand(0.0, 0.0, float(brake)), "service_brake"))
+    return CommandProgram(segments)
+
+
 def _add_shared_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-json", type=str, required=True, help="Where to write the generated command program JSON.")
 
@@ -213,6 +296,9 @@ def build_program_from_preset(preset: str, **kwargs: Any) -> CommandProgram:
         "constant-steer": build_constant_steer_program,
         "sine-steer": build_sine_steer_program,
         "surface-transition-s": build_surface_transition_s_program,
+        "ramp-throttle": build_ramp_throttle_program,
+        "trail-brake": build_trail_brake_program,
+        "chirp-steer": build_chirp_steer_program,
     }
     if str(preset) not in builders:
         raise KeyError(f"Unknown command-program preset: {preset}")

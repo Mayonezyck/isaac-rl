@@ -31,8 +31,9 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_from_euler_xyz, sample_uniform, subtract_frame_transforms
 
 
-DEFAULT_STUDENT_VEHICLE_USD = "artifacts/student_vehicle_assets/vehicle_only_smoke/student_fwd_vehicle.usd"
+DEFAULT_STUDENT_VEHICLE_USD = "artifacts/student_vehicle_assets/vehicle_student/student_fwd_vehicle.usd"
 _DEFAULT_TUNABLE_CONFIG_CANDIDATES = (
+    "artifacts/student_vehicle_sysid/comprehensive_fwd_v1_cem_v4/best_config.json",
     "artifacts/student_vehicle_sysid/fwd_v1_staged_cem_anchor_overnight/best_config.json",
     "artifacts/student_vehicle_sysid/fwd_v1_staged_cem_big/best_config.json",
 )

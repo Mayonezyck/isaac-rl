@@ -1075,11 +1075,28 @@ def _select_dataset_teachers(dataset: TeacherDataset, names: Sequence[str]) -> l
     return selected
 
 
+def _select_dataset_teachers_by_prefix(dataset: TeacherDataset, prefixes: Sequence[str]) -> list[TeacherRollout]:
+    """Select all rollouts whose name starts with any of the given prefixes."""
+    selected = []
+    seen: set[str] = set()
+    for prefix in prefixes:
+        for teacher in dataset.rollouts:
+            if teacher.name.startswith(prefix) and teacher.name not in seen:
+                selected.append(teacher)
+                seen.add(teacher.name)
+    return selected
+
+
 def _select_report_teachers(dataset: TeacherDataset) -> list[TeacherRollout]:
     priority = ["straight_accel_brake", "step_steer_left", "sine_steer"]
     selected = _select_dataset_teachers(dataset, priority)
     if len(selected) >= 3:
         return selected[:3]
+    # Prefix fallback for comprehensive suites
+    if not selected:
+        selected = _select_dataset_teachers_by_prefix(dataset, ["straight_accel_t", "step_steer_left_", "sine_steer_"])
+        if len(selected) >= 3:
+            return selected[:3]
     seen = {teacher.name for teacher in selected}
     for teacher in dataset.rollouts:
         if teacher.name in seen:
@@ -1111,11 +1128,18 @@ def _allocate_stage_trials(total_trials: int, num_stages: int) -> list[int]:
 
 
 def build_staged_search_plan(dataset: TeacherDataset, total_random_trials: int) -> list[SearchStage]:
+    # Exact-name matches (legacy suite) with prefix fallback (comprehensive suite)
     straight_rollouts = _select_dataset_teachers(dataset, ["straight_accel_brake"])
+    if not straight_rollouts:
+        straight_rollouts = _select_dataset_teachers_by_prefix(dataset, ["straight_accel_", "straight_brake_", "ramp_throttle_"])
     steering_rollouts = _select_dataset_teachers(
         dataset,
         ["step_steer_left", "step_steer_right", "constant_steer_left", "constant_steer_right", "sine_steer"],
     )
+    if not steering_rollouts:
+        steering_rollouts = _select_dataset_teachers_by_prefix(
+            dataset, ["step_steer_", "const_steer_", "sine_steer_", "chirp_steer_", "trail_brake_"]
+        )
     surface_rollouts = _select_dataset_teachers(dataset, ["surface_transition_s"])
     refinement_rollouts = list(dataset.rollouts)
 
