@@ -106,7 +106,7 @@ GPUDrive~\cite{kazemkhani_gpudrive_2025} (ICLR 2025) reports a peak of 2.3\,M ag
 When restricted to \emph{controlled} agents---i.e., those with non-trivial goals---the effective rate drops to $\sim$200\,K CASPS due to the high fraction of parked or near-goal vehicles in randomly sampled Waymo scenes (mean $\sim$10.8 controllable agents per scene out of up to 128 agent slots).
 During end-to-end PPO training the authors report 200\,K--500\,K CASPS depending on hardware and observation configuration.
 Nocturne~\cite{vinitsky_nocturne_2022} (NeurIPS 2022), a CPU-based C++ simulator with a kinematic model, achieves $\sim$15\,K ASPS on 16 CPU cores.
-Waymax~\cite{gulino_waymax_2023} (NeurIPS 2024), a JAX-based simulator, supports GPU acceleration but encountered out-of-memory errors beyond 16 parallel environments in the GPUDrive authors' benchmarks, so we do not list a peak throughput.
+Waymax~\cite{gulino_waymax_2023} (NeurIPS 2024), a JAX-based simulator, supports full GPU vectorisation via \texttt{jax.vmap}/\texttt{jit}. We benchmarked Waymax on the same RTX PRO 6000 at 64 parallel scenes $\times$ 16 agent slots---matching SceneFactory's world count---using \texttt{DeltaGlobal} kinematic dynamics, a scripted constant-speed actor, and a 350-point per-agent road-geometry observation. Scenarios were drawn from a real WOMD training shard (455 unique scenes), cycling through four distinct preloaded batches to avoid cache artifacts. Under this configuration Waymax achieves $\sim$64\,M CASPS$^\dagger$. The $\sim$3{,}300$\times$ gap relative to SceneFactory reflects the difference in per-step cost: Waymax's kinematic step is a single trigonometric integration, whereas SceneFactory runs a 10-DOF PhysX articulated-body solver at 120\,Hz plus a PPO policy forward pass.
 
 SceneFactory operates at a lower absolute throughput than GPUDrive because each agent is a 10-DOF articulated rigid body simulated by the PhysX 5 solver at 120\,Hz (four physics sub-steps per 30\,Hz control tick).
 The comparison is not apples-to-apples: the physics fidelity that makes SceneFactory useful for sim-to-real transfer---tire slip, suspension dynamics, inertial coupling---is precisely what makes it slower than a kinematic model.
@@ -128,7 +128,8 @@ SceneFactory exposes a \texttt{num\_worlds} scaling dimension that MetaDrive's a
 All kinematic simulators use simplified vehicle dynamics (no rigid-body contact, no tire model).
 MetaDrive and SceneFactory both use full rigid-body physics engines (Bullet and PhysX~5, respectively).
 ASPS = agent steps per second (all agents, including parked); CASPS = controlled agent steps per second (policy-active agents only).
-GPUDrive and Nocturne numbers are taken from~\cite{kazemkhani_gpudrive_2025}; MetaDrive and SceneFactory numbers are measured on our RTX~PRO~6000 hardware.
+GPUDrive and Nocturne numbers are taken from~\cite{kazemkhani_gpudrive_2025}; Waymax, MetaDrive and SceneFactory numbers are measured on our RTX~PRO~6000 hardware.
+$^\dagger$Waymax CASPS uses a scripted constant-speed actor with kinematic dynamics (no neural network, no rigid-body physics); SceneFactory CASPS is measured during live PPO training with full PhysX articulated-body dynamics.
 MetaDrive's per-scene agent count is bounded by spawn-road geometry ($\leq 40$); it has no multi-world parallelism axis.}
 \label{tab:cross_simulator}
 \small
@@ -142,6 +143,8 @@ GPUDrive (training)
   & Kinematic bicycle & A100 80\,GB & CASPS & 200K--500K \\
 Nocturne~\cite{vinitsky_nocturne_2022}
   & Kinematic & CPU 16 cores & ASPS & 15{,}000 \\
+Waymax~\cite{gulino_waymax_2023}
+  & Kinematic bicycle & RTX PRO 6000 & CASPS$^\dagger$ & 64{,}338{,}897 \\
 \midrule
 MetaDrive~\cite{li2022metadrive} (8 agents, peak)
   & Bullet rigid body & RTX PRO 6000 & CASPS & 1{,}390 \\
@@ -366,6 +369,114 @@ This is critical for scalability---the approach can ingest thousands of scenes w
 % - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 % ---------------------------------------------------------------
+\subsection{Ablation: Does Friction Awareness Matter?}
+\label{sec:ablation_friction}
+% ---------------------------------------------------------------
+
+SceneFactory exposes a physics-based weather-to-friction module (\S\ref{sec:weather_friction}) that computes per-world tire--pavement friction coefficients and encodes them into the policy observation.
+A natural question is whether this friction-aware training is actually necessary: does a policy trained without any friction variation---assuming dry asphalt throughout---suffer a meaningful performance drop when deployed on wet roads?
+To answer this, we compare two policies that differ \emph{only} in their friction training regime:
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item \textbf{v7 (friction-aware):} Trained with per-world weather variation (10\% of worlds assigned a wet surface condition drawn uniformly from SMA, AC, and OGFC road types at varying water film thicknesses).
+        The policy receives a 4-element weather context vector $[f_\text{dry}, f_\text{SMA}, f_\text{AC}, f_\text{OGFC}]$ encoding the current surface type; the friction coefficient is embedded into the observation at each step.
+        Checkpoint: \texttt{model\_600} ($\sim$314M environment steps).
+  \item \textbf{v8 (friction-blind):} Trained exclusively on dry asphalt with no weather variation.
+        The weather context observation is held constant at the dry-surface encoding $[0,1,0,0]$ throughout training and evaluation.
+        Only the underlying PhysX friction coefficient changes at evaluation time; the policy receives no signal about surface conditions.
+        Checkpoint: \texttt{model\_200} ($\sim$105M environment steps; \chattodo{update to final converged checkpoint}).
+\end{itemize}
+
+Both models use the same sysid4 vehicle asset (\texttt{comprehensive\_fwd\_v1\_cem\_v4}), the same reward function (v8-fastgoal), the same 256-world random scene pool, and the same PPO hyperparameters.
+The only difference is the friction training distribution and whether the weather context observation is live or fixed.
+
+\paragraph{Test configurations.}
+Naive evaluation with random friction assignment confounds surface difficulty with scene geometry difficulty: some scenes draw dry asphalt and inflate the success rate regardless of the policy's friction handling.
+To isolate the friction variable, we evaluate all conditions on the same 64 held-out test scenes under four \emph{controlled} surface assignments:
+
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Hard rain, original OD.}
+        All 64 scenes assigned SMA road surface with 2.0\,mm water film ($\mu_\text{static} \approx 0.55$, vs.\ 1.10 for dry AC).
+        Dataset-extracted origin--destination pairs (variable agent counts per scene).
+        Purpose: isolate friction handling under challenging but realistic wet conditions.
+  \item \textbf{Dry asphalt, original OD.}
+        All 64 scenes assigned dry asphalt ($\mu_\text{static} \approx 1.10$).
+        Dataset-extracted OD pairs.
+        Purpose: verify that friction training does not degrade nominal dry-road performance.
+  \item \textbf{Dry asphalt, random OD.}
+        All 64 scenes, dry asphalt, with OD pairs re-sampled uniformly at 10--100\,m travel distance (1{,}024 agents, all slots filled).
+        Purpose: controlled-agent-count comparison on familiar surface conditions.
+  \item \textbf{Hard rain, random OD.}
+        All 64 scenes, SMA + 2.0\,mm water film, with random OD at 10--100\,m (1{,}024 agents).
+        Purpose: full friction stress test with balanced agent counts.
+\end{enumerate}
+
+All evaluations use invincible mode, a 50\,s episode budget, and a 3.0\,m goal threshold.
+For conditions using original OD pairs, v7 receives the live SMA/2\,mm weather encoding; v8 receives the fixed dry encoding $[0,1,0,0]$ (its training distribution), so that only the PhysX friction is out-of-distribution for v8.
+For dry-asphalt conditions, both models receive the dry encoding, keeping v8 fully in-distribution.
+
+Safety is measured by two additional metrics logged per agent step: \emph{mean TTC} (average time-to-collision with the nearest neighbor over the episode) and \emph{low-TTC fraction} (fraction of control steps where TTC falls below a threshold of 2.0\,s).
+Lower friction reduces effective braking distance and is expected to increase close-proximity events even when the goal is reached; these metrics capture safety degradation that SR alone cannot.
+
+\paragraph{Results.}
+\chattodo{Fill in table once v7 and v8 evals complete. Table structure below is the skeleton.}
+
+\begin{table}[t]
+\centering
+\caption{Friction awareness ablation: v7 (friction-aware, \texttt{model\_600}) vs.\ v8 (friction-blind, \texttt{model\_\chattodo{XXX}}).
+Both models use the same vehicle, reward, and scene pool; only the friction training distribution and weather context observation differ.
+All evaluations use invincible mode, 50\,s episodes, and 3.0\,m goal threshold.
+Low-TTC fraction = fraction of agent steps with TTC $<$ 2.0\,s.}
+\label{tab:friction_ablation}
+\small
+\begin{tabular}{llccccc}
+\toprule
+Surface & OD & Model & SR $\uparrow$ & CR $\downarrow$ & Mean TTC (s) $\uparrow$ & Low-TTC frac $\downarrow$ \\
+\midrule
+\multirow{2}{*}{Hard rain (SMA 2\,mm)} & \multirow{2}{*}{Original}
+  & v7 (friction-aware) & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+& & v8 (friction-blind)  & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+\midrule
+\multirow{2}{*}{Dry asphalt} & \multirow{2}{*}{Original}
+  & v7 (friction-aware) & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+& & v8 (friction-blind)  & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+\midrule
+\multirow{2}{*}{Dry asphalt} & \multirow{2}{*}{Random}
+  & v7 (friction-aware) & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+& & v8 (friction-blind)  & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+\midrule
+\multirow{2}{*}{Hard rain (SMA 2\,mm)} & \multirow{2}{*}{Random}
+  & v7 (friction-aware) & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+& & v8 (friction-blind)  & \chattodo{} & \chattodo{} & \chattodo{} & \chattodo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Discussion.}
+\chattodo{Write discussion once results are available. Expected narrative: (1) On dry asphalt both models perform comparably, confirming that friction training does not hurt nominal performance. (2) On hard rain (SMA 2\,mm), v7 retains higher SR and lower low-TTC fraction because it has learned to modulate speed and steering in response to the observed friction coefficient; v8, receiving no friction signal, applies dry-road driving habits to a surface with roughly half the traction, leading to more overshoots, longer stopping distances, and higher collision rates. (3) The TTC safety metrics capture degradation even in cases where both policies eventually reach the goal, revealing that v8's wet-road driving is less comfortable and less safe even when it succeeds.}
+
+% - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+% TRACEABILITY
+% v7 training:
+%   Config:     configs/scene_factory/generated/scene_factory_256scene_random_0414_train_fastgoal_v7_sysid4_weather.yaml
+%   Log dir:    logs/rsl_rl/scene_factory_goal_reaching_roads/2026-04-20_22-54-20_.../
+%   Checkpoint: model_600.pt  (update when training continues)
+%
+% v8 training:
+%   Config:     configs/scene_factory/generated/scene_factory_256scene_random_0414_train_fastgoal_v8_sysid4_noweather.yaml
+%   Log dir:    logs/rsl_rl/scene_factory_goal_reaching_roads/2026-04-22_08-46-26_.../
+%   Checkpoint: model_200.pt  (update to final checkpoint)
+%
+% Eval configs (to be run once checkpoints are finalized):
+%   configs/scene_factory/generated/eval_v7_sysid4_weather_model_600_test64_hard_sma2mm.yaml
+%   configs/scene_factory/generated/eval_v8_sysid4_noweather_model_200_test64_hard_sma2mm.yaml
+%   (dry asphalt and random OD variants: TBD)
+%
+% Scene list (hard rain):
+%   configs/scene_factory/generated/scene_factory_64scene_curated_0326_test_friction_hard_sma2mm.yaml
+% - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+% ---------------------------------------------------------------
 \subsection{Qualitative Analysis}
 \label{sec:qualitative}
 % ---------------------------------------------------------------
@@ -394,3 +505,49 @@ We identify three recurring failure patterns:
 \end{enumerate}
 
 \chattodo{Verify these failure modes against the per-step JSONL logs from the eval run.  Quantify: what fraction of failures falls into each category?}
+
+% ------------------------------------------------------------------------------
+\paragraph{Cross-simulator sensor transfer: current limitation and roadmap.}
+%
+A natural question is whether policies trained in lidar-equipped simulators
+(e.g., MetaDrive~\cite{li2022metadrive}, which uses a 240-ray horizontal scanner)
+can transfer zero-shot to SceneFactory.
+%
+At present, such a comparison is not yet physically meaningful.
+In the current pipeline, roads are generated from Waymo polyline metadata and consumed
+primarily as geometric road-point tensors (centerline/edge samples with type tags) for
+policy observations and reward shaping, rather than as lidar-target lane-boundary
+collision structures.
+%
+Although the stage does contain road segment meshes for rendering, they are thin strips
+and are not configured as explicit curb/guardrail-like boundary obstacles in our training
+setup; in particular, segment collision is typically disabled.
+Therefore, a 2-D scan intended to emulate lane-boundary lidar would not reproduce the
+same semantics as simulators where rays terminate on physical boundary surfaces.
+%
+Constructing a synthetic lidar by projecting centerline offsets onto rays
+(e.g., $d = \|p_{\mathrm{lane}}\| - w/2$) can yield plausible values, but these values are
+not measurements of real collision geometry and should not be treated as physically valid
+range returns.
+
+The prerequisite for meaningful cross-simulator lidar transfer is therefore:
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+  \item Instantiate lane boundaries as extruded mesh prims with rigid-body collision
+        (curbs, guardrails, or thin wall bodies along each lane edge).
+  \item Confirm that vehicle bounding boxes already register hits (they do, as Isaac
+        Sim assigns rigid-body collision to vehicle USD assets by default).
+  \item Replace the current geometric observation group with, or augment it by, a
+        vectorized 2-D range scan computed via Isaac~Lab's \texttt{RayCaster}
+        sensor~\cite{mittal_orbit_2023}, which batches ray--mesh intersection
+        across all agents and worlds in a single Warp kernel call and therefore
+        preserves the throughput advantage of the multi-world architecture.
+\end{enumerate}
+%
+Once these geometry prims are in place, a fair head-to-head comparison becomes
+possible: train a policy on MetaDrive lidar observations, deploy it in SceneFactory
+with an identical 240-ray horizontal scan, and measure zero-shot transfer success
+rate, collision rate, and reward.
+%
+We leave this as a concrete near-term extension; the geometric representation
+upgrade is the only blocking dependency, and the sensor infrastructure
+(\texttt{RayCaster}, vectorized ray batching) already exists in Isaac~Lab.
