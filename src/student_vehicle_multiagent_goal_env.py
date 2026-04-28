@@ -591,6 +591,17 @@ class StudentVehicleMultiAgentGoalEnvCfg(DirectMARLEnvCfg):
     random_steer_test_steering_hold_steps: int = 12
     random_steer_test_seed: int = 123
     invincible: bool = False
+
+    # Dynamics backend: "physx" uses the full articulated rigid-body simulation;
+    # "bicycle" replaces PhysX with a GPU-batched kinematic bicycle model and
+    # writes root poses directly each step (useful for physics-gap ablations).
+    dynamics_mode: str = "physx"
+    bicycle_wheelbase_m: float = 2.6       # distance between front and rear axles
+    bicycle_lr_ratio: float = 0.45         # L_r / wheelbase  (rear-axle to CoM fraction)
+    bicycle_max_speed_mps: float = 15.0    # hard clamp on longitudinal speed
+    bicycle_accel_scale: float = 6.0       # throttle → m/s² gain
+    bicycle_steer_limit_rad: float = 0.52  # max front wheel angle (≈30 deg)
+
     friction_ruler_mode: bool = False
     friction_ruler_mu_values: str = ""  # comma-separated per-env μ, e.g. "1.1,0.6,0.3,0.1"
     friction_ruler_labels: str = ""  # comma-separated per-env labels for video overlay
@@ -866,6 +877,9 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
 
         self._num_agents = len(self._agent_ids)
         self._vehicles = [self.scene.articulations[agent_id] for agent_id in self._agent_ids]
+        self._bicycle_speed_buf = torch.zeros(
+            (self._num_agents, self.num_envs), dtype=torch.float32, device=self.device
+        )
         self._steps_since_reset_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         self._raw_actions = torch.zeros(self._num_agents, self.num_envs, 3, device=self.device)
@@ -2267,7 +2281,113 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
             self._semantic_actions[agent_idx].masked_fill_(done_mask, 0.0)
         self._step_timing_last_ms["pre_physics_ms"] = (perf_counter() - timing_start) * 1000.0
 
+    # ------------------------------------------------------------------
+    # Bicycle-model dynamics (kinematic, GPU-batched)
+    # ------------------------------------------------------------------
+    def _apply_action_bicycle(self):
+        """Replace PhysX articulation with a batched kinematic bicycle model.
+
+        Actions: [throttle ∈ [-1,1], steer ∈ [-1,1], brake ∈ [0,1]]
+        State written back each step via write_root_pose/velocity_to_sim so
+        that observations (which read from root state) remain consistent.
+        """
+        dt = float(self.cfg.sim.dt) * float(self.cfg.decimation)
+        L = float(self.cfg.bicycle_wheelbase_m)
+        lr = L * float(self.cfg.bicycle_lr_ratio)
+        v_max = float(self.cfg.bicycle_max_speed_mps)
+        a_scale = float(self.cfg.bicycle_accel_scale)
+        delta_max = float(self.cfg.bicycle_steer_limit_rad)
+
+        for agent_idx, vehicle in enumerate(self._vehicles):
+            # root state: [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]  (world frame)
+            root_pos = vehicle.data.root_pos_w.clone()          # (num_envs, 3)
+            root_quat = vehicle.data.root_quat_w.clone()         # (num_envs, 4) [qw, qx, qy, qz]
+            root_lin_vel_w = vehicle.data.root_lin_vel_w.clone() # (num_envs, 3)
+
+            actions = self._semantic_actions[agent_idx]  # (num_envs, 3)
+            throttle = actions[:, 0]  # [-1, 1]  (negative = reverse)
+            steer    = actions[:, 1]  # [-1, 1]
+            brake    = actions[:, 2]  # [ 0, 1]
+
+            # Current longitudinal speed — read from persistent buffer, NOT from PhysX.
+            # PhysX zeroes velocity each step (friction + zero joint efforts), so reading
+            # root_lin_vel_b would give ~0 every step and kill all acceleration.
+            speed = self._bicycle_speed_buf[agent_idx]  # (num_envs,)
+
+            # Acceleration from throttle/brake
+            accel = throttle * a_scale - brake * a_scale * 2.0
+            speed_new = (speed + accel * dt).clamp(-v_max, v_max)
+
+            # Steer angle
+            delta = steer * delta_max  # (num_envs,)
+
+            # Slip angle at CoM
+            beta = torch.atan(lr / L * torch.tan(delta))  # (num_envs,)
+
+            # Extract yaw from quaternion — Isaac Lab convention: [qw, qx, qy, qz]
+            qw = root_quat[:, 0]; qx = root_quat[:, 1]
+            qy = root_quat[:, 2]; qz = root_quat[:, 3]
+            yaw = torch.atan2(2.0 * (qw * qz + qx * qy),
+                              1.0 - 2.0 * (qy * qy + qz * qz))  # (num_envs,)
+
+            # Integrate position
+            v_avg = 0.5 * (speed + speed_new)
+            dx = v_avg * torch.cos(yaw + beta) * dt
+            dy = v_avg * torch.sin(yaw + beta) * dt
+            dyaw = v_avg / lr * torch.sin(beta) * dt
+
+            new_x = root_pos[:, 0] + dx
+            new_y = root_pos[:, 1] + dy
+            new_yaw = yaw + dyaw
+
+            # Build new quaternion from updated yaw (pitch/roll stay zero)
+            # Isaac Lab convention: [qw, qx, qy, qz]
+            half_yaw = new_yaw * 0.5
+            new_quat = torch.zeros_like(root_quat)
+            new_quat[:, 0] = torch.cos(half_yaw)   # qw
+            new_quat[:, 3] = torch.sin(half_yaw)   # qz
+
+            # World-frame velocity from speed + new heading
+            new_vx_w = speed_new * torch.cos(new_yaw)
+            new_vy_w = speed_new * torch.sin(new_yaw)
+
+            # Assemble new root state tensors
+            new_pos = root_pos.clone()
+            new_pos[:, 0] = new_x
+            new_pos[:, 1] = new_y
+            # z is kept fixed (no vertical dynamics in bicycle model)
+
+            new_lin_vel = root_lin_vel_w.clone()
+            new_lin_vel[:, 0] = new_vx_w
+            new_lin_vel[:, 1] = new_vy_w
+            new_lin_vel[:, 2] = 0.0
+
+            new_ang_vel = torch.zeros_like(vehicle.data.root_ang_vel_w)
+            new_ang_vel[:, 2] = dyaw / dt  # yaw rate
+
+            # Mask out done agents (keep them frozen)
+            done = self._agent_done_mask[agent_idx]  # (num_envs,)
+            new_pos[done] = root_pos[done]
+            new_quat[done] = root_quat[done]
+            new_lin_vel[done] = root_lin_vel_w[done]
+            new_ang_vel[done] = 0.0
+            speed_new = speed_new.clone()
+            speed_new[done] = 0.0
+
+            # Persist speed for next step (avoids PhysX read-back which gives ~0)
+            self._bicycle_speed_buf[agent_idx] = speed_new
+
+            # Write back into Isaac Sim
+            new_pose = torch.cat([new_pos, new_quat], dim=-1)   # (num_envs, 7)
+            new_vel  = torch.cat([new_lin_vel, new_ang_vel], dim=-1)  # (num_envs, 6)
+            vehicle.write_root_pose_to_sim(new_pose)
+            vehicle.write_root_velocity_to_sim(new_vel)
+
     def _apply_action(self):
+        if self.cfg.dynamics_mode == "bicycle":
+            self._apply_action_bicycle()
+            return
+
         timing_start = perf_counter()
         math_ms = 0.0
         target_submit_ms = 0.0
@@ -3894,6 +4014,8 @@ class StudentVehicleMultiAgentGoalEnv(DirectMARLEnv):
         if len(env_ids) == self.num_envs:
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         self._steps_since_reset_buf[env_ids] = 0
+        # Reset bicycle speed buffer for re-spawned envs
+        self._bicycle_speed_buf[:, env_ids] = 0.0
 
         self._sync_timing_device()
         reset_spawn_prep_start = perf_counter()

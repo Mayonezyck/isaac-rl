@@ -329,6 +329,12 @@ parser.add_argument(
     help="Reset implementation used after episode termination. 'teleport_only' keeps the vehicle pool alive and teleports slots instead of running the heavy reset path.",
 )
 parser.add_argument(
+    "--dynamics_mode",
+    choices=("physx", "bicycle"),
+    default=str(_cfg_value(file_cfg, "env", "dynamics_mode", "physx")),
+    help="Vehicle dynamics backend. 'physx' uses full rigid-body articulation (default). 'bicycle' replaces PhysX with a kinematic bicycle model — useful for physics-gap ablations.",
+)
+parser.add_argument(
     "--test_mode",
     choices=(
         "none",
@@ -337,6 +343,7 @@ parser.add_argument(
         "scene_factory_multiworld_random_steer_test",
         "scene_factory_policy_eval",
         "friction_ruler",
+        "bicycle_sinwave_demo",
     ),
     default=str(_cfg_value(file_cfg, "test", "mode", "none")),
     help=(
@@ -1030,6 +1037,16 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
         if not cfg.use_scene_factory_roads:
             print("[INFO][SceneFactory] scene_factory_policy_eval enables SceneFactory roads.")
         cfg.use_scene_factory_roads = True
+    elif cfg.test_mode == "bicycle_sinwave_demo":
+        if not cfg.use_scene_factory_roads:
+            print("[INFO][SceneFactory] bicycle_sinwave_demo enables SceneFactory roads.")
+        cfg.use_scene_factory_roads = True
+        cfg.dynamics_mode = "bicycle"
+        cfg.invincible = True  # don't terminate on tilt/fall -- bicycle has no roll physics
+        if bool(args_cli.video) and not bool(args_cli.use_fabric):
+            print("[INFO][SceneFactory] bicycle_sinwave_demo enables Fabric for headless video capture.")
+        cfg.sim.use_fabric = True if bool(args_cli.video) else bool(args_cli.use_fabric)
+        print("[INFO][SceneFactory] bicycle_sinwave_demo: dynamics_mode=bicycle, invincible=True", flush=True)
     elif cfg.test_mode == "friction_ruler":
         cfg.use_scene_factory_roads = False
         cfg.friction_ruler_mode = True
@@ -1041,6 +1058,12 @@ def _build_env_cfg() -> StudentVehicleMultiAgentGoalEnvCfg:
             flush=True,
         )
     configure_multi_agent_spaces(cfg, int(args_cli.num_agents_per_env))
+
+    # ── Dynamics mode (bicycle overrides physx for any run mode) ──
+    if str(args_cli.dynamics_mode) == "bicycle" and cfg.test_mode != "bicycle_sinwave_demo":
+        cfg.dynamics_mode = "bicycle"
+        cfg.invincible = True  # no roll/flip physics in bicycle mode
+        print("[INFO][SceneFactory] dynamics_mode=bicycle: kinematic bicycle model active, invincible=True", flush=True)
 
     # ── Scripted action overrides (from config YAML) ──
     cfg.fixed_action = str(_cfg_value(file_cfg, "env", "fixed_action", ""))
@@ -2013,6 +2036,100 @@ def _run_collision_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> 
     )
 
 
+def _run_bicycle_sinwave_demo(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> None:
+    """Run a scripted sin-wave throttle + steering demo using the bicycle dynamics model.
+
+    The action schedule is fully deterministic and hand-authored:
+      - Phase 1 (settle):   0 throttle, 0 steer  — vehicles settle at spawn
+      - Phase 2 (straight): constant throttle, 0 steer
+      - Phase 3 (sinwave):  constant throttle, sin-wave steering with per-agent phase offset
+                            so neighbouring vehicles curve in opposite directions, making the
+                            physics-gap visible (no suspension roll, no lateral weight transfer).
+    """
+    import math as _math
+    import imageio.v2 as imageio
+
+    test_mode_name = "bicycle_sinwave_demo"
+    video_path = run_dir / "videos" / f"{test_mode_name}.mp4"
+    video_step_stride = max(1, int(args_cli.video_step_stride))
+    video_writer = None
+    if bool(args_cli.video):
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = imageio.get_writer(str(video_path), fps=max(1, int(args_cli.video_fps)))
+    video_capture_step_index = 0
+
+    def _write_frame(*, force: bool = False) -> None:
+        nonlocal video_capture_step_index
+        if video_writer is None:
+            return
+        should_capture = force or (video_capture_step_index % video_step_stride == 0)
+        video_capture_step_index += 1
+        if not should_capture:
+            return
+        frame = env.capture_fixed_camera_frame()
+        if frame is not None:
+            video_writer.append_data(frame)
+
+    # ── Scripted schedule parameters ─────────────────────────────────────
+    SETTLE_STEPS   = 20    # idle at spawn, let physics/bicycle settle
+    STRAIGHT_STEPS = 30    # accelerate straight before weaving
+    SINWAVE_STEPS  = 300   # main sinusoidal weave phase
+
+    THROTTLE       = 0.65  # constant forward drive [-1, 1]
+    STEER_AMP      = 0.60  # sin-wave steering amplitude
+    STEER_PERIOD   = 60    # steps per full steering cycle
+
+    num_agents = env._num_agents
+    num_envs   = env.num_envs
+    device     = env.device
+
+    print(
+        f"[INFO][BicycleSinwaveDemo] settle={SETTLE_STEPS} straight={STRAIGHT_STEPS} "
+        f"sinwave={SINWAVE_STEPS} throttle={THROTTLE} steer_amp={STEER_AMP} period={STEER_PERIOD}",
+        flush=True,
+    )
+
+    obs, extras = env.reset()
+    _write_frame(force=True)
+
+    total_steps = SETTLE_STEPS + STRAIGHT_STEPS + SINWAVE_STEPS
+    for step in range(total_steps):
+        if step < SETTLE_STEPS:
+            # --- Phase 1: idle ---
+            throttle = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+            steer    = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+            brake    = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+
+        elif step < SETTLE_STEPS + STRAIGHT_STEPS:
+            # --- Phase 2: straight acceleration ---
+            throttle = torch.full((num_agents, num_envs), THROTTLE,  dtype=torch.float32, device=device)
+            steer    = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+            brake    = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+
+        else:
+            # --- Phase 3: sin-wave weave with per-agent phase offset ---
+            t = step - SETTLE_STEPS - STRAIGHT_STEPS
+            throttle = torch.full((num_agents, num_envs), THROTTLE, dtype=torch.float32, device=device)
+            brake    = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+            steer    = torch.zeros((num_agents, num_envs), dtype=torch.float32, device=device)
+            for agent_idx in range(num_agents):
+                # each agent gets a different phase so they don't all turn together
+                phase_offset = _math.pi * agent_idx / max(1, num_agents)
+                steer_val = STEER_AMP * _math.sin(2.0 * _math.pi * t / STEER_PERIOD + phase_offset)
+                steer[agent_idx, :] = float(steer_val)
+
+        action_dict = _action_dict_from_components(env, throttle, steer, brake)
+        obs, rewards, terminated, time_outs, extras = env.step(action_dict)
+        _write_frame()
+
+        if step % 50 == 0:
+            print(f"[BicycleSinwaveDemo] step {step}/{total_steps}", flush=True)
+
+    if video_writer is not None:
+        video_writer.close()
+        print(f"[INFO][BicycleSinwaveDemo] Video saved → {video_path}", flush=True)
+
+
 def _run_scene_factory_multiworld_random_steer_test(env: StudentVehicleMultiAgentGoalEnv, run_dir: Path) -> None:
     import imageio.v2 as imageio
 
@@ -2522,6 +2639,13 @@ def main():
         finally:
             base_env.close()
             print(f"[INFO] Random steer test finished in {time.time() - start_time:.2f}s")
+        return
+    if str(args_cli.test_mode).strip().lower() == "bicycle_sinwave_demo":
+        try:
+            _run_bicycle_sinwave_demo(base_env, run_dir)
+        finally:
+            base_env.close()
+            print(f"[INFO] Bicycle sinwave demo finished in {time.time() - start_time:.2f}s")
         return
 
     if str(args_cli.shared_policy_mode).strip().lower() == "agent_slots":

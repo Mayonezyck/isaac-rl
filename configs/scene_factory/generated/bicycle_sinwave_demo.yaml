@@ -1,0 +1,90 @@
+# Bicycle sinwave demo
+#
+# Runs a scripted sin-wave throttle + steering sequence using the kinematic bicycle
+# dynamics model (dynamics_mode=bicycle). All PhysX articulation joints are bypassed;
+# root poses are integrated analytically each step and written back into the scene.
+#
+# Purpose: visual sanity-check of the bicycle mode + ablation video showing that
+#          pure-kinematic vehicles behave differently from rigid-body PhysX vehicles
+#          (no suspension, no body roll, no longitudinal weight transfer).
+#
+# The sinwave action schedule is fully hardcoded in _run_bicycle_sinwave_demo():
+#   - Phase 1 (20 steps):  idle at spawn
+#   - Phase 2 (30 steps):  full throttle straight
+#   - Phase 3 (300 steps): throttle=0.65, steer=0.60*sin(2π·t/60 + agent_phase_offset)
+#
+# Launch (headless + video):
+#   PYTHONPATH=. python src/train_student_vehicle_goal_multiagent_rsl_rl.py \
+#     --config configs/scene_factory/generated/bicycle_sinwave_demo.yaml \
+#     --test_mode bicycle_sinwave_demo \
+#     --video --video_fps 30 --video_length 360 \
+#     --video_camera_pose_mode traffic_cam \
+#     --video_traffic_cam_height_m 12.0 \
+#     --video_traffic_cam_distance_m 35.0 \
+#     --video_traffic_cam_azimuth_deg 45.0 \
+#     --headless --no-use_fabric --device cuda:0 2>&1 | tee /tmp/bicycle_sinwave.log
+#
+# Launch (GUI, no video — for interactive inspection):
+#   PYTHONPATH=. python src/train_student_vehicle_goal_multiagent_rsl_rl.py \
+#     --config configs/scene_factory/generated/bicycle_sinwave_demo.yaml \
+#     --test_mode bicycle_sinwave_demo --device cuda:0
+
+app:
+  device: "cuda:0"
+
+env:
+  num_envs: 1
+  num_agents_per_env: 4
+  observation_mode: "goal_reaching"
+  env_spacing: 220.0
+  spawn_height_m: 1.2
+  spawn_yaw_noise_rad: 0.3
+  randomize_spawn_phase: true
+  ground_mode: "plane"
+  use_scene_factory_roads: true
+  reset_mode: "isaac_reset"
+  start_radius_m: 2.0
+  agent_spawn_circle_radius_m: 3.5
+  agent_spawn_jitter_m: 0.2
+  episode_length_s: 60.0
+  decimation: 4
+  apply_runtime_external_wrench: false  # no lateral damping in bicycle mode
+  max_distance_from_origin_m: 50.0
+  invincible: true  # bicycle has no roll — don't terminate on tilt
+
+scene_factory:
+  config_path: "configs/scene_factory/generated/bicycle_sinwave_scene.yaml"
+  world_selection_mode: "random_envs"
+  random_world_seed: 7
+
+observation:
+  weather_context_enable: false
+  road_points_enable: false
+  neighbor_enable: false
+
+reward:
+  mode: "scene_factory_default"
+
+test:
+  mode: "bicycle_sinwave_demo"
+  invincible: true
+
+video:
+  enabled: true
+  fps: 30
+  length: 360
+  name_prefix: "bicycle_sinwave"
+  width: 1280
+  height: 720
+  camera_pose_mode: "top_down"
+  traffic_cam_height_m: 12.0
+  traffic_cam_distance_m: 35.0
+  traffic_cam_look_height_m: 1.0
+  traffic_cam_azimuth_deg: 45.0
+  vehicle_proxy_markers: true
+  vehicle_proxy_z_offset_m: 0.0
+
+runner:
+  experiment_name: "bicycle_sinwave_demo"
+  run_name: "sinwave"
+  max_iterations: 1
