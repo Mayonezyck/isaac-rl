@@ -18,6 +18,10 @@ copy() {
   local src="$SRC/$1" dst="$DST/$1"
   mkdir -p "$(dirname "$dst")"
   cp -r "$src" "$dst"
+  # Strip any hardcoded absolute paths that leaked in from the internal repo
+  if [[ -f "$dst" ]]; then
+    sed -i "s|/home/yz8733/Github/isaac-rl/||g" "$dst"
+  fi
   echo "  [+] $1"
 }
 
