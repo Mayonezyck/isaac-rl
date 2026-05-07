@@ -2512,6 +2512,12 @@ def _run_scene_factory_policy_eval(
         if completed_items
         else 0.0
     )
+    # TTC / DRAC safety metrics — only average over worlds where they were computed (value >= 0)
+    _ttc_worlds = [item for item in completed_items if float(item.get("mean_min_ttc_s", -1.0)) >= 0.0]
+    mean_min_ttc_s = float(sum(float(item["mean_min_ttc_s"]) for item in _ttc_worlds) / max(1, len(_ttc_worlds))) if _ttc_worlds else -1.0
+    near_miss_rate = float(sum(float(item["near_miss_rate"]) for item in _ttc_worlds) / max(1, len(_ttc_worlds))) if _ttc_worlds else -1.0
+    mean_max_drac = float(sum(float(item["mean_max_drac"]) for item in _ttc_worlds) / max(1, len(_ttc_worlds))) if _ttc_worlds else -1.0
+    high_drac_rate = float(sum(float(item["high_drac_rate"]) for item in _ttc_worlds) / max(1, len(_ttc_worlds))) if _ttc_worlds else -1.0
     per_world_summary_sorted = sorted(
         [
             {
@@ -2530,6 +2536,10 @@ def _run_scene_factory_policy_eval(
                 "crash_rate": float(item.get("crash_rate", 0.0)),
                 "mean_final_distance_to_goal": float(item.get("mean_final_distance_to_goal", 0.0)),
                 "episode_length_steps": int(item.get("episode_length_steps", 0)),
+                "mean_min_ttc_s": float(item.get("mean_min_ttc_s", -1.0)),
+                "near_miss_rate": float(item.get("near_miss_rate", -1.0)),
+                "mean_max_drac": float(item.get("mean_max_drac", -1.0)),
+                "high_drac_rate": float(item.get("high_drac_rate", -1.0)),
             }
             for item in completed_items
         ],
@@ -2573,6 +2583,10 @@ def _run_scene_factory_policy_eval(
         "crash_too_far_rate": float(total_crash_too_far / total_spawned_denom),
         "crash_bad_tilt_rate": float(total_crash_bad_tilt / total_spawned_denom),
         "mean_final_distance_to_goal": float(mean_final_distance_to_goal),
+        "mean_min_ttc_s": float(mean_min_ttc_s),
+        "near_miss_rate": float(near_miss_rate),
+        "mean_max_drac": float(mean_max_drac),
+        "high_drac_rate": float(high_drac_rate),
         "steps_path": str(steps_path),
         "worlds_path": str(worlds_path),
         "video_path": str(video_path) if bool(args_cli.video) else "",
@@ -2583,13 +2597,15 @@ def _run_scene_factory_policy_eval(
         "per_world_summary_sorted_by_least_success": per_world_summary_sorted,
     }
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    _ttc_str = f" mean_min_ttc={summary['mean_min_ttc_s']:.2f}s near_miss_rate={summary['near_miss_rate']:.3f} mean_max_drac={summary['mean_max_drac']:.3f}m/s² high_drac_rate={summary['high_drac_rate']:.3f}" if summary['mean_min_ttc_s'] >= 0.0 else ""
     print(
         f"[INFO][SceneFactory] {test_mode_name} finished. "
         f"completed_worlds={summary['completed_world_count']}/{summary['expected_world_count']} "
         f"success_rate={summary['success_rate']:.3f} "
         f"collision_rate={summary['collision_rate']:.3f} "
         f"lane_forbidden_rate={summary['lane_forbidden_rate']:.3f} "
-        f"crash_rate={summary['crash_rate']:.3f}",
+        f"crash_rate={summary['crash_rate']:.3f}"
+        f"{_ttc_str}",
         flush=True,
     )
     if per_world_summary_sorted:
@@ -2662,6 +2678,18 @@ def main():
         env = _maybe_wrap_video(env, capture_env=base_env, run_dir=run_dir)
 
     train_cfg = runner_cfg.to_dict()
+    # Strip any keys in train_cfg["algorithm"] that PPO.__init__ doesn't accept.
+    # Newer IsaacLab versions add fields (e.g. "optimizer") to RslRlPpoAlgorithmCfg
+    # that older rsl_rl PPO does not recognise, causing a TypeError at runner init.
+    if "algorithm" in train_cfg:
+        import inspect as _inspect
+        from rsl_rl.algorithms import PPO as _PPO
+        _ppo_params = set(_inspect.signature(_PPO.__init__).parameters.keys()) - {"self", "policy"}
+        _unknown = {k: v for k, v in train_cfg["algorithm"].items() if k not in _ppo_params and k != "class_name"}
+        if _unknown:
+            print(f"[INFO][SceneFactory] Dropping unknown PPO alg_cfg keys (rsl_rl version mismatch): {list(_unknown.keys())}", flush=True)
+            for k in _unknown:
+                train_cfg["algorithm"].pop(k)
     policy_type = str(_cfg_value(file_cfg, "policy", "type", "mlp")).strip().lower().replace("-", "_")
     if policy_type == "late_fusion":
         _register_scene_factory_custom_policy_classes()
