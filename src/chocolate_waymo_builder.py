@@ -1216,8 +1216,6 @@ class WaymoJsonMiniWorldBuilder:
 
             kept += 1
 
-        print(f"[MiniWorldBuilder] Agents kept={kept} skipped={skipped}")
-
     def respawn_agent_with_goal(
         self,
         *,
@@ -1697,7 +1695,14 @@ class ChocolateBarConstructor:
         if len(json_list) == 0:
             raise ValueError("json_paths is empty")
 
-        for i in range(int(world_count)):
+        import time as _time
+        _n = int(world_count)
+        _t0 = _time.time()
+        _milestones = set(max(0, int(_n * p / 10) - 1) for p in range(1, 11))
+        _milestones.add(0)
+        _milestones.add(_n - 1)
+        print(f"[SceneFactory] Building {_n} worlds...")
+        for i in range(_n):
             root = self._world_root_path(i)
             UsdGeom.Xform.Define(self.stage, root)
 
@@ -1719,6 +1724,10 @@ class ChocolateBarConstructor:
                 origin_center_mode=self.origin_center_mode,
             )
 
+            if i in _milestones:
+                _pct = int(100 * (i + 1) / max(_n, 1))
+                _elapsed = _time.time() - _t0
+                print(f"[SceneFactory]   {i + 1}/{_n} worlds built ({_pct}%)  {_elapsed:.0f}s elapsed")
             json_path = json_list[i % len(json_list)]
             builder.build_from_json(
                 json_path,
@@ -1770,6 +1779,8 @@ class ChocolateBarConstructor:
                 vehicle_trigger_size_m=vehicle_trigger_size_m,
                 vehicle_trigger_script_enable=vehicle_trigger_script_enable,
             )
+        _elapsed = _time.time() - _t0
+        print(f"[SceneFactory] Done. Built {_n} worlds in {_elapsed:.1f}s")
         self.build_global_boundary(
             world_count=int(world_count),
             add_floor=False,
@@ -1778,5 +1789,3 @@ class ChocolateBarConstructor:
             add_perimeter_walls=True,
             add_grid_lines=True,
         )
-
-        print(f"[ChocolateBarConstructor] Built {world_count} worlds under {self.root_container}")
