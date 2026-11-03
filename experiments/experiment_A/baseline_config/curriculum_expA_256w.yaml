@@ -4,8 +4,8 @@ app:
   active_gpu: 1
   physics_gpu: 1
 io:
-  scene_json_dir: /home/yz8733/Github/isaac-rl/experiments/experiment_A/scenes
-  out_dir: /home/yz8733/Github/isaac-rl/_captures_300
+  scene_json_dir: experiments/experiment_A/scenes
+  out_dir: _captures_300
   take_first_k_scenes: 120
   image_prefix: frame_
   image_ext: png

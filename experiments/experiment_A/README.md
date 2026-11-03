@@ -33,7 +33,7 @@ the same PhysX rigid-body dynamics, and the same GPU (RTX PRO 6000 Blackwell).
 
 All commands should be run from the repository root:
 ```bash
-cd /home/yz8733/Github/isaac-rl
+cd isaac-rl   # the repository root
 ```
 
 ### Baseline (gpudrive_chocolate) — runs on `cuda:1`
